@@ -1,4 +1,4 @@
- but very explicit that Zynfer is currently a staged engineering project, so we don’t advertise features # Zynfer
+ # Zynfer
 
 ## From-scratch LLM inference in Zig, specialized for AMD RDNA 4 GPUs.
 
