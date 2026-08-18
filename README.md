@@ -1,6 +1,6 @@
- # Zynfer
+Zynfer
 
-## From-scratch LLM inference in Zig, specialized for AMD RDNA 4 GPUs.
+From-scratch LLM inference in Zig, specialized for AMD RDNA 4 GPUs.
 
 Zynfer is an experimental LLM inference engine written primarily in Zig and built specifically to explore high-performance inference on modern AMD GPUs.
 
@@ -16,7 +16,7 @@ The project is also educational. Every major subsystem is developed in stages, b
 
 ⸻
 
-## Status
+Status
 
 Early development / experimental.
 
@@ -1048,7 +1048,3 @@ What actually has to happen between receiving a token and producing the next one
 The goal is not merely to make an LLM run on an AMD GPU.
 
 The goal is to understand the machine well enough that performance becomes explainable.
-
-I deliberately kept the build/run commands marked illustrative, and the performance sections free of claims. AMD currently documents the R9700 as RDNA 4 / gfx1201, with 64 CUs, 32 GiB GDDR6 and 640 GB/s peak memory bandwidth, and lists it as supported by current ROCm on Linux. 
-
-The NInfer comparison is also deliberately framed as inspiration rather than a port; its current README describes the same specialization philosophy on the other side of the hardware divide: C++/CUDA, RTX 5090, registered Qwen checkpoints, native artifacts, KV-cache optimization and speculative decoding. 
