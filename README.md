@@ -1,8 +1,6 @@
-Yes. I’d make the README ambitious but very explicit that Zynfer is currently a staged engineering project, so we don’t advertise features or performance before they exist.
+ but very explicit that Zynfer is currently a staged engineering project, so we don’t advertise features # Zynfer
 
-Zynfer
-
-From-scratch LLM inference in Zig, specialized for AMD RDNA 4 GPUs.
+## From-scratch LLM inference in Zig, specialized for AMD RDNA 4 GPUs.
 
 Zynfer is an experimental LLM inference engine written primarily in Zig and built specifically to explore high-performance inference on modern AMD GPUs.
 
@@ -18,7 +16,7 @@ The project is also educational. Every major subsystem is developed in stages, b
 
 ⸻
 
-Status
+## Status
 
 Early development / experimental.
 
