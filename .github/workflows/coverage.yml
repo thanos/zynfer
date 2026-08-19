@@ -33,8 +33,6 @@ jobs:
           KCOV_PREFIX: ${{ github.workspace }}/.kcov-prefix
         run: bash scripts/ci/install-kcov.sh
       - name: Run coverage
-        env:
-          PATH: ${{ github.workspace }}/.kcov-prefix/bin:${{ env.PATH }}
         run: bash scripts/ci/coverage.sh
       - name: Upload HTML report
         uses: actions/upload-artifact@v4
