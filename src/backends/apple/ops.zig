@@ -28,9 +28,32 @@ fn download(buf: Buffer, t: Tensor) Error!void {
     @memcpy(dst, buf.f32s()[0..dst.len]);
 }
 
-fn launch1d(gpu: *Gpu, kernel: [:0]const u8, n: u32, bufs: []const *gpu_mod.MtlBuffer) Error!void {
+/// Collect Metal handles only when the Apple backend is compiled in.
+/// On Linux `Buffer.handle` is `void`; that branch is not type-checked.
+fn launchBufs(
+    gpu: *Gpu,
+    kernel: [:0]const u8,
+    grid_x: u32,
+    grid_y: u32,
+    grid_z: u32,
+    tg_x: u32,
+    tg_y: u32,
+    tg_z: u32,
+    bufs: []const Buffer,
+    params: []const u8,
+) Error!void {
+    if (!have_apple) return error.AppleUnavailable;
+    if (have_apple) {
+        var tmp: [8]*gpu_mod.MtlBuffer = undefined;
+        if (bufs.len > tmp.len) return error.Unsupported;
+        for (bufs, 0..) |b, i| tmp[i] = b.handle;
+        try gpu.launch(kernel, grid_x, grid_y, grid_z, tg_x, tg_y, tg_z, tmp[0..bufs.len], params);
+    }
+}
+
+fn launch1d(gpu: *Gpu, kernel: [:0]const u8, n: u32, bufs: []const Buffer) Error!void {
     const tg = gpu.threadgroup1d();
-    try gpu.launch(kernel, n, 1, 1, tg, 1, 1, bufs, std.mem.asBytes(&n));
+    try launchBufs(gpu, kernel, n, 1, 1, tg, 1, 1, bufs, std.mem.asBytes(&n));
 }
 
 pub fn add(gpu: *Gpu, dst: Tensor, a: Tensor, b: Tensor) Error!void {
@@ -41,7 +64,7 @@ pub fn add(gpu: *Gpu, dst: Tensor, a: Tensor, b: Tensor) Error!void {
     defer bb.deinit();
     var cb = try gpu.allocShared(dst.data.len);
     defer cb.deinit();
-    try launch1d(gpu, "add_f32", n, &.{ ab.handle, bb.handle, cb.handle });
+    try launch1d(gpu, "add_f32", n, &.{ ab, bb, cb });
     try download(cb, dst);
 }
 
@@ -53,7 +76,7 @@ pub fn mul(gpu: *Gpu, dst: Tensor, a: Tensor, b: Tensor) Error!void {
     defer bb.deinit();
     var cb = try gpu.allocShared(dst.data.len);
     defer cb.deinit();
-    try launch1d(gpu, "mul_f32", n, &.{ ab.handle, bb.handle, cb.handle });
+    try launch1d(gpu, "mul_f32", n, &.{ ab, bb, cb });
     try download(cb, dst);
 }
 
@@ -65,7 +88,7 @@ pub fn siluMul(gpu: *Gpu, dst: Tensor, gate: Tensor, up: Tensor) Error!void {
     defer ub.deinit();
     var ob = try gpu.allocShared(dst.data.len);
     defer ob.deinit();
-    try launch1d(gpu, "silu_mul_f32", n, &.{ gb.handle, ub.handle, ob.handle });
+    try launch1d(gpu, "silu_mul_f32", n, &.{ gb, ub, ob });
     try download(ob, dst);
 }
 
@@ -87,7 +110,7 @@ pub fn rmsNorm(gpu: *Gpu, dst: Tensor, x: Tensor, weight: Tensor, eps: f32) Erro
     defer yb.deinit();
     const params = RmsNormParams{ .rows = rows, .cols = cols, .eps = eps };
     const tg = gpu.threadgroup1d();
-    try gpu.launch("rmsnorm_f32", tg, rows, 1, tg, 1, 1, &.{ xb.handle, wb.handle, yb.handle }, std.mem.asBytes(&params));
+    try launchBufs(gpu, "rmsnorm_f32", tg, rows, 1, tg, 1, 1, &.{ xb, wb, yb }, std.mem.asBytes(&params));
     try download(yb, dst);
 }
 
@@ -106,7 +129,7 @@ pub fn softmax(gpu: *Gpu, dst: Tensor, x: Tensor) Error!void {
     defer yb.deinit();
     const params = SoftmaxParams{ .rows = rows, .cols = cols };
     const tg = gpu.threadgroup1d();
-    try gpu.launch("softmax_f32", tg, rows, 1, tg, 1, 1, &.{ xb.handle, yb.handle }, std.mem.asBytes(&params));
+    try launchBufs(gpu, "softmax_f32", tg, rows, 1, tg, 1, 1, &.{ xb, yb }, std.mem.asBytes(&params));
     try download(yb, dst);
 }
 
@@ -128,7 +151,7 @@ pub fn matmul(gpu: *Gpu, c: Tensor, a: Tensor, b: Tensor) Error!void {
     defer cb.deinit();
     const params = MatmulParams{ .m = m, .n = n, .k = k };
     const tg: u32 = 16;
-    try gpu.launch("matmul_f32", n, m, 1, tg, tg, 1, &.{ ab.handle, bb.handle, cb.handle }, std.mem.asBytes(&params));
+    try launchBufs(gpu, "matmul_f32", n, m, 1, tg, tg, 1, &.{ ab, bb, cb }, std.mem.asBytes(&params));
     try download(cb, c);
 }
 
@@ -143,7 +166,7 @@ pub fn matvec(gpu: *Gpu, y: Tensor, a: Tensor, x: Tensor) Error!void {
     defer yb.deinit();
     const params = MatmulParams{ .m = m, .n = 1, .k = k };
     const tg = gpu.threadgroup1d();
-    try gpu.launch("matvec_f32", m, 1, 1, tg, 1, 1, &.{ ab.handle, xb.handle, yb.handle }, std.mem.asBytes(&params));
+    try launchBufs(gpu, "matvec_f32", m, 1, 1, tg, 1, 1, &.{ ab, xb, yb }, std.mem.asBytes(&params));
     try download(yb, y);
 }
 
@@ -171,7 +194,7 @@ pub fn rope(gpu: *Gpu, x: Tensor, pos0: usize, theta: f32) Error!void {
     };
     const pairs = tokens * n_heads * (head_dim / 2);
     const tg = gpu.threadgroup1d();
-    try gpu.launch("rope_f32", pairs, 1, 1, tg, 1, 1, &.{xb.handle}, std.mem.asBytes(&params));
+    try launchBufs(gpu, "rope_f32", pairs, 1, 1, tg, 1, 1, &.{xb}, std.mem.asBytes(&params));
     try download(xb, x);
 }
 

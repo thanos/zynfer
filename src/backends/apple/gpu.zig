@@ -256,6 +256,7 @@ pub fn capabilities() backend_mod.Capabilities {
 }
 
 test "Apple GPU create/run/destroy add kernel" {
+    if (comptime !have_apple) return error.SkipZigTest;
     if (skipAppleGpuTests()) return error.SkipZigTest;
     var gpu = try Gpu.init();
     defer gpu.deinit();
@@ -275,7 +276,9 @@ test "Apple GPU create/run/destroy add kernel" {
     for (as, 0..) |*v, i| v.* = @floatFromInt(i);
     for (bs) |*v| v.* = 1;
     const count: u32 = @intCast(n);
-    try gpu.launch("add_f32", count, 1, 1, 8, 1, 1, &.{ a.handle, b.handle, cbuf.handle }, std.mem.asBytes(&count));
+    if (have_apple) {
+        try gpu.launch("add_f32", count, 1, 1, 8, 1, 1, &.{ a.handle, b.handle, cbuf.handle }, std.mem.asBytes(&count));
+    }
     try std.testing.expectEqual(@as(f32, 1), cs[0]);
     try std.testing.expectEqual(@as(f32, 8), cs[7]);
 }
