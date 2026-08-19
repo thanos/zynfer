@@ -6,7 +6,8 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
 if ! command -v kcov >/dev/null 2>&1; then
-    echo "kcov is required. On Ubuntu: sudo apt-get install -y kcov" >&2
+    echo "kcov is required. Ubuntu 24.04 has no apt package; build it with:" >&2
+    echo "  bash scripts/ci/install-kcov.sh" >&2
     exit 1
 fi
 

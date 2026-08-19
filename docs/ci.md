@@ -41,8 +41,13 @@ Metal-vs-CPU when the GPU path is enabled.
 
 ## Coverage
 
+Ubuntu 24.04 (`ubuntu-latest`) does not ship `kcov` in apt. CI builds
+[kcov v43](https://github.com/SimonKagstrom/kcov) from source via
+`scripts/ci/install-kcov.sh` and caches `.kcov-prefix`.
+
 ```bash
-# Linux, kcov installed
+# Linux
+bash scripts/ci/install-kcov.sh
 bash scripts/ci/coverage.sh
 ```
 

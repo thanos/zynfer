@@ -22,9 +22,19 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+      - uses: actions/cache@v4
+        id: cache-kcov
+        with:
+          path: .kcov-prefix
+          key: kcov-v43-${{ runner.os }}-${{ runner.arch }}
       - name: Install kcov
-        run: sudo apt-get update && sudo apt-get install -y kcov
+        env:
+          KCOV_VERSION: "43"
+          KCOV_PREFIX: ${{ github.workspace }}/.kcov-prefix
+        run: bash scripts/ci/install-kcov.sh
       - name: Run coverage
+        env:
+          PATH: ${{ github.workspace }}/.kcov-prefix/bin:${{ env.PATH }}
         run: bash scripts/ci/coverage.sh
       - name: Upload HTML report
         uses: actions/upload-artifact@v4
