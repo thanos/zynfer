@@ -1,0 +1,16 @@
+.{
+    .name = .zynfer,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0xde9bb5ea32e83383,
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "tests",
+        "scripts",
+        "docs",
+        "README.md",
+    },
+}

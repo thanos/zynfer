@@ -1,0 +1,30 @@
+# Zig
+zig-out/
+.zig-cache/
+zig-cache/
+
+# Editor / OS
+.DS_Store
+*.swp
+*~
+
+# Local environment
+.env
+.env.*
+
+# Model artifacts and checkpoints (never commit weights)
+models/
+*.safetensors
+*.zynfer
+*.sym
+
+# Local profiler dumps
+*.csv
+*.json
+prof/
+trace/
+
+# Keep committed templates; ignore ad-hoc local captures
+bench/results/local/
+/baoulo/
+.tool-versions

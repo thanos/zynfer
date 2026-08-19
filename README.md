@@ -18,7 +18,9 @@ The project is also educational. Every major subsystem is developed in stages, b
 
 ## Status
 
-**Early development / experimental.**
+**Stage 0 — development environment.**
+
+The Zig repository, HIP device enumeration, environment report, and the first two tutorials exist. Transformer code does not.
 
 Zynfer is being built from first principles. The initial milestones intentionally prioritize understanding and numerical correctness over headline benchmark numbers.
 
@@ -998,27 +1000,43 @@ The development laptop does not need an AMD GPU.
 
 ## Building
 
-> **Not available yet.**
-
-The build instructions will be added once the Stage 0 toolchain and ROCm versions are pinned.
-
-The intended experience is eventually approximately:
+Pinned Zig version: **0.16.0** (see `.tool-versions`).
 
 ```bash
+# host-only diagnostic (development laptop, no AMD GPU required)
+./scripts/check-env.sh
 zig build
 zig build test
 zig build run
+
+# Linux GPU host with ROCm: HIP is linked automatically when found
+zig build -Dhip=on -Dhip-path=/opt/rocm
+zig build test
+zig build run -- gpu
 ```
 
-GPU kernel compilation may additionally invoke the ROCm compiler toolchain.
+`-Dhip=auto` (the default) links HIP when `HIP_PATH`, `ROCM_PATH`, or
+`/opt/rocm` contains `include/hip/hip_runtime_api.h`. `-Dhip=off` forces
+a host-only binary.
+
+GPU kernel compilation is not part of Stage 0. Later stages may invoke
+the ROCm/HIP compiler for AMD code objects.
 
 ---
 
 ## Running
 
-> **Not available yet.**
+Stage 0 CLI:
 
-The eventual CLI is expected to resemble:
+```bash
+zig build run              # environment report + GPU enumeration
+zig build run -- env
+zig build run -- gpu
+zig build bench            # time HIP property queries
+./scripts/check-env.sh     # shell diagnostic, does not require a build
+```
+
+The eventual inference CLI is expected to resemble:
 
 ```bash
 zynfer run models/qwen3-0.6b.zynfer \
@@ -1026,56 +1044,45 @@ zynfer run models/qwen3-0.6b.zynfer \
   --max-new 128
 ```
 
-Benchmarking:
-
-```bash
-zynfer bench models/qwen3-0.6b.zynfer
-```
-
-Profiling:
-
-```bash
-zynfer run models/qwen3-0.6b.zynfer \
-  --prompt "Hello" \
-  --profile
-```
-
-These interfaces are illustrative until implemented.
+That interface is not implemented yet.
 
 ---
 
 ## Repository Layout
-
-The intended structure is approximately:
 
 ```text
 zynfer/
 ├── build.zig
 ├── build.zig.zon
 ├── README.md
+├── scripts/check-env.sh
 ├── docs/
 │   ├── architecture.md
+│   ├── roadmap.md
 │   ├── benchmarks.md
+│   ├── numerics.md
 │   ├── hardware-r9700.md
 │   └── tutorials/
+│       ├── 00-development-environment.md
+│       └── 01-how-a-gpu-executes.md
 ├── src/
 │   ├── main.zig
+│   ├── root.zig
 │   ├── hip.zig
+│   ├── hip_probe.c
 │   ├── device.zig
-│   ├── tensor.zig
-│   ├── model.zig
-│   ├── tokenizer.zig
-│   ├── sampling.zig
-│   ├── kv_cache.zig
-│   └── engine.zig
-├── kernels/
-│   ├── include/
-│   ├── src/
-│   └── generated/
+│   └── env_report.zig
+├── kernels/                 # empty until Stage 2
 ├── tools/
 ├── tests/
-└── bench/
+│   ├── unit/
+│   ├── numerical/
+│   └── integration/
+└── bench/results/
 ```
+
+Later stages add `tensor.zig`, `model.zig`, `tokenizer.zig`, `kv_cache.zig`,
+and `engine.zig`. They are omitted until they have a job.
 
 This will evolve as implementation reveals the correct boundaries.
 
@@ -1120,7 +1127,7 @@ LLVM target    gfx1201
 GPU runtime    ROCm / HIP
 Bootstrap LLM  Qwen3-0.6B
 Execution      Single GPU
-Status         Early development
+Status         Stage 0 — environment
 ```
 
 ---
