@@ -9,6 +9,14 @@ const backend_mod = @import("../../runtime/backend.zig");
 
 pub const have_apple = build_options.have_apple;
 
+/// CI macOS runners may lack the Metal shader toolchain. Tests skip when this
+/// is set; production `Gpu.init` still attempts a real device.
+pub fn skipAppleGpuTests() bool {
+    if (!have_apple) return true;
+    const v = std.process.Environ.getPosix(std.testing.environ, "ZYNFER_SKIP_APPLE_GPU") orelse return false;
+    return std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true");
+}
+
 pub const Error = error{
     AppleUnavailable,
     NoDevice,
@@ -248,7 +256,7 @@ pub fn capabilities() backend_mod.Capabilities {
 }
 
 test "Apple GPU create/run/destroy add kernel" {
-    if (!have_apple) return error.SkipZigTest;
+    if (skipAppleGpuTests()) return error.SkipZigTest;
     var gpu = try Gpu.init();
     defer gpu.deinit();
     try std.testing.expect(gpu.features.unified_memory);

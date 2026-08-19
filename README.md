@@ -1014,6 +1014,8 @@ Pinned Zig version: **0.16.0** (see `.tool-versions`).
 ./scripts/check-env.sh
 zig build
 zig build test
+zig build integration
+zig build ci            # fmt + test + integration + autodoc
 zig build run
 
 # Linux GPU host with ROCm: HIP is linked automatically when found
@@ -1046,8 +1048,13 @@ zig build run -- caps
 zig build run -- backends
 zig build ops-bench        # CPU vs Apple Metal op timings
 zig build bench            # time HIP property queries
+zig build integration      # CLI contracts against the installed binary
+zig build docs             # Zig autodoc → zig-out/docs/api
 ./scripts/check-env.sh     # shell diagnostic, does not require a build
 ```
+
+CI workflows (format, tests, coverage, benches, docs) are described in
+`docs/ci.md`.
 
 `--backend cpu|apple|amd-hip` or `ZYNFER_BACKEND` forces a backend.
 Unknown names exit 2.
@@ -1068,13 +1075,18 @@ That interface is not implemented yet.
 
 ```text
 zynfer/
+├── .github/workflows/     # CI, coverage, bench, docs
 ├── build.zig
 ├── build.zig.zon
 ├── README.md
-├── scripts/check-env.sh
+├── scripts/
+│   ├── check-env.sh
+│   ├── build-docs-site.sh
+│   └── ci/
 ├── docs/
 │   ├── architecture.md
 │   ├── apple-backend.md
+│   ├── ci.md
 │   ├── roadmap.md
 │   ├── benchmarks.md
 │   ├── numerics.md

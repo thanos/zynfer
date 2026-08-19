@@ -87,7 +87,10 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Time HIP device enumeration");
     bench_step.dependOn(&bench_cmd.step);
 
+    const install_tests = b.option(bool, "install-tests", "Install test binaries (for kcov)") orelse false;
+
     const unit_tests = b.addTest(.{
+        .name = "test-unit",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/root.zig"),
             .target = target,
@@ -99,6 +102,7 @@ pub fn build(b: *std.Build) void {
     configureApple(b, unit_tests.root_module, have_apple);
 
     const numerical_tests = b.addTest(.{
+        .name = "test-numerical",
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/numerical/ops.zig"),
             .target = target,
@@ -110,6 +114,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const smoke_tests = b.addTest(.{
+        .name = "test-smoke",
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/unit/smoke.zig"),
             .target = target,
@@ -120,13 +125,96 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    const integration_tests = b.addTest(.{
+        .name = "test-integration",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/cli.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zynfer", .module = zynfer_mod },
+            },
+        }),
+    });
+
+    if (install_tests) {
+        b.installArtifact(unit_tests);
+        b.installArtifact(numerical_tests);
+        b.installArtifact(smoke_tests);
+        b.installArtifact(integration_tests);
+    }
+
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const run_smoke_tests = b.addRunArtifact(smoke_tests);
     const run_numerical_tests = b.addRunArtifact(numerical_tests);
-    const test_step = b.step("test", "Run unit, smoke, and numerical tests");
+    const test_step = b.step("test", "Run unit, smoke, and numerical regression tests");
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_smoke_tests.step);
     test_step.dependOn(&run_numerical_tests.step);
+
+    const run_integration = b.addRunArtifact(integration_tests);
+    run_integration.step.dependOn(b.getInstallStep());
+    run_integration.setEnvironmentVariable("ZYNFER_BIN", b.getInstallPath(.bin, "zynfer"));
+
+    const help_run = b.addRunArtifact(exe);
+    help_run.addArg("help");
+    help_run.expectStdOutMatch("Usage:");
+    help_run.expectExitCode(0);
+
+    const env_ok = b.addRunArtifact(exe);
+    env_ok.addArg("env");
+    env_ok.expectStdOutMatch("Zig version:");
+    env_ok.expectExitCode(0);
+
+    const caps_cpu = b.addRunArtifact(exe);
+    caps_cpu.addArg("caps");
+    caps_cpu.addArg("--backend");
+    caps_cpu.addArg("cpu");
+    caps_cpu.expectStdOutMatch("requested backend: cpu");
+    caps_cpu.expectExitCode(0);
+
+    const bad_backend = b.addRunArtifact(exe);
+    bad_backend.addArg("caps");
+    bad_backend.addArg("--backend");
+    bad_backend.addArg("cuda");
+    bad_backend.expectExitCode(2);
+
+    const integration_step = b.step("integration", "Run CLI integration tests");
+    integration_step.dependOn(&run_integration.step);
+    integration_step.dependOn(&help_run.step);
+    integration_step.dependOn(&env_ok.step);
+    integration_step.dependOn(&caps_cpu.step);
+    integration_step.dependOn(&bad_backend.step);
+
+    const docs_lib = b.addLibrary(.{
+        .name = "zynfer",
+        .root_module = zynfer_mod,
+        .linkage = .static,
+    });
+    const install_docs = b.addInstallDirectory(.{
+        .source_dir = docs_lib.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "docs/api",
+    });
+    const docs_step = b.step("docs", "Generate Zig autodoc into zig-out/docs/api");
+    docs_step.dependOn(&install_docs.step);
+
+    const fmt_step = b.step("fmt", "Check Zig formatting");
+    const fmt_cmd = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "fmt",
+        "--check",
+        "build.zig",
+        "src",
+        "tests",
+    });
+    fmt_step.dependOn(&fmt_cmd.step);
+
+    const ci_step = b.step("ci", "Local stand-in for CI: fmt, tests, integration, docs");
+    ci_step.dependOn(fmt_step);
+    ci_step.dependOn(test_step);
+    ci_step.dependOn(integration_step);
+    ci_step.dependOn(docs_step);
 }
 
 fn configureApple(b: *std.Build, mod: *std.Build.Module, have_apple: bool) void {
@@ -137,7 +225,7 @@ fn configureApple(b: *std.Build, mod: *std.Build.Module, have_apple: bool) void 
     mod.linkFramework("Metal", .{});
     mod.addCSourceFile(.{
         .file = b.path("src/backends/apple/bridge.m"),
-        .flags = &.{ "-fobjc-arc" },
+        .flags = &.{"-fobjc-arc"},
         .language = .objective_c,
     });
 }

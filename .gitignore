@@ -21,6 +21,7 @@ models/
 # Local profiler dumps
 *.csv
 *.json
+!bench/baselines/*.json
 prof/
 trace/
 

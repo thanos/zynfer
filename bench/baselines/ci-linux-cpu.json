@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "expect_backend": "cpu",
+  "require_apple_null": true,
+  "comment": "Sanity ceilings for GitHub-hosted ubuntu-latest, ReleaseSafe. Not a Mac measurement. Tighten from CI artifacts once they are stable.",
+  "ops": {
+    "add_f32_4096": { "cpu_ns_max": 50000000 },
+    "silu_mul_f32_4096": { "cpu_ns_max": 50000000 },
+    "matvec_f32_256x256": { "cpu_ns_max": 200000000 },
+    "matmul_f32_32x64x64": { "cpu_ns_max": 200000000 }
+  }
+}

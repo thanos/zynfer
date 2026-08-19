@@ -213,7 +213,7 @@ fn fillIota(t: Tensor) !void {
 }
 
 test "Metal ops match CPU reference" {
-    if (!have_apple) return error.SkipZigTest;
+    if (gpu_mod.skipAppleGpuTests()) return error.SkipZigTest;
     var gpu = try Gpu.init();
     defer gpu.deinit();
     const gpa = std.testing.allocator;
@@ -293,7 +293,7 @@ test "Metal ops match CPU reference" {
 }
 
 test "tiny SwiGLU residual matches CPU" {
-    if (!have_apple) return error.SkipZigTest;
+    if (gpu_mod.skipAppleGpuTests()) return error.SkipZigTest;
     var gpu = try Gpu.init();
     defer gpu.deinit();
     const gpa = std.testing.allocator;
