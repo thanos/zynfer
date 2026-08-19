@@ -1,0 +1,135 @@
+//! Contiguous host tensor used by the CPU reference and as a CPU-visible
+//! staging view for accelerator tests.
+//!
+//! This is not NumPy. Rank is capped. Views with arbitrary strides are not
+//! implemented; kernels that need a layout must receive a contiguous buffer
+//! or an explicit stride pair they understand.
+
+const std = @import("std");
+const DType = @import("dtype.zig").DType;
+const byteSize = @import("dtype.zig").byteSize;
+
+pub const max_rank: usize = 4;
+
+pub const TensorError = error{
+    InvalidShape,
+    Overflow,
+    RankTooHigh,
+    DTypeMismatch,
+    ShapeMismatch,
+    NotContiguous,
+    NotF32,
+    OutOfMemory,
+};
+
+pub const Tensor = struct {
+    dtype: DType,
+    rank: u8,
+    shape: [max_rank]usize,
+    /// Element strides in row-major contiguous layout.
+    strides: [max_rank]usize,
+    data: []u8,
+    allocator: std.mem.Allocator,
+
+    pub fn alloc(allocator: std.mem.Allocator, dtype: DType, shape: []const usize) TensorError!Tensor {
+        if (shape.len == 0 or shape.len > max_rank) return error.RankTooHigh;
+        var t = Tensor{
+            .dtype = dtype,
+            .rank = @intCast(shape.len),
+            .shape = .{ 0, 0, 0, 0 },
+            .strides = .{ 0, 0, 0, 0 },
+            .data = &.{},
+            .allocator = allocator,
+        };
+        for (shape, 0..) |extent, i| {
+            if (extent == 0) return error.InvalidShape;
+            t.shape[i] = extent;
+        }
+        fillContiguousStrides(&t);
+        const n = t.numel() catch return error.Overflow;
+        const bytes = byteSize(dtype, n) catch return error.Overflow;
+        t.data = allocator.alloc(u8, bytes) catch return error.OutOfMemory;
+        @memset(t.data, 0);
+        return t;
+    }
+
+    pub fn deinit(self: *Tensor) void {
+        if (self.data.len != 0) self.allocator.free(self.data);
+        self.data = &.{};
+    }
+
+    pub fn numel(self: Tensor) error{Overflow}!usize {
+        var n: usize = 1;
+        var i: u8 = 0;
+        while (i < self.rank) : (i += 1) {
+            n = try std.math.mul(usize, n, self.shape[i]);
+        }
+        return n;
+    }
+
+    pub fn dim(self: Tensor, axis: usize) TensorError!usize {
+        if (axis >= self.rank) return error.InvalidShape;
+        return self.shape[axis];
+    }
+
+    pub fn isContiguous(self: Tensor) bool {
+        var expected: usize = 1;
+        var i: usize = self.rank;
+        while (i > 0) {
+            i -= 1;
+            if (self.strides[i] != expected) return false;
+            expected *= self.shape[i];
+        }
+        return true;
+    }
+
+    pub fn f32s(self: Tensor) TensorError![]f32 {
+        if (self.dtype != .f32) return error.NotF32;
+        if (!self.isContiguous()) return error.NotContiguous;
+        const n = self.numel() catch return error.Overflow;
+        return @as([*]f32, @ptrCast(@alignCast(self.data.ptr)))[0..n];
+    }
+
+    pub fn f32sConst(self: Tensor) TensorError![]const f32 {
+        return self.f32s();
+    }
+
+    pub fn requireF32Contiguous(self: Tensor, expected: []const usize) TensorError![]f32 {
+        if (self.dtype != .f32) return error.NotF32;
+        if (!self.isContiguous()) return error.NotContiguous;
+        if (self.rank != expected.len) return error.ShapeMismatch;
+        for (expected, 0..) |d, i| {
+            if (self.shape[i] != d) return error.ShapeMismatch;
+        }
+        return self.f32s();
+    }
+
+    pub fn fillF32(self: Tensor, value: f32) TensorError!void {
+        const xs = try self.f32s();
+        @memset(xs, value);
+    }
+};
+
+fn fillContiguousStrides(t: *Tensor) void {
+    var acc: usize = 1;
+    var i: usize = t.rank;
+    while (i > 0) {
+        i -= 1;
+        t.strides[i] = acc;
+        acc *= t.shape[i];
+    }
+}
+
+test "contiguous f32 tensor round-trip" {
+    var t = try Tensor.alloc(std.testing.allocator, .f32, &.{ 2, 3 });
+    defer t.deinit();
+    try std.testing.expectEqual(@as(usize, 6), try t.numel());
+    try std.testing.expect(t.isContiguous());
+    const xs = try t.f32s();
+    xs[5] = 1.5;
+    try std.testing.expectEqual(@as(f32, 1.5), xs[5]);
+}
+
+test "zero dimension is rejected" {
+    try std.testing.expectError(error.InvalidShape, Tensor.alloc(std.testing.allocator, .f32, &.{ 2, 0 }));
+}

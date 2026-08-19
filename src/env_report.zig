@@ -14,6 +14,7 @@ pub const Report = struct {
     compile_os: []const u8,
     compile_arch: []const u8,
     hip_linked: bool,
+    apple_compiled: bool,
     hip_path: []const u8,
     rocm_path: []const u8,
     rocm_version: []const u8,
@@ -47,6 +48,7 @@ pub fn collect(host: util.Host) !Report {
         .compile_os = @tagName(builtin.os.tag),
         .compile_arch = @tagName(builtin.cpu.arch),
         .hip_linked = build_options.have_hip,
+        .apple_compiled = build_options.have_apple,
         .hip_path = if (build_options.hip_path.len == 0) "not found" else build_options.hip_path,
         .rocm_path = "not found",
         .rocm_version = "not found",
@@ -163,6 +165,11 @@ pub fn print(writer: *std.Io.Writer, report: Report) !void {
     try writer.print("  Zig path:         {s}\n", .{report.zig_path});
     try writer.print("  clang path:       {s}\n", .{report.clang_path});
     try writer.print("  clang version:    {s}\n\n", .{report.clang_version});
+
+    try writer.print("backends compiled into this binary\n", .{});
+    try writer.print("  CPU reference:    yes\n", .{});
+    try writer.print("  Apple Metal:      {s}\n", .{if (report.apple_compiled) "yes" else "no"});
+    try writer.print("  AMD HIP:          {s}\n\n", .{if (report.hip_linked) "yes (probe)" else "no"});
 
     try writer.print("ROCm / HIP\n", .{});
     try writer.print("  HIP linked:       {s}\n", .{if (report.hip_linked) "yes" else "no"});

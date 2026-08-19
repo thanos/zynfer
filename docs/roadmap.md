@@ -6,16 +6,23 @@ when correctness is unresolved.
 
 | Stage | Title | Status |
 | --- | --- | --- |
-| 0 | Reproducible development environment | **in progress / current** |
+| 0 | Reproducible development environment | **done on the Mac and HIP-absent hosts** |
+| Apple-1 | Backend-neutral types + CPU oracle | **done** |
+| Apple-2 | Metal device / shared buffers / trivial kernel | **done** |
+| Apple-3 | Metal LLM ops vs CPU + SwiGLU fixture | **done** |
+| Apple-4 | Prefill/decode + KV cache | deferred (no model) |
+| Apple-5 | simdgroup_matrix / quantized GEMM | deferred |
+| Apple-6 | Fusion / fewer waits | deferred |
+| Apple-7 | SME / Core ML experiments | deferred |
 | 1 | Zig meets HIP (alloc, copy, streams) | not started |
 | 2 | First AMD kernel (vector add) | not started |
-| 3 | Tensor representation and memory planning | not started |
-| 4 | Reductions, softmax, RMSNorm | not started |
-| 5 | GEMV and GEMM | not started |
-| 6 | SiLU and SwiGLU | not started |
-| 7 | RoPE | not started |
-| 8 | Attention from scratch | not started |
-| 9 | One complete transformer block | not started |
+| 3 | Tensor representation and memory planning | partial (host tensors exist; no GPU planner) |
+| 4 | Reductions, softmax, RMSNorm | CPU + Metal f32; not HIP |
+| 5 | GEMV and GEMM | CPU + Metal f32; not HIP |
+| 6 | SiLU and SwiGLU | CPU + Metal f32; not HIP |
+| 7 | RoPE | CPU + Metal f32; not HIP |
+| 8 | Attention from scratch | CPU only |
+| 9 | One complete transformer block | not started (SwiGLU residual fixture only) |
 | 10 | Checkpoint inspection and artifact compiler | not started |
 | 11 | Full Qwen3-0.6B forward pass | not started |
 | 12 | Tokenizer and sampling | not started |
@@ -48,5 +55,9 @@ when correctness is unresolved.
 
 ## Current rule
 
-Finish Stage 0, then stop. Stage 1 is GPU allocation and copies, not
-kernels and not transformers.
+The AMD curriculum still starts at Stage 1 (HIP alloc/copy) on the
+R9700. The development laptop additionally has a CPU oracle and a
+naive Apple Metal op suite. Do not start a full Qwen forward pass until
+the Metal op suite stays green and a checkpoint loader exists.
+
+See `docs/apple-backend.md` for Apple-specific deferred work.

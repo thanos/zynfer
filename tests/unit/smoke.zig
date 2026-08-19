@@ -1,11 +1,14 @@
 const std = @import("std");
 const zynfer = @import("zynfer");
 
-test "library exports Stage 0 surface" {
+test "library exports runtime and backends" {
     _ = zynfer.hip;
     _ = zynfer.device;
     _ = zynfer.env;
     _ = zynfer.Device;
+    _ = zynfer.cpu.ops;
+    _ = zynfer.apple.ops;
+    _ = zynfer.backend;
 }
 
 test "HIP error formatting has no stale state initially" {

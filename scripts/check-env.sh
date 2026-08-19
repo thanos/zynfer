@@ -90,5 +90,18 @@ if have lspci; then
     lspci 2>/dev/null | grep -i -E 'vga|display|amd' | sed 's/^/  /' || true
 fi
 echo
+echo "Apple / Metal"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    print_kv "Metal.framework:" "$(if [[ -d /System/Library/Frameworks/Metal.framework ]]; then echo present; else echo missing; fi)"
+    if xcrun -sdk macosx metal -v >/dev/null 2>&1; then
+        print_kv "metal compiler:" "$(xcrun -sdk macosx metal -v 2>&1 | head -n1)"
+    else
+        print_kv "metal compiler:" "not available (xcodebuild -downloadComponent MetalToolchain)"
+    fi
+else
+    print_kv "Metal.framework:" "n/a (not macOS)"
+fi
+echo
 echo "expected target: AMD Radeon AI PRO R9700 / gfx1201"
+echo "Apple development path: Metal baseline ops on the local M-series GPU"
 echo "this script does not require Zig; use 'zig build run' for the Zig report."

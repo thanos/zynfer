@@ -22,10 +22,12 @@ pub fn build(b: *std.Build) void {
     }
 
     const hip_path = detected_hip orelse "";
+    const have_apple = target.result.os.tag == .macos;
 
     const options = b.addOptions();
     options.addOption(bool, "have_hip", have_hip);
     options.addOption([]const u8, "hip_path", hip_path);
+    options.addOption(bool, "have_apple", have_apple);
 
     const zynfer_mod = b.addModule("zynfer", .{
         .root_source_file = b.path("src/root.zig"),
@@ -34,6 +36,7 @@ pub fn build(b: *std.Build) void {
     });
     zynfer_mod.addOptions("build_options", options);
     configureHip(b, zynfer_mod, have_hip, hip_path);
+    configureApple(b, zynfer_mod, have_apple);
 
     const exe = b.addExecutable(.{
         .name = "zynfer",
@@ -66,6 +69,18 @@ pub fn build(b: *std.Build) void {
     const gpu_step = b.step("gpu", "Enumerate HIP devices");
     gpu_step.dependOn(&gpu_cmd.step);
 
+    const caps_cmd = b.addRunArtifact(exe);
+    caps_cmd.step.dependOn(b.getInstallStep());
+    caps_cmd.addArg("caps");
+    const caps_step = b.step("caps", "Print backend capabilities and fallbacks");
+    caps_step.dependOn(&caps_cmd.step);
+
+    const ops_bench_cmd = b.addRunArtifact(exe);
+    ops_bench_cmd.step.dependOn(b.getInstallStep());
+    ops_bench_cmd.addArg("ops-bench");
+    const ops_bench_step = b.step("ops-bench", "CPU vs Apple operation microbenchmarks");
+    ops_bench_step.dependOn(&ops_bench_cmd.step);
+
     const bench_cmd = b.addRunArtifact(exe);
     bench_cmd.step.dependOn(b.getInstallStep());
     bench_cmd.addArg("bench");
@@ -81,6 +96,18 @@ pub fn build(b: *std.Build) void {
     });
     unit_tests.root_module.addOptions("build_options", options);
     configureHip(b, unit_tests.root_module, have_hip, hip_path);
+    configureApple(b, unit_tests.root_module, have_apple);
+
+    const numerical_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/numerical/ops.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zynfer", .module = zynfer_mod },
+            },
+        }),
+    });
 
     const smoke_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -95,9 +122,24 @@ pub fn build(b: *std.Build) void {
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const run_smoke_tests = b.addRunArtifact(smoke_tests);
-    const test_step = b.step("test", "Run Stage 0 tests");
+    const run_numerical_tests = b.addRunArtifact(numerical_tests);
+    const test_step = b.step("test", "Run unit, smoke, and numerical tests");
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_smoke_tests.step);
+    test_step.dependOn(&run_numerical_tests.step);
+}
+
+fn configureApple(b: *std.Build, mod: *std.Build.Module, have_apple: bool) void {
+    if (!have_apple) return;
+    mod.link_libc = true;
+    mod.addIncludePath(b.path("src/backends/apple"));
+    mod.linkFramework("Foundation", .{});
+    mod.linkFramework("Metal", .{});
+    mod.addCSourceFile(.{
+        .file = b.path("src/backends/apple/bridge.m"),
+        .flags = &.{ "-fobjc-arc" },
+        .language = .objective_c,
+    });
 }
 
 fn configureHip(b: *std.Build, mod: *std.Build.Module, have_hip: bool, hip_path: []const u8) void {
