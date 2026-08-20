@@ -210,10 +210,10 @@ fn printStage8(writer: *std.Io.Writer) !void {
     try writer.print("Done in Stage 8\n", .{});
     try writer.print("  attention kv_len cap:     {d} (was 64; thread-local scores)\n", .{zynfer.apple.ops.max_attention_kv});
     try writer.print("  fused vs baseline A/B:    retained (Stage 6 test)\n", .{});
-    try writer.print("  signposts:                ZYNFER_SIGNPOSTS=1 (encode_and_wait / batch_*)\n", .{});
-    try writer.print("  peak_rss_bytes:           reported in block-bench JSON when available\n", .{});
+    try writer.print("  signposts:                ZYNFER_SIGNPOSTS=1 (prefill/decode/weights_upload + encode/batch)\n", .{});
+    try writer.print("  peak_rss_bytes:           block-bench JSON + docs/benchmarks.md matrix Peak memory\n", .{});
     try writer.print("  energy_per_token:         null (not measured)\n", .{});
-    try writer.print("  stress tests:             Session init×3 + full max_seq; batch abort\n", .{});
+    try writer.print("  stress tests:             Session init×3 + full max_seq; batch abort; dual-Gpu concurrency\n", .{});
     try writer.print("  fp16/bf16 Metal:          Unsupported stubs (matmulF16/matvecF16)\n\n", .{});
 
     try writer.print("Rejected / deferred with reasons\n", .{});
@@ -871,7 +871,7 @@ fn runBlockBench(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, for
     try writer.print("note: Apple Stage 6 default path={s} (one CB/wait + resident KV + add_rmsnorm).\n", .{zynfer.apple.block.path_staged});
     try writer.print("      ZYNFER_APPLE_BLOCK=baseline → path={s} (per-op waits) for A/B.\n", .{zynfer.apple.block.path_baseline});
     try writer.print("      JSON fields: apple_block_path / apple_block_waits / apple_block_encodes / peak_rss_bytes.\n", .{});
-    try writer.print("      Optional: ZYNFER_SIGNPOSTS=1 for Instruments signposts on encode/batch wait.\n", .{});
+    try writer.print("      Optional: ZYNFER_SIGNPOSTS=1 for Instruments (prefill/decode/weights_upload + encode/batch).\n", .{});
     try writer.print("      This is not Qwen3 and not a production decode path.\n\n", .{});
 
     var metal_init_ns: ?u64 = null;

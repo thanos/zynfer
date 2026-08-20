@@ -260,11 +260,15 @@ pub const Session = struct {
     }
 
     pub fn prefill(self: *Session, x: Tensor, out: Tensor) !void {
+        const sid = gpu_mod.signpostBegin("prefill");
+        defer gpu_mod.signpostEnd(sid, "prefill");
         try self.forward(x, out);
     }
 
     pub fn decode(self: *Session, x: Tensor, out: Tensor) !void {
         if (x.rank != 2 or x.shape[0] != 1) return error.InvalidShape;
+        const sid = gpu_mod.signpostBegin("decode");
+        defer gpu_mod.signpostEnd(sid, "decode");
         try self.forward(x, out);
     }
 
@@ -291,6 +295,8 @@ pub const Session = struct {
         if (pos0 + t > apple_ops.max_attention_kv) return error.Unsupported;
 
         if (self.weights_dirty) {
+            const sid = gpu_mod.signpostBegin("weights_upload");
+            defer gpu_mod.signpostEnd(sid, "weights_upload");
             try self.weights_gpu.uploadFrom(self.inner.weights);
             self.weights_dirty = false;
         }
@@ -580,4 +586,60 @@ test "Metal batch abort leaves device usable" {
     try apple_ops.encodeAdd(&gpu, out, a, b, @intCast(n));
     try gpu.batchCommit();
     try std.testing.expectEqual(@as(f32, 3), out.f32s()[0]);
+}
+
+test "two Metal Sessions on separate Gpu threads" {
+    if (gpu_mod.skipAppleGpuTests()) return error.SkipZigTest;
+    defer force_baseline_path = null;
+    force_baseline_path = false;
+
+    const Worker = struct {
+        fn run(ok: *std.atomic.Value(bool)) void {
+            const gpa = std.heap.page_allocator;
+            var gpu = Gpu.init() catch {
+                ok.store(false, .seq_cst);
+                return;
+            };
+            defer gpu.deinit();
+            var sess = Session.init(gpa, &gpu, tiny.fixture_spec) catch {
+                ok.store(false, .seq_cst);
+                return;
+            };
+            defer sess.deinit();
+            sess.inner.weights.fillFixture() catch {
+                ok.store(false, .seq_cst);
+                return;
+            };
+            sess.markWeightsDirty();
+
+            var xin = Tensor.alloc(gpa, .f32, &.{ 1, tiny.fixture_spec.hidden }) catch {
+                ok.store(false, .seq_cst);
+                return;
+            };
+            defer xin.deinit();
+            var xout = Tensor.alloc(gpa, .f32, &.{ 1, tiny.fixture_spec.hidden }) catch {
+                ok.store(false, .seq_cst);
+                return;
+            };
+            defer xout.deinit();
+            tiny.iotaFill(xin, 0.02, 0.001) catch {
+                ok.store(false, .seq_cst);
+                return;
+            };
+            sess.decode(xin, xout) catch {
+                ok.store(false, .seq_cst);
+                return;
+            };
+            ok.store(true, .seq_cst);
+        }
+    };
+
+    var ok0 = std.atomic.Value(bool).init(false);
+    var ok1 = std.atomic.Value(bool).init(false);
+    const t0 = try std.Thread.spawn(.{}, Worker.run, .{&ok0});
+    const t1 = try std.Thread.spawn(.{}, Worker.run, .{&ok1});
+    t0.join();
+    t1.join();
+    try std.testing.expect(ok0.load(.seq_cst));
+    try std.testing.expect(ok1.load(.seq_cst));
 }

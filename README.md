@@ -1063,7 +1063,7 @@ zig build block-bench      # tiny-block prefill/decode (path labels in JSON)
 # Stage 7 force paths (must exit 2):
 #   ZYNFER_FORCE_SME=1 zig build run -- stage7
 #   ZYNFER_FORCE_COREML=1 zig build run -- caps
-# Stage 8 optional Instruments labels:
+# Stage 8 optional Instruments labels (prefill/decode/weights_upload + encode/batch):
 #   ZYNFER_SIGNPOSTS=1 zig build run -- block-bench -- --backend apple
 zig build bench            # time HIP property queries
 zig build integration      # CLI contracts against the installed binary

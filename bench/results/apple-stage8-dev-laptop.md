@@ -22,10 +22,11 @@ commands:
 | --- | --- | --- |
 | Fused vs baseline A/B | **RETAIN** (done Stage 6) | `Metal Stage 6 path matches baseline path and CPU` |
 | Attention `kv_len` cap | **RAISE 64→256** | Thread-local `scores[256]`; CPU differential at kv_len=96; >256 still `Unsupported` |
-| Signposts | **RETAIN** (opt-in) | `ZYNFER_SIGNPOSTS=1` → `os_signpost` on encode_and_wait / batch begin+commit |
-| Peak RSS | **RETAIN** | `peak_rss_bytes` in block-bench JSON via `getrusage` |
+| Signposts | **RETAIN** (opt-in) | `ZYNFER_SIGNPOSTS=1` → `prefill`/`decode`/`weights_upload` + encode/batch wait |
+| Peak RSS | **RETAIN** | `peak_rss_bytes` in block-bench JSON; Peak memory cells in `docs/benchmarks.md` |
 | Energy/token | **N/A** | Not measured; JSON field null |
 | Stress / error paths | **RETAIN** | Repeated Session init; fill `max_seq`; overflow; batch abort |
+| Multi-`Gpu` concurrency | **RETAIN** | One owner thread per `Gpu`; two `Gpu`s / Sessions on two threads (tested) |
 | fp16/bf16 Metal | **REJECT** | `matmulF16`/`matvecF16` → `Unsupported`; stay on f32 |
 | ICB / encode-once | **REJECT** | Decode changes KV/`q_len` each step; Stage 6 already removed wait dominance |
 | Extra MSL fusions | **REJECT** (tiny-block) | `add_rmsnorm` did not beat unfused Stage 6 ns; revisit Stage 16 |
@@ -45,6 +46,6 @@ ZYNFER_SIGNPOSTS=1 ./zig-out/bin/zynfer block-bench --backend apple
 
 - Fixture `max_seq` remains 32; Metal attention can now run longer contexts
   up to 256 when a larger fixture/spec is used.
-- Concurrent multi-session GPU ownership is still single-threaded per
-  `Gpu` (bridge is not internally synchronized).
+- Concurrent multi-session work uses **one `Gpu` (and buffers) per thread**;
+  the bridge is not internally synchronized across a shared handle.
 - Apple Stages 0–8 are closed for the tiny-block curriculum path.

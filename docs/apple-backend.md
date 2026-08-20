@@ -20,8 +20,10 @@ Metal bridge. It is not the AMD production target.
   `bench/results/apple-stage7-dev-laptop.md`). Accelerate retained;
   do not claim AMX.
 - Stage 8: attention `kv_len` ≤ **256**, opt-in signposts
-  (`ZYNFER_SIGNPOSTS=1`), `peak_rss_bytes` in block-bench, stress tests;
-  ICB/fp16/extra tiny-block fusions **rejected** (`zynfer stage8`).
+  (`ZYNFER_SIGNPOSTS=1`: prefill/decode/weights_upload + encode/batch),
+  `peak_rss_bytes` in block-bench + benchmark matrix, dual-`Gpu`
+  concurrency (one owner thread per `Gpu`); ICB/fp16/extra tiny-block
+  fusions **rejected** (`zynfer stage8`).
 - Tiny transformer block: RMSNorm → QKV → RoPE → KV append →
   attention → O + residual → SwiGLU residual
 - Separate `prefill` and `decode` entry points; decode does not allocate
@@ -91,12 +93,16 @@ ZYNFER_APPLE_BLOCK=baseline ./zig-out/bin/zynfer block-bench --backend apple
      then a **single** `waitUntilCompleted`;
    - **baseline:** a gap after every dispatch in
      `zynfer_mtl_encode_and_wait`.
+5. With `ZYNFER_SIGNPOSTS=1`, os_signpost intervals also label
+   `prefill` / `decode` / `weights_upload` and the encode/batch waits
+   under subsystem `com.zynfer.metal` / category `stage8`.
 
 | Signal | Meaning |
 | --- | --- |
 | One wait gap per forward (Stage 6) | CB batching working |
 | Serial gaps between every kernel (baseline) | Per-op `waitUntilCompleted` |
 | Short GPU kernels vs long wall time (baseline) | Launch/sync bound |
+| Nested `prefill`/`decode` around batch wait | Session-level signposts |
 
 Measured A/B: `bench/results/apple-stage6-dev-laptop.md` (~8× decode).
 
@@ -310,9 +316,9 @@ Apple Stage 7/8 or curriculum Stages 10–12 / 16 land.
 | --- | --- |
 | **Fused vs `baseline` numerical A/B test** | **done** — Stage 6 |
 | **Attention `kv_len` cap** | **done** — raised to **256**; tested at 96 |
-| **Signposts** | **done** — `ZYNFER_SIGNPOSTS=1` |
-| **Peak RSS** | **done** — `peak_rss_bytes` in block-bench JSON |
-| **Stress / cancel paths** | **done** — repeated Session + batch abort tests |
+| **Signposts** | **done** — `ZYNFER_SIGNPOSTS=1` (`prefill`/`decode`/`weights_upload` + encode/batch) |
+| **Peak RSS** | **done** — `peak_rss_bytes` in block-bench JSON; Peak memory in `docs/benchmarks.md` |
+| **Stress / cancel paths** | **done** — repeated Session + batch abort + dual-`Gpu` concurrency |
 | **fp16 / bf16 Metal** | **rejected** — `Unsupported` stubs |
 | **Reusable execution encoding** (ICB) | **rejected** — see stage8 results |
 | **Further MSL fusions** | **rejected** for tiny-block; → Stage 16 |

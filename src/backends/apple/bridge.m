@@ -39,6 +39,22 @@ static int signposts_enabled(void) {
     return strcmp(e, "1") == 0 || strcmp(e, "true") == 0 || strcmp(e, "on") == 0;
 }
 
+uint64_t zynfer_signpost_interval_begin(const char *name) {
+    if (!signposts_enabled() || name == NULL) {
+        return 0;
+    }
+    const os_signpost_id_t sid = os_signpost_id_generate(zynfer_signpost_log());
+    os_signpost_interval_begin(zynfer_signpost_log(), sid, "interval", "%s", name);
+    return (uint64_t)sid;
+}
+
+void zynfer_signpost_interval_end(uint64_t id, const char *name) {
+    if (id == 0 || name == NULL) {
+        return;
+    }
+    os_signpost_interval_end(zynfer_signpost_log(), (os_signpost_id_t)id, "interval", "%s", name);
+}
+
 static void set_error(ZynferMtlDevice *dev, NSString *msg) {
     if (dev == NULL) {
         return;

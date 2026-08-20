@@ -37,7 +37,9 @@ typedef struct ZynferMtlCaps {
 /* Ownership: create functions return a +1 object. destroy releases it.
  * Buffers remain valid until destroy. Command buffers wait on the CPU in
  * encode_and_wait; do not free a buffer while a wait is in flight.
- * Threading: the device is not internally synchronized; one owner thread.
+ * Threading: each ZynferMtlDevice is single-owner (not internally
+ * synchronized). Multiple devices may run concurrently on different
+ * threads (each with its own command queue and buffers).
  */
 int zynfer_mtl_device_create(ZynferMtlDevice **out);
 void zynfer_mtl_device_destroy(ZynferMtlDevice *dev);
@@ -88,6 +90,13 @@ int zynfer_mtl_batch_encode(
     int dispatch_threadgroups);
 int zynfer_mtl_batch_commit_and_wait(ZynferMtlDevice *dev);
 void zynfer_mtl_batch_abort(ZynferMtlDevice *dev);
+
+/* Opt-in Instruments intervals when ZYNFER_SIGNPOSTS=1.
+ * begin returns 0 when disabled or on failure; end is then a no-op.
+ * Used for Session-level prefill/decode (and nested weights_upload).
+ */
+uint64_t zynfer_signpost_interval_begin(const char *name);
+void zynfer_signpost_interval_end(uint64_t id, const char *name);
 
 #ifdef __cplusplus
 }

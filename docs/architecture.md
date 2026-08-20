@@ -87,4 +87,5 @@ x[t,H] → RMSNorm → QKV → RoPE → KV append → causal GQA → O + residua
   probes SME hardware and Core ML availability, then keeps those
   inference paths disabled. `simdgroup_matrix` and Accelerate are used
   only when capability- and size-gated selection chooses them.
-- No multi-GPU path.
+- No multi-GPU / model-sharding path across devices. Concurrent Apple
+  sessions use one `Gpu` (and buffers) per owner thread.

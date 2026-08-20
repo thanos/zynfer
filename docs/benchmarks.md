@@ -94,16 +94,21 @@ stages, not this baseline.
 
 ## Final path matrix
 
+Peak memory cells that cite `peak_rss_bytes` come from
+`zynfer block-bench` on the Apple M1 Max laptop (2026-08-20). Values are
+process RSS after the bench loop, not a model-weight-only footprint.
+TTFT / tok/s remain N/A until Stages 10–12.
+
 | Path | Device/API | Model/quant | Workload | TTFT | Prefill tok/s | Decode tok/s | ITL p50/p95/p99 | Peak memory | Effective bandwidth | Energy/token | Status/notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | CPU reference | Zig scalar f32 | none | op microbench | N/A | N/A | N/A | N/A | N/A | N/A | N/A | correctness oracle |
-| CPU reference | Zig scalar f32 | tiny-block f32 | prefill 8 / decode 8 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | `block-bench`; ns not tok/s |
+| CPU reference | Zig scalar f32 | tiny-block f32 | prefill 8 / decode 8 | N/A | N/A | N/A | N/A | ≈8.1 MB (`peak_rss_bytes`) | N/A | N/A | `block-bench`; ns not tok/s |
 | CPU optimized | Accelerate vDSP | f32 | matmul ≥64³ / matvec ≥256² | N/A | N/A | N/A | N/A | N/A | N/A | N/A | size-gated; stage5 result |
 | Metal baseline | naive MSL f32 | none | op microbench | N/A | N/A | N/A | N/A | N/A | N/A | N/A | implemented; see apple-ops result |
-| Metal baseline | naive MSL f32 | tiny-block f32 | prefill 8 / decode 8 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | path=`baseline_per_op` (`ZYNFER_APPLE_BLOCK=baseline`) |
+| Metal baseline | naive MSL f32 | tiny-block f32 | prefill 8 / decode 8 | N/A | N/A | N/A | N/A | ≈17.8 MB (`peak_rss_bytes`) | N/A | N/A | path=`baseline_per_op` (`ZYNFER_APPLE_BLOCK=baseline`) |
 | Metal optimized | simdgroup / x4 | f32 | matmul 64³ / 256³ | N/A | N/A | N/A | N/A | N/A | N/A | N/A | auto ≥64³; x4 force-only |
 | Metal int8 GEMV/GEMM | matvec/matmul_q8_f32 | int8×f32 scale | 256² / 128³ prepacked | N/A | N/A | N/A | N/A | N/A | N/A | N/A | explicit API; not auto over f32 |
-| Metal fused | Stage 6 `batched_resident_kv_fused` | tiny-block f32 | prefill 8 / decode 8 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | ~8× vs `baseline_per_op`; stage6 result |
+| Metal fused | Stage 6 `batched_resident_kv_fused` | tiny-block f32 | prefill 8 / decode 8 | N/A | N/A | N/A | N/A | ≈18.0 MB (`peak_rss_bytes`) | N/A | N/A | ~8× vs `baseline_per_op`; stage6 result |
 | Core ML/ANE hybrid | Core ML probe | — | — | N/A | N/A | N/A | N/A | N/A | N/A | N/A | Stage 7: framework ok; path **rejected** |
 | CPU optimized | SME/SME2 | — | — | N/A | N/A | N/A | N/A | N/A | N/A | N/A | Stage 7: FEAT_SME probed; kernels **rejected** |
 | HIP | RDNA 4 | — | device enum | N/A | N/A | N/A | N/A | N/A | N/A | N/A | Stage 0 probe only |

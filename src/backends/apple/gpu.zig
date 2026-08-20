@@ -88,7 +88,21 @@ const c = if (have_apple) struct {
     ) c_int;
     pub extern fn zynfer_mtl_batch_commit_and_wait(dev: *MtlDevice) c_int;
     pub extern fn zynfer_mtl_batch_abort(dev: *MtlDevice) void;
+    pub extern fn zynfer_signpost_interval_begin(name: [*:0]const u8) u64;
+    pub extern fn zynfer_signpost_interval_end(id: u64, name: [*:0]const u8) void;
 } else struct {};
+
+/// Opt-in Instruments interval (`ZYNFER_SIGNPOSTS=1`). No-op when disabled.
+pub fn signpostBegin(name: [*:0]const u8) u64 {
+    if (comptime !have_apple) return 0;
+    return c.zynfer_signpost_interval_begin(name);
+}
+
+pub fn signpostEnd(id: u64, name: [*:0]const u8) void {
+    if (comptime !have_apple) return;
+    if (id == 0) return;
+    c.zynfer_signpost_interval_end(id, name);
+}
 
 const kernels_source: [:0]const u8 = if (have_apple) @embedFile("kernels.metal") else "";
 
@@ -211,6 +225,7 @@ pub const Gpu = struct {
         caps.addDisabled("No Qwen loader/tokenizer/sampling; tiny-block only");
         caps.addDisabled("Metal attention_f32 caps kv_len at 256 (thread-local scores); larger returns Unsupported");
         caps.addDisabled("Per-op apple.ops path still waits each kernel; Stage 6 batch+resident KV is the tiny-block schedule");
+        caps.addDisabled("Each Gpu is single-owner; concurrent sessions need one Gpu (and buffers) per thread");
         if (!self.features.simdgroup_matrix_available) {
             caps.addDisabled("simdgroup_matrix hardware not available; matmul uses naive f32 only");
         }
@@ -396,4 +411,56 @@ test "Apple GPU create/run/destroy add kernel" {
     }
     try std.testing.expectEqual(@as(f32, 1), cs[0]);
     try std.testing.expectEqual(@as(f32, 8), cs[7]);
+}
+
+test "two Gpu instances run concurrently on separate threads" {
+    if (comptime !have_apple) return error.SkipZigTest;
+    if (skipAppleGpuTests()) return error.SkipZigTest;
+
+    const Worker = struct {
+        fn run(ok: *std.atomic.Value(bool)) void {
+            var gpu = Gpu.init() catch {
+                ok.store(false, .seq_cst);
+                return;
+            };
+            defer gpu.deinit();
+            const n: usize = 64;
+            var a = gpu.allocShared(n * 4) catch {
+                ok.store(false, .seq_cst);
+                return;
+            };
+            defer a.deinit();
+            var b = gpu.allocShared(n * 4) catch {
+                ok.store(false, .seq_cst);
+                return;
+            };
+            defer b.deinit();
+            var out = gpu.allocShared(n * 4) catch {
+                ok.store(false, .seq_cst);
+                return;
+            };
+            defer out.deinit();
+            for (a.f32s(), 0..) |*v, i| v.* = @floatFromInt(i);
+            for (b.f32s()) |*v| v.* = 2;
+            const count: u32 = @intCast(n);
+            gpu.launch("add_f32", count, 1, 1, 8, 1, 1, &.{ a.handle, b.handle, out.handle }, std.mem.asBytes(&count)) catch {
+                ok.store(false, .seq_cst);
+                return;
+            };
+            if (out.f32s()[0] != 2 or out.f32s()[63] != 65) {
+                ok.store(false, .seq_cst);
+                return;
+            }
+            ok.store(true, .seq_cst);
+        }
+    };
+
+    var ok0 = std.atomic.Value(bool).init(false);
+    var ok1 = std.atomic.Value(bool).init(false);
+    const t0 = try std.Thread.spawn(.{}, Worker.run, .{&ok0});
+    const t1 = try std.Thread.spawn(.{}, Worker.run, .{&ok1});
+    t0.join();
+    t1.join();
+    try std.testing.expect(ok0.load(.seq_cst));
+    try std.testing.expect(ok1.load(.seq_cst));
 }
