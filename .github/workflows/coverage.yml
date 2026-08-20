@@ -41,7 +41,7 @@ jobs:
           path: zig-out/coverage
           if-no-files-found: warn
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         continue-on-error: true
         with:
           fail_ci_if_error: false
