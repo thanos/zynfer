@@ -1,9 +1,10 @@
 // Baseline Metal Shading Language kernels for zynfer's Apple backend.
 //
 // Correctness-first f32 kernels, plus capability-gated Stage 5 paths:
-// `matmul_f32_simdgroup` (Apple7+) and `matvec_q8_f32` (int8 weights).
+// Stage 5 also: `matmul_f32_simdgroup` / `_x4` (Apple7+), `matvec_q8_f32`,
+// `matmul_q8_f32` (int8 weights, per-row or per-tensor scale).
 //
-// DType: f32 activations; optional int8 weights for matvec_q8_f32
+// DType: f32 activations; optional int8 weights for q8 kernels
 // Layout: dense row-major
 // Known target: Apple GPU via MTLGPUFamilyApple7+ (M1 and later)
 // Reason for specialization: simdgroup path uses hardware MMA when selected.
@@ -213,6 +214,36 @@ kernel void matvec_q8_f32(
     y[gid] = acc * scale[gid];
 }
 
+struct MatmulQ8Params {
+    uint m;
+    uint n;
+    uint k;
+    uint scale_mode; // 0 = per-row (len m), 1 = per-tensor (len 1)
+};
+
+// C[m,n] = dequant(W_q[m,k]) @ B[k,n]. One thread per output element.
+kernel void matmul_q8_f32(
+    device const char *wq [[buffer(0)]],
+    device const float *scale [[buffer(1)]],
+    device const float *b [[buffer(2)]],
+    device float *c [[buffer(3)]],
+    constant MatmulQ8Params &p [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint row = gid.y;
+    uint col = gid.x;
+    if (row >= p.m || col >= p.n) {
+        return;
+    }
+    device const char *wrow = wq + row * p.k;
+    float acc = 0.0f;
+    for (uint t = 0; t < p.k; t++) {
+        acc += float(wrow[t]) * b[t * p.n + col];
+    }
+    float s = (p.scale_mode == 1u) ? scale[0] : scale[row];
+    c[row * p.n + col] = acc * s;
+}
+
 // simdgroup_matrix GEMM: one simdgroup (32 threads) per 8x8 C tile.
 // Stages A/B into threadgroup memory with zero fill so ragged dims are OK.
 // Requires Apple GPU family 7+. Caller must set threadgroup memory to 768 bytes
@@ -239,6 +270,70 @@ kernel void matmul_f32_simdgroup(
     threadgroup float *a_stage = tile;
     threadgroup float *b_stage = tile + CELLS;
     threadgroup float *c_stage = tile + 2u * CELLS;
+
+    simdgroup_float8x8 acc = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+    for (uint kk = 0u; kk < p.k; kk += TILE) {
+        for (uint e = lane; e < CELLS; e += LANES) {
+            uint r = e / TILE;
+            uint col = e % TILE;
+            uint ar = tile_row + r;
+            uint ak = kk + col;
+            a_stage[e] = (ar < p.m && ak < p.k) ? a[ar * p.k + ak] : 0.0f;
+            uint bk = kk + r;
+            uint bc = tile_col + col;
+            b_stage[e] = (bk < p.k && bc < p.n) ? b[bk * p.n + bc] : 0.0f;
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+
+        simdgroup_float8x8 a_frag;
+        simdgroup_float8x8 b_frag;
+        simdgroup_load(a_frag, a_stage, TILE);
+        simdgroup_load(b_frag, b_stage, TILE);
+        simdgroup_multiply_accumulate(acc, a_frag, b_frag, acc);
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    simdgroup_store(acc, c_stage, TILE);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint e = lane; e < CELLS; e += LANES) {
+        uint r = e / TILE;
+        uint col = e % TILE;
+        uint row = tile_row + r;
+        uint out_col = tile_col + col;
+        if (row < p.m && out_col < p.n) {
+            c[row * p.n + out_col] = c_stage[e];
+        }
+    }
+}
+
+// Four simdgroups per threadgroup: each owns an 8x8 tile; TG covers 8x32 of C.
+// threadgroups: (ceil(N/32), ceil(M/8), 1), threadsPerThreadgroup (128,1,1),
+// threadgroup memory 4 * 3 * 64 * 4 = 3072 bytes.
+kernel void matmul_f32_simdgroup_x4(
+    device const float *a [[buffer(0)]],
+    device const float *b [[buffer(1)]],
+    device float *c [[buffer(2)]],
+    constant MatmulParams &p [[buffer(3)]],
+    threadgroup float *tile [[threadgroup(0)]],
+    uint2 tg_pos [[threadgroup_position_in_grid]],
+    uint sg_id [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]])
+{
+    const uint TILE = 8u;
+    const uint CELLS = 64u;
+    const uint LANES = 32u;
+    const uint SG = 4u;
+
+    uint tile_row = tg_pos.y * TILE;
+    uint tile_col = (tg_pos.x * SG + sg_id) * TILE;
+    if (tile_row >= p.m || tile_col >= p.n || sg_id >= SG) {
+        return;
+    }
+
+    threadgroup float *a_stage = tile + sg_id * (3u * CELLS);
+    threadgroup float *b_stage = a_stage + CELLS;
+    threadgroup float *c_stage = b_stage + CELLS;
 
     simdgroup_float8x8 acc = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
     for (uint kk = 0u; kk < p.k; kk += TILE) {

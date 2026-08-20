@@ -178,10 +178,17 @@ fn printCaps(writer: *std.Io.Writer, forced: ?[]const u8) !void {
                 yn(feat.gpu_family_apple8),
                 yn(feat.gpu_family_apple9),
             });
-            try writer.print("  chosen kernels: naive f32 Metal + capability-gated matmul_f32_simdgroup (M*N*K>={d}) + matvec_q8_f32; attention kv_len<=64\n", .{zynfer.apple.ops.simdgroup_min_flops});
+            try writer.print("  chosen kernels: naive f32 Metal + gated matmul_f32_simdgroup (M*N*K>={d}) + forceable matmul_f32_simdgroup_x4 + matvec/matmul_q8_f32; attention kv_len<=64\n", .{
+                zynfer.apple.ops.simdgroup_min_flops,
+            });
             const auto64: []const u8 = if (feat.simdgroup_matrix_available) "matmul_f32_simdgroup" else "matmul_f32";
-            try writer.print("  matmul auto-path policy (64x64x64): {s}  (override with ZYNFER_MATMUL_PATH=naive|simdgroup)\n", .{auto64});
-            try writer.print("  Accelerate CPU matmul: size-gated vDSP when M*N*K>={d}\n", .{zynfer.cpu.accelerate.min_flops});
+            const auto256: []const u8 = if (feat.simdgroup_matrix_available) "matmul_f32_simdgroup" else "matmul_f32";
+            try writer.print("  matmul auto-path (64^3 / 256^3): {s} / {s}  (x4 measured slower at 256^3; force with ZYNFER_MATMUL_PATH=simdgroup_x4)\n", .{ auto64, auto256 });
+            try writer.print("  packed q8 GEMM/GEMV: explicit API (fair prepacked benches; not auto over f32)\n", .{});
+            try writer.print("  Accelerate CPU: vDSP matmul M*N*K>={d}; matvec M*K>={d}\n", .{
+                zynfer.cpu.accelerate.matmul_min_flops,
+                zynfer.cpu.accelerate.matvec_min_flops,
+            });
         },
         else => {},
     }
@@ -203,7 +210,8 @@ fn runOpsBench(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, force
     try writer.print("================\n", .{});
     try writer.print("backend={s}  (cpu always runs as oracle)\n", .{kind.name()});
     try writer.print("note: Apple times include per-op shared-buffer fill + encode_and_wait.\n", .{});
-    try writer.print("      That is the current baseline, not a fused production decode path.\n\n", .{});
+    try writer.print("      That is the current baseline, not a fused production decode path.\n", .{});
+    try writer.print("      Fair q8 rows pack once outside the timed loop (path field in JSON).\n\n", .{});
 
     const warmup = 2;
     const iters = 8;
@@ -225,18 +233,23 @@ fn runOpsBench(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, force
     }
     defer if (gpu_ptr) |g| g.deinit();
 
-    var rows: [11]BenchRow = undefined;
-    rows[0] = try benchNamed(gpa, io, writer, gpu_ptr, "add_f32_4096", benchAdd, warmup, iters);
-    rows[1] = try benchNamed(gpa, io, writer, gpu_ptr, "silu_mul_f32_4096", benchSiluMul, warmup, iters);
-    rows[2] = try benchNamed(gpa, io, writer, gpu_ptr, "matvec_f32_256x256", benchMatvec, warmup, iters);
-    rows[3] = try benchNamed(gpa, io, writer, gpu_ptr, "matmul_f32_32x64x64", benchMatmul, warmup, iters);
-    rows[4] = try benchNamed(gpa, io, writer, gpu_ptr, "matmul_f32_naive_64x64x64", benchMatmulNaive64, warmup, iters);
-    rows[5] = try benchNamed(gpa, io, writer, gpu_ptr, "matmul_f32_simdgroup_64x64x64", benchMatmulSimd64, warmup, iters);
-    rows[6] = try benchNamed(gpa, io, writer, gpu_ptr, "matmul_f32_naive_256x256x256", benchMatmulNaive256, warmup, iters);
-    rows[7] = try benchNamed(gpa, io, writer, gpu_ptr, "matmul_f32_simdgroup_256x256x256", benchMatmulSimd256, warmup, iters);
-    rows[8] = try benchNamed(gpa, io, writer, gpu_ptr, "matmul_f32_auto_64x64x64", benchMatmulAuto64, warmup, iters);
-    rows[9] = try benchNamed(gpa, io, writer, gpu_ptr, "matvec_q8_f32_256x256", benchMatvecQ8, warmup, iters);
-    rows[10] = try benchNamed(gpa, io, writer, null, "matmul_accelerate_64x64x64", benchMatmulAccelerate64, warmup, iters);
+    var rows: [16]BenchRow = undefined;
+    rows[0] = try benchNamed(gpa, io, writer, gpu_ptr, "add_f32_4096", benchAdd, warmup, iters, "add_f32");
+    rows[1] = try benchNamed(gpa, io, writer, gpu_ptr, "silu_mul_f32_4096", benchSiluMul, warmup, iters, "silu_mul_f32");
+    rows[2] = try benchNamed(gpa, io, writer, gpu_ptr, "matvec_f32_256x256", benchMatvec, warmup, iters, "matvec_f32");
+    rows[3] = try benchNamed(gpa, io, writer, gpu_ptr, "matmul_f32_32x64x64", benchMatmul, warmup, iters, "matmul_auto");
+    rows[4] = try benchNamed(gpa, io, writer, gpu_ptr, "matmul_f32_naive_64x64x64", benchMatmulNaive64, warmup, iters, "matmul_f32");
+    rows[5] = try benchNamed(gpa, io, writer, gpu_ptr, "matmul_f32_simdgroup_64x64x64", benchMatmulSimd64, warmup, iters, "matmul_f32_simdgroup");
+    rows[6] = try benchNamed(gpa, io, writer, gpu_ptr, "matmul_f32_naive_256x256x256", benchMatmulNaive256, warmup, iters, "matmul_f32");
+    rows[7] = try benchNamed(gpa, io, writer, gpu_ptr, "matmul_f32_simdgroup_256x256x256", benchMatmulSimd256, warmup, iters, "matmul_f32_simdgroup");
+    rows[8] = try benchNamed(gpa, io, writer, gpu_ptr, "matmul_f32_simdgroup_x4_256x256x256", benchMatmulSimdX4_256, warmup, iters, "matmul_f32_simdgroup_x4");
+    rows[9] = try benchNamed(gpa, io, writer, gpu_ptr, "matmul_f32_auto_256x256x256", benchMatmulAuto256, warmup, iters, "matmul_auto");
+    rows[10] = try benchNamed(gpa, io, writer, null, "matmul_accelerate_64x64x64", benchMatmulAccelerate64, warmup, iters, "accelerate_vDSP_mmul");
+    rows[11] = try benchNamed(gpa, io, writer, null, "matvec_accelerate_256x256", benchMatvecAccelerate256, warmup, iters, "accelerate_vDSP_matvec");
+    rows[12] = try benchFairQ8Matvec(gpa, io, writer, gpu_ptr, warmup, iters);
+    rows[13] = try benchFairQ8Matmul(gpa, io, writer, gpu_ptr, warmup, iters);
+    rows[14] = try benchNamed(gpa, io, writer, gpu_ptr, "matvec_f32_256x256_ref", benchMatvec, warmup, iters, "matvec_f32");
+    rows[15] = try benchNamed(gpa, io, writer, gpu_ptr, "matmul_f32_128x128x128_ref", benchMatmul128, warmup, iters, "matmul_auto");
 
     try writer.print("\njson\n", .{});
     try writer.print("{{\"backend\":\"{s}\",\"zig\":\"{s}\",\"warmup\":{d},\"iters\":{d}", .{
@@ -253,7 +266,7 @@ fn runOpsBench(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, force
     try writer.print(",\"ops\":[", .{});
     for (rows, 0..) |row, i| {
         if (i != 0) try writer.print(",", .{});
-        try writer.print("{{\"name\":\"{s}\",\"cpu_ns\":{d},", .{ row.name, row.cpu_ns });
+        try writer.print("{{\"name\":\"{s}\",\"path\":\"{s}\",\"cpu_ns\":{d},", .{ row.name, row.path, row.cpu_ns });
         if (row.apple_ns) |ns| {
             try writer.print("\"apple_metal_ns\":{d}}}", .{ns});
         } else {
@@ -265,6 +278,7 @@ fn runOpsBench(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, force
 
 const BenchRow = struct {
     name: []const u8,
+    path: []const u8,
     cpu_ns: u64,
     apple_ns: ?u64,
 };
@@ -280,11 +294,12 @@ fn benchNamed(
     func: BenchFn,
     warmup: usize,
     iters: usize,
+    path: []const u8,
 ) !BenchRow {
     var i: usize = 0;
     while (i < warmup) : (i += 1) try func(gpa, null);
     const cpu_ns = try timeIters(io, iters, func, gpa, null);
-    try writer.print("{s} cpu_ns={d} iters={d}\n", .{ name, cpu_ns / iters, iters });
+    try writer.print("{s} path={s} cpu_ns={d} iters={d}\n", .{ name, path, cpu_ns / iters, iters });
 
     var apple_ns: ?u64 = null;
     if (gpu) |g| {
@@ -292,11 +307,11 @@ fn benchNamed(
         while (i < warmup) : (i += 1) try func(gpa, g);
         const total = try timeIters(io, iters, func, gpa, g);
         apple_ns = total / iters;
-        try writer.print("{s} apple_metal_ns={d} iters={d}\n", .{ name, apple_ns.?, iters });
+        try writer.print("{s} path={s} apple_metal_ns={d} iters={d}\n", .{ name, path, apple_ns.?, iters });
     } else {
-        try writer.print("{s} apple_metal_ns=N/A\n", .{name});
+        try writer.print("{s} path={s} apple_metal_ns=N/A\n", .{ name, path });
     }
-    return .{ .name = name, .cpu_ns = cpu_ns / iters, .apple_ns = apple_ns };
+    return .{ .name = name, .path = path, .cpu_ns = cpu_ns / iters, .apple_ns = apple_ns };
 }
 
 fn timeIters(io: std.Io, iters: usize, func: BenchFn, gpa: std.mem.Allocator, gpu: ?*zynfer.apple.gpu.Gpu) !u64 {
@@ -387,12 +402,16 @@ fn benchMatmulSimd256(gpa: std.mem.Allocator, gpu: ?*zynfer.apple.gpu.Gpu) !void
     try benchMatmulPathSized(gpa, gpu, .simdgroup, 256);
 }
 
-fn benchMatmulAuto64(gpa: std.mem.Allocator, gpu: ?*zynfer.apple.gpu.Gpu) !void {
-    var a = try zynfer.Tensor.alloc(gpa, .f32, &.{ 64, 64 });
+fn benchMatmulSimdX4_256(gpa: std.mem.Allocator, gpu: ?*zynfer.apple.gpu.Gpu) !void {
+    try benchMatmulPathSized(gpa, gpu, .simdgroup_x4, 256);
+}
+
+fn benchMatmulAuto256(gpa: std.mem.Allocator, gpu: ?*zynfer.apple.gpu.Gpu) !void {
+    var a = try zynfer.Tensor.alloc(gpa, .f32, &.{ 256, 256 });
     defer a.deinit();
-    var b = try zynfer.Tensor.alloc(gpa, .f32, &.{ 64, 64 });
+    var b = try zynfer.Tensor.alloc(gpa, .f32, &.{ 256, 256 });
     defer b.deinit();
-    var c = try zynfer.Tensor.alloc(gpa, .f32, &.{ 64, 64 });
+    var c = try zynfer.Tensor.alloc(gpa, .f32, &.{ 256, 256 });
     defer c.deinit();
     try a.fillF32(0.01);
     try b.fillF32(0.02);
@@ -403,8 +422,20 @@ fn benchMatmulAuto64(gpa: std.mem.Allocator, gpu: ?*zynfer.apple.gpu.Gpu) !void 
     }
 }
 
-fn benchMatmulPath(gpa: std.mem.Allocator, gpu: ?*zynfer.apple.gpu.Gpu, path: zynfer.apple.ops.MatmulPath) !void {
-    try benchMatmulPathSized(gpa, gpu, path, 64);
+fn benchMatmul128(gpa: std.mem.Allocator, gpu: ?*zynfer.apple.gpu.Gpu) !void {
+    var a = try zynfer.Tensor.alloc(gpa, .f32, &.{ 128, 128 });
+    defer a.deinit();
+    var b = try zynfer.Tensor.alloc(gpa, .f32, &.{ 128, 128 });
+    defer b.deinit();
+    var c = try zynfer.Tensor.alloc(gpa, .f32, &.{ 128, 128 });
+    defer c.deinit();
+    try a.fillF32(0.01);
+    try b.fillF32(0.02);
+    if (gpu) |g| {
+        try zynfer.apple.ops.matmul(g, c, a, b);
+    } else {
+        try zynfer.cpu.ops.matmul(c, a, b);
+    }
 }
 
 fn benchMatmulPathSized(gpa: std.mem.Allocator, gpu: ?*zynfer.apple.gpu.Gpu, path: zynfer.apple.ops.MatmulPath, dim: usize) !void {
@@ -417,36 +448,13 @@ fn benchMatmulPathSized(gpa: std.mem.Allocator, gpu: ?*zynfer.apple.gpu.Gpu, pat
     try a.fillF32(0.01);
     try b.fillF32(0.02);
     if (gpu) |g| {
-        if (path == .simdgroup and !g.features.simdgroup_matrix_available) {
+        if ((path == .simdgroup or path == .simdgroup_x4) and !g.features.simdgroup_matrix_available) {
             try zynfer.apple.ops.matmulPath(g, c, a, b, .naive);
             return;
         }
         try zynfer.apple.ops.matmulPath(g, c, a, b, path);
     } else {
         try zynfer.cpu.ops.matmul(c, a, b);
-    }
-}
-
-fn benchMatvecQ8(gpa: std.mem.Allocator, gpu: ?*zynfer.apple.gpu.Gpu) !void {
-    const m: usize = 256;
-    const k: usize = 256;
-    var w = try zynfer.Tensor.alloc(gpa, .f32, &.{ m, k });
-    defer w.deinit();
-    var x = try zynfer.Tensor.alloc(gpa, .f32, &.{k});
-    defer x.deinit();
-    var y = try zynfer.Tensor.alloc(gpa, .f32, &.{m});
-    defer y.deinit();
-    try w.fillF32(0.01);
-    try x.fillF32(0.02);
-    const q = try gpa.alloc(i8, m * k);
-    defer gpa.free(q);
-    const scale = try gpa.alloc(f32, m);
-    defer gpa.free(scale);
-    try zynfer.cpu.ops.packRowQ8(try w.f32s(), m, k, q, scale);
-    if (gpu) |g| {
-        try zynfer.apple.ops.matvecQ8(g, y, q, scale, x);
-    } else {
-        try zynfer.cpu.ops.matvecQ8(try y.f32s(), q, scale, try x.f32s(), m, k);
     }
 }
 
@@ -465,6 +473,144 @@ fn benchMatmulAccelerate64(gpa: std.mem.Allocator, gpu: ?*zynfer.apple.gpu.Gpu) 
     } else {
         try zynfer.cpu.ops.matmul(c, a, b);
     }
+}
+
+fn benchMatvecAccelerate256(gpa: std.mem.Allocator, gpu: ?*zynfer.apple.gpu.Gpu) !void {
+    _ = gpu;
+    var a = try zynfer.Tensor.alloc(gpa, .f32, &.{ 256, 256 });
+    defer a.deinit();
+    var x = try zynfer.Tensor.alloc(gpa, .f32, &.{256});
+    defer x.deinit();
+    var y = try zynfer.Tensor.alloc(gpa, .f32, &.{256});
+    defer y.deinit();
+    try a.fillF32(0.01);
+    try x.fillF32(0.02);
+    if (zynfer.cpu.accelerate.have_accelerate) {
+        try zynfer.cpu.accelerate.matvec(y, a, x);
+    } else {
+        try zynfer.cpu.ops.matvec(y, a, x);
+    }
+}
+
+/// Fair int8 GEMV: pack once outside the timed loop; only matvec is measured.
+fn benchFairQ8Matvec(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    writer: *std.Io.Writer,
+    gpu: ?*zynfer.apple.gpu.Gpu,
+    warmup: usize,
+    iters: usize,
+) !BenchRow {
+    const name = "matvec_q8_f32_256x256_prepacked";
+    const path = "matvec_q8_f32_per_row";
+    const m: usize = 256;
+    const k: usize = 256;
+    var w = try zynfer.Tensor.alloc(gpa, .f32, &.{ m, k });
+    defer w.deinit();
+    var x = try zynfer.Tensor.alloc(gpa, .f32, &.{k});
+    defer x.deinit();
+    var y = try zynfer.Tensor.alloc(gpa, .f32, &.{m});
+    defer y.deinit();
+    try w.fillF32(0.01);
+    try x.fillF32(0.02);
+    const q = try gpa.alloc(i8, m * k);
+    defer gpa.free(q);
+    const scale = try gpa.alloc(f32, m);
+    defer gpa.free(scale);
+    try zynfer.cpu.ops.packRowQ8(try w.f32s(), m, k, q, scale);
+
+    var i: usize = 0;
+    while (i < warmup) : (i += 1) {
+        try zynfer.cpu.ops.matvecQ8(try y.f32s(), q, scale, try x.f32s(), m, k, .per_row);
+    }
+    const t0 = std.Io.Clock.awake.now(io);
+    i = 0;
+    while (i < iters) : (i += 1) {
+        try zynfer.cpu.ops.matvecQ8(try y.f32s(), q, scale, try x.f32s(), m, k, .per_row);
+    }
+    const t1 = std.Io.Clock.awake.now(io);
+    const cpu_ns: u64 = @intCast(@max(@as(i96, 0), t1.nanoseconds - t0.nanoseconds));
+    try writer.print("{s} path={s} cpu_ns={d} iters={d} (pack excluded)\n", .{ name, path, cpu_ns / iters, iters });
+
+    var apple_ns: ?u64 = null;
+    if (gpu) |g| {
+        i = 0;
+        while (i < warmup) : (i += 1) {
+            try zynfer.apple.ops.matvecQ8(g, y, q, scale, x, .per_row);
+        }
+        const a0 = std.Io.Clock.awake.now(io);
+        i = 0;
+        while (i < iters) : (i += 1) {
+            try zynfer.apple.ops.matvecQ8(g, y, q, scale, x, .per_row);
+        }
+        const a1 = std.Io.Clock.awake.now(io);
+        apple_ns = @as(u64, @intCast(@max(@as(i96, 0), a1.nanoseconds - a0.nanoseconds))) / iters;
+        try writer.print("{s} path={s} apple_metal_ns={d} iters={d} (pack excluded)\n", .{ name, path, apple_ns.?, iters });
+    } else {
+        try writer.print("{s} path={s} apple_metal_ns=N/A\n", .{ name, path });
+    }
+    return .{ .name = name, .path = path, .cpu_ns = cpu_ns / iters, .apple_ns = apple_ns };
+}
+
+/// Fair int8 GEMM: pack once; compare to f32 ref row at 128³.
+fn benchFairQ8Matmul(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    writer: *std.Io.Writer,
+    gpu: ?*zynfer.apple.gpu.Gpu,
+    warmup: usize,
+    iters: usize,
+) !BenchRow {
+    const name = "matmul_q8_f32_128x128x128_prepacked";
+    const path = "matmul_q8_f32_per_row";
+    const m: usize = 128;
+    const k: usize = 128;
+    const n: usize = 128;
+    var w = try zynfer.Tensor.alloc(gpa, .f32, &.{ m, k });
+    defer w.deinit();
+    var b = try zynfer.Tensor.alloc(gpa, .f32, &.{ k, n });
+    defer b.deinit();
+    var c = try zynfer.Tensor.alloc(gpa, .f32, &.{ m, n });
+    defer c.deinit();
+    try w.fillF32(0.01);
+    try b.fillF32(0.02);
+    const q = try gpa.alloc(i8, m * k);
+    defer gpa.free(q);
+    const scale = try gpa.alloc(f32, m);
+    defer gpa.free(scale);
+    try zynfer.cpu.ops.packRowQ8(try w.f32s(), m, k, q, scale);
+
+    var i: usize = 0;
+    while (i < warmup) : (i += 1) {
+        try zynfer.cpu.ops.matmulQ8(try c.f32s(), q, scale, try b.f32s(), m, n, k, .per_row);
+    }
+    const t0 = std.Io.Clock.awake.now(io);
+    i = 0;
+    while (i < iters) : (i += 1) {
+        try zynfer.cpu.ops.matmulQ8(try c.f32s(), q, scale, try b.f32s(), m, n, k, .per_row);
+    }
+    const t1 = std.Io.Clock.awake.now(io);
+    const cpu_ns: u64 = @intCast(@max(@as(i96, 0), t1.nanoseconds - t0.nanoseconds));
+    try writer.print("{s} path={s} cpu_ns={d} iters={d} (pack excluded)\n", .{ name, path, cpu_ns / iters, iters });
+
+    var apple_ns: ?u64 = null;
+    if (gpu) |g| {
+        i = 0;
+        while (i < warmup) : (i += 1) {
+            try zynfer.apple.ops.matmulQ8(g, c, q, scale, b, .per_row);
+        }
+        const a0 = std.Io.Clock.awake.now(io);
+        i = 0;
+        while (i < iters) : (i += 1) {
+            try zynfer.apple.ops.matmulQ8(g, c, q, scale, b, .per_row);
+        }
+        const a1 = std.Io.Clock.awake.now(io);
+        apple_ns = @as(u64, @intCast(@max(@as(i96, 0), a1.nanoseconds - a0.nanoseconds))) / iters;
+        try writer.print("{s} path={s} apple_metal_ns={d} iters={d} (pack excluded)\n", .{ name, path, apple_ns.?, iters });
+    } else {
+        try writer.print("{s} path={s} apple_metal_ns=N/A\n", .{ name, path });
+    }
+    return .{ .name = name, .path = path, .cpu_ns = cpu_ns / iters, .apple_ns = apple_ns };
 }
 
 fn runBlockBench(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, forced: ?[]const u8) !void {

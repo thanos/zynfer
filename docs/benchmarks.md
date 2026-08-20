@@ -94,11 +94,11 @@ stages, not this baseline.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | CPU reference | Zig scalar f32 | none | op microbench | N/A | N/A | N/A | N/A | N/A | N/A | N/A | correctness oracle |
 | CPU reference | Zig scalar f32 | tiny-block f32 | prefill 8 / decode 8 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | `block-bench`; ns not tok/s |
-| CPU optimized | Accelerate vDSP | f32 | matmul ≥64³ | N/A | N/A | N/A | N/A | N/A | N/A | N/A | size-gated; stage5 result |
+| CPU optimized | Accelerate vDSP | f32 | matmul ≥64³ / matvec ≥256² | N/A | N/A | N/A | N/A | N/A | N/A | N/A | size-gated; stage5 result |
 | Metal baseline | naive MSL f32 | none | op microbench | N/A | N/A | N/A | N/A | N/A | N/A | N/A | implemented; see apple-ops result |
 | Metal baseline | naive MSL f32 | tiny-block f32 | prefill 8 / decode 8 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | per-op wait; host KV |
-| Metal optimized | simdgroup_matrix | f32 | matmul 64³ / 256³ | N/A | N/A | N/A | N/A | N/A | N/A | N/A | auto when M·N·K≥64³ |
-| Metal int8 GEMV | matvec_q8_f32 | int8×f32 scale | 256×256 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | explicit API; not auto over f32 |
+| Metal optimized | simdgroup / x4 | f32 | matmul 64³ / 256³ | N/A | N/A | N/A | N/A | N/A | N/A | N/A | auto ≥64³; x4 force-only |
+| Metal int8 GEMV/GEMM | matvec/matmul_q8_f32 | int8×f32 scale | 256² / 128³ prepacked | N/A | N/A | N/A | N/A | N/A | N/A | N/A | explicit API; not auto over f32 |
 | Metal fused | fused MSL | — | — | N/A | N/A | N/A | N/A | N/A | N/A | N/A | not built |
 | Core ML/ANE hybrid | — | — | — | N/A | N/A | N/A | N/A | N/A | N/A | N/A | not built |
 | HIP | RDNA 4 | — | device enum | N/A | N/A | N/A | N/A | N/A | N/A | N/A | Stage 0 probe only |

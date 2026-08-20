@@ -23,7 +23,8 @@ The project is also educational. Every major subsystem is developed in stages, b
 The Zig repository, HIP device enumeration (when ROCm is present),
 environment report, CPU f32 reference ops, naive Metal kernels, a tiny
 transformer-block fixture with an explicit KV cache, capability-gated
-`simdgroup_matrix` matmul, int8 GEMV, and Accelerate vDSP matmul exist.
+`simdgroup_matrix` matmul (incl. forceable `_x4`), int8 GEMV/GEMM, and
+Accelerate vDSP matmul/matvec exist.
 Qwen3-0.6B is not loaded. Tokenizer and sampling do not exist.
 
 On a Mac, `zig build test` differential-checks Metal against CPU.

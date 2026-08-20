@@ -59,9 +59,9 @@ The AMD curriculum still starts at Stage 1 (HIP alloc/copy) on the
 R9700. The development laptop additionally has a CPU oracle, naive
 Apple Metal ops, and a tiny transformer-block prefill/decode fixture.
 Apple Stages 0–5 are closed for the tiny fixture and measured matrix
-paths (simdgroup matmul, int8 GEMV API, Accelerate vDSP). Do not treat
-Metal-resident KV, wait removal, or Qwen loading as unfinished Stage 5
-work.
+paths (simdgroup(+x4) matmul, int8 GEMV/GEMM API, Accelerate vDSP
+matmul/matvec). Do not treat Metal-resident KV, wait removal, or Qwen
+loading as unfinished Stage 5 work.
 
 Do not start a full Qwen forward pass until a checkpoint loader exists.
 

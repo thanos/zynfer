@@ -8,9 +8,9 @@ Metal bridge. It is not the AMD production target.
 - CPU f32 oracle in `src/backends/cpu/ops.zig`
 - Metal f32 kernels: add, mul, silu_mul, rmsnorm, softmax, matmul,
   matvec, rope (Qwen3-style split-half), causal GQA attention (`kv_len` ≤ 64)
-- Stage 5: capability-gated `matmul_f32_simdgroup` (Apple7+, size-gated),
-  `matvec_q8_f32` (int8 weights + per-row scale), Accelerate `vDSP_mmul`
-  for large CPU matmuls
+- Stage 5: capability-gated `matmul_f32_simdgroup` / `matmul_f32_simdgroup_x4`
+  (Apple7+, size-gated), `matvec_q8_f32` / `matmul_q8_f32` (per-row or
+  per-tensor scale), Accelerate `vDSP_mmul` for large CPU matmul and matvec
 - Tiny transformer block: RMSNorm → QKV → RoPE → host KV append →
   attention → O + residual → SwiGLU residual
 - Separate `prefill` and `decode` entry points; decode does not allocate
@@ -21,8 +21,11 @@ Metal bridge. It is not the AMD production target.
 
 `simdgroup_matrix` is **used** when hardware reports Apple7+ and the
 matmul shape meets the measured size gate (`M·N·K ≥ 64³`, dims ≥ 8).
-Smaller shapes keep the naive `matmul_f32` fallback. Force with
-`ZYNFER_MATMUL_PATH=naive|simdgroup`.
+`matmul_f32_simdgroup_x4` is implemented and forceable
+(`ZYNFER_MATMUL_PATH=simdgroup_x4`) but **not** auto-selected: at 256³
+on M1 Max it was slower than the 1-SG kernel under the per-op wait
+baseline. Smaller shapes keep the naive `matmul_f32` fallback.
+Force with `ZYNFER_MATMUL_PATH=naive|simdgroup|simdgroup_x4`.
 
 Measured selection evidence: `bench/results/apple-stage5-dev-laptop.md`.
 
@@ -271,10 +274,11 @@ confirms it.
 | Path | Status |
 | --- | --- |
 | CPU scalar f32 | implemented; oracle |
-| CPU Accelerate vDSP matmul | size-gated on macOS; differential vs scalar |
+| CPU Accelerate vDSP matmul | size-gated on macOS (`M·N·K ≥ 64³`); differential vs scalar |
+| CPU Accelerate vDSP matvec | size-gated on macOS (`M·K ≥ 256²`); differential vs scalar |
 | Metal naive f32 | implemented; differentially tested |
-| Metal `simdgroup_matrix` matmul | Apple7+; auto when M·N·K≥64³ |
-| Metal int8 GEMV (`matvec_q8_f32`) | explicit API; not auto over f32 |
+| Metal `simdgroup_matrix` matmul | Apple7+; auto when M·N·K≥64³; `_x4` force-only (slower at 256³) |
+| Metal int8 GEMV/GEMM (`matvec_q8_f32` / `matmul_q8_f32`) | explicit API; fair (prepacked) benches; not auto over f32 |
 | SME / SME2 | not implemented |
 | Core ML / ANE | not implemented |
 | fp16 / bf16 Metal | dtype exists; kernels are f32 only |
