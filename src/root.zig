@@ -12,6 +12,8 @@ pub const dtype = @import("runtime/dtype.zig");
 pub const tensor = @import("runtime/tensor.zig");
 pub const backend = @import("runtime/backend.zig");
 pub const compare = @import("runtime/compare.zig");
+pub const kv_cache = @import("runtime/kv_cache.zig");
+pub const tiny_block = @import("model/tiny_block.zig");
 
 pub const cpu = struct {
     pub const ops = @import("backends/cpu/ops.zig");
@@ -20,6 +22,7 @@ pub const cpu = struct {
 pub const apple = struct {
     pub const gpu = @import("backends/apple/gpu.zig");
     pub const ops = @import("backends/apple/ops.zig");
+    pub const block = @import("backends/apple/block.zig");
 };
 
 pub const Device = device.Device;
@@ -36,7 +39,10 @@ test {
     _ = tensor;
     _ = backend;
     _ = compare;
+    _ = kv_cache;
+    _ = tiny_block;
     _ = cpu.ops;
     _ = apple.gpu;
     _ = apple.ops;
+    _ = apple.block;
 }

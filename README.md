@@ -18,12 +18,12 @@ The project is also educational. Every major subsystem is developed in stages, b
 
 ## Status
 
-**CPU oracle + Apple Metal baseline ops; Stage 0 diagnostics remain.**
+**CPU oracle + Apple Metal tiny-block prefill/decode; Stage 0 diagnostics remain.**
 
 The Zig repository, HIP device enumeration (when ROCm is present),
-environment report, CPU f32 reference ops, and naive Metal kernels
-exist. Qwen3-0.6B is not loaded. Transformer blocks, tokenizer, sampler,
-and KV cache do not exist.
+environment report, CPU f32 reference ops, naive Metal kernels, and a
+tiny transformer-block fixture with an explicit KV cache exist.
+Qwen3-0.6B is not loaded. Tokenizer and sampling do not exist.
 
 On a Mac, `zig build test` differential-checks Metal against CPU.
 `--backend` / `ZYNFER_BACKEND` select `cpu`, `apple`, or `amd-hip`.
@@ -1047,6 +1047,7 @@ zig build run -- gpu
 zig build run -- caps
 zig build run -- backends
 zig build ops-bench        # CPU vs Apple Metal op timings
+zig build block-bench      # tiny-block prefill/decode timings
 zig build bench            # time HIP property queries
 zig build integration      # CLI contracts against the installed binary
 zig build docs             # Zig autodoc → zig-out/docs/api

@@ -174,8 +174,12 @@ pub fn rope(x: Tensor, pos0: usize, theta: f32) OpsError!void {
 
 /// Causal grouped-query attention.
 /// q: [n_q_heads, q_len, d]
-/// k,v: [n_kv_heads, kv_len, d]
+/// k,v: [n_kv_heads, kv_stride, d] with the first `kv_len` positions valid
 /// out: [n_q_heads, q_len, d]
+///
+/// Queries are the last `q_len` positions of the KV sequence
+/// (`causal_ok` when `(kv_len - q_len + tq) >= tk`). Prefill uses
+/// `q_len == kv_len`. Decode uses `q_len == 1`.
 pub fn attention(
     out: Tensor,
     q: Tensor,
@@ -183,16 +187,33 @@ pub fn attention(
     v: Tensor,
     allocator: std.mem.Allocator,
 ) OpsError!void {
+    if (k.rank != 3) return error.InvalidShape;
+    const kv_len = k.shape[1];
+    const scores = allocator.alloc(f32, kv_len) catch return error.OutOfMemory;
+    defer allocator.free(scores);
+    try attentionInto(out, q, k, v, kv_len, kv_len, scores);
+}
+
+pub fn attentionInto(
+    out: Tensor,
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    kv_len: usize,
+    kv_stride: usize,
+    scores: []f32,
+) OpsError!void {
     if (q.rank != 3 or k.rank != 3 or v.rank != 3 or out.rank != 3) return error.InvalidShape;
     const n_q = q.shape[0];
     const q_len = q.shape[1];
     const d = q.shape[2];
     const n_kv = k.shape[0];
-    const kv_len = k.shape[1];
-    if (k.shape[2] != d or v.shape[0] != n_kv or v.shape[1] != kv_len or v.shape[2] != d)
-        return error.ShapeMismatch;
+    if (k.shape[1] != kv_stride or v.shape[1] != kv_stride) return error.ShapeMismatch;
+    if (k.shape[2] != d or v.shape[0] != n_kv or v.shape[2] != d) return error.ShapeMismatch;
     if (out.shape[0] != n_q or out.shape[1] != q_len or out.shape[2] != d) return error.ShapeMismatch;
     if (n_q % n_kv != 0) return error.InvalidShape;
+    if (kv_len > kv_stride or q_len > kv_len) return error.InvalidShape;
+    if (scores.len < kv_len) return error.ShapeMismatch;
 
     const qs = try q.f32s();
     const ks = try k.f32s();
@@ -200,9 +221,6 @@ pub fn attention(
     const os = try out.f32s();
     const group = n_q / n_kv;
     const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(d)));
-
-    const scores = allocator.alloc(f32, kv_len) catch return error.OutOfMemory;
-    defer allocator.free(scores);
 
     var h: usize = 0;
     while (h < n_q) : (h += 1) {
@@ -218,14 +236,14 @@ pub fn attention(
                     scores[tk] = -std.math.inf(f32);
                     continue;
                 }
-                const krow = ks[(kv_h * kv_len + tk) * d ..][0..d];
+                const krow = ks[(kv_h * kv_stride + tk) * d ..][0..d];
                 var dot: f32 = 0;
                 for (qrow, krow) |qv, kv| dot += qv * kv;
                 scores[tk] = dot * scale;
                 max_s = @max(max_s, scores[tk]);
             }
             var sum: f32 = 0;
-            for (scores) |*sc| {
+            for (scores[0..kv_len]) |*sc| {
                 if (std.math.isInf(sc.*)) {
                     sc.* = 0;
                 } else {
@@ -240,9 +258,49 @@ pub fn attention(
             while (tk < kv_len) : (tk += 1) {
                 const w = scores[tk] * inv;
                 if (w == 0) continue;
-                const vrow = vs[(kv_h * kv_len + tk) * d ..][0..d];
+                const vrow = vs[(kv_h * kv_stride + tk) * d ..][0..d];
                 for (orow, vrow) |*o, vv| o.* += w * vv;
             }
+        }
+    }
+}
+
+/// `in` is `[tokens, n_heads, d]`; `out` is `[n_heads, tokens, d]`.
+pub fn tokensHeadsToHeadsTokens(out: Tensor, in: Tensor) OpsError!void {
+    if (in.rank != 3 or out.rank != 3) return error.InvalidShape;
+    const tokens = in.shape[0];
+    const n_heads = in.shape[1];
+    const d = in.shape[2];
+    if (out.shape[0] != n_heads or out.shape[1] != tokens or out.shape[2] != d) return error.ShapeMismatch;
+    const xs = try in.f32s();
+    const ys = try out.f32s();
+    var t: usize = 0;
+    while (t < tokens) : (t += 1) {
+        var h: usize = 0;
+        while (h < n_heads) : (h += 1) {
+            const src = (t * n_heads + h) * d;
+            const dst = (h * tokens + t) * d;
+            @memcpy(ys[dst..][0..d], xs[src..][0..d]);
+        }
+    }
+}
+
+/// `in` is `[n_heads, tokens, d]`; `out` is `[tokens, n_heads, d]`.
+pub fn headsTokensToTokensHeads(out: Tensor, in: Tensor) OpsError!void {
+    if (in.rank != 3 or out.rank != 3) return error.InvalidShape;
+    const n_heads = in.shape[0];
+    const tokens = in.shape[1];
+    const d = in.shape[2];
+    if (out.shape[0] != tokens or out.shape[1] != n_heads or out.shape[2] != d) return error.ShapeMismatch;
+    const xs = try in.f32s();
+    const ys = try out.f32s();
+    var h: usize = 0;
+    while (h < n_heads) : (h += 1) {
+        var t: usize = 0;
+        while (t < tokens) : (t += 1) {
+            const src = (h * tokens + t) * d;
+            const dst = (t * n_heads + h) * d;
+            @memcpy(ys[dst..][0..d], xs[src..][0..d]);
         }
     }
 }
@@ -387,6 +445,62 @@ test "causal attention masks the future" {
     // first query can only see the first key/value
     try std.testing.expectApproxEqAbs(@as(f32, 1), (try o.f32s())[0], 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 0), (try o.f32s())[1], 1e-5);
+}
+
+test "attentionInto reads strided KV cache layout" {
+    var q = try Tensor.alloc(std.testing.allocator, .f32, &.{ 2, 1, 2 });
+    defer q.deinit();
+    var k = try Tensor.alloc(std.testing.allocator, .f32, &.{ 2, 4, 2 });
+    defer k.deinit();
+    var v = try Tensor.alloc(std.testing.allocator, .f32, &.{ 2, 4, 2 });
+    defer v.deinit();
+    var packed_k = try Tensor.alloc(std.testing.allocator, .f32, &.{ 2, 2, 2 });
+    defer packed_k.deinit();
+    var packed_v = try Tensor.alloc(std.testing.allocator, .f32, &.{ 2, 2, 2 });
+    defer packed_v.deinit();
+    var o_stride = try Tensor.alloc(std.testing.allocator, .f32, &.{ 2, 1, 2 });
+    defer o_stride.deinit();
+    var o_packed = try Tensor.alloc(std.testing.allocator, .f32, &.{ 2, 1, 2 });
+    defer o_packed.deinit();
+    try iotaFill(q, 0.25, 0.25);
+    try iotaFill(packed_k, 0.1, 0.1);
+    try iotaFill(packed_v, 0.2, 0.2);
+    try k.fillF32(0);
+    try v.fillF32(0);
+    const ks = try k.f32s();
+    const vs = try v.f32s();
+    const pks = try packed_k.f32s();
+    const pvs = try packed_v.f32s();
+    const d: usize = 2;
+    const packed_stride: usize = 2;
+    const cache_stride: usize = 4;
+    var h: usize = 0;
+    while (h < 2) : (h += 1) {
+        var tok: usize = 0;
+        while (tok < 2) : (tok += 1) {
+            const src = (h * packed_stride + tok) * d;
+            const dst = (h * cache_stride + tok) * d;
+            @memcpy(ks[dst..][0..d], pks[src..][0..d]);
+            @memcpy(vs[dst..][0..d], pvs[src..][0..d]);
+        }
+    }
+    var scores: [4]f32 = undefined;
+    try attentionInto(o_packed, q, packed_k, packed_v, 2, 2, scores[0..2]);
+    try attentionInto(o_stride, q, k, v, 2, 4, &scores);
+    try compare.expectClose(try o_packed.f32s(), try o_stride.f32s(), 1e-6, 0);
+}
+
+test "head time permute round-trips" {
+    var in = try Tensor.alloc(std.testing.allocator, .f32, &.{ 3, 2, 4 });
+    defer in.deinit();
+    var mid = try Tensor.alloc(std.testing.allocator, .f32, &.{ 2, 3, 4 });
+    defer mid.deinit();
+    var out = try Tensor.alloc(std.testing.allocator, .f32, &.{ 3, 2, 4 });
+    defer out.deinit();
+    try iotaFill(in, 0, 1);
+    try tokensHeadsToHeadsTokens(mid, in);
+    try headsTokensToTokensHeads(out, mid);
+    try compare.expectClose(try in.f32s(), try out.f32s(), 0, 0);
 }
 
 test "randomized matvec matches matmul with N=1 seed 7" {

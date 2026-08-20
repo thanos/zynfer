@@ -81,6 +81,12 @@ pub fn build(b: *std.Build) void {
     const ops_bench_step = b.step("ops-bench", "CPU vs Apple operation microbenchmarks");
     ops_bench_step.dependOn(&ops_bench_cmd.step);
 
+    const block_bench_cmd = b.addRunArtifact(exe);
+    block_bench_cmd.step.dependOn(b.getInstallStep());
+    block_bench_cmd.addArg("block-bench");
+    const block_bench_step = b.step("block-bench", "Tiny-block prefill/decode timings");
+    block_bench_step.dependOn(&block_bench_cmd.step);
+
     const bench_cmd = b.addRunArtifact(exe);
     bench_cmd.step.dependOn(b.getInstallStep());
     bench_cmd.addArg("bench");
@@ -179,12 +185,20 @@ pub fn build(b: *std.Build) void {
     bad_backend.addArg("cuda");
     bad_backend.expectExitCode(2);
 
+    const block_cpu = b.addRunArtifact(exe);
+    block_cpu.addArg("block-bench");
+    block_cpu.addArg("--backend");
+    block_cpu.addArg("cpu");
+    block_cpu.expectStdOutMatch("tiny-block");
+    block_cpu.expectExitCode(0);
+
     const integration_step = b.step("integration", "Run CLI integration tests");
     integration_step.dependOn(&run_integration.step);
     integration_step.dependOn(&help_run.step);
     integration_step.dependOn(&env_ok.step);
     integration_step.dependOn(&caps_cpu.step);
     integration_step.dependOn(&bad_backend.step);
+    integration_step.dependOn(&block_cpu.step);
 
     const docs_lib = b.addLibrary(.{
         .name = "zynfer",

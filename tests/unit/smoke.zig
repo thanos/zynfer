@@ -8,7 +8,10 @@ test "library exports runtime and backends" {
     _ = zynfer.Device;
     _ = zynfer.cpu.ops;
     _ = zynfer.apple.ops;
+    _ = zynfer.apple.block;
     _ = zynfer.backend;
+    _ = zynfer.tiny_block;
+    _ = zynfer.kv_cache;
 }
 
 test "HIP error formatting has no stale state initially" {

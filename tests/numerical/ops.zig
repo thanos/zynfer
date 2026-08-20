@@ -4,6 +4,8 @@ const zynfer = @import("zynfer");
 test "CPU and Apple numerical suites are wired" {
     _ = zynfer.cpu.ops;
     _ = zynfer.apple.ops;
+    _ = zynfer.apple.block;
+    _ = zynfer.tiny_block;
     _ = zynfer.compare;
 }
 

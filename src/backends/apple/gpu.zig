@@ -175,7 +175,7 @@ pub const Gpu = struct {
         caps.addDisabled("SME/SME2 not implemented with the supported Zig/Clang toolchain");
         caps.addDisabled("Core ML/ANE not implemented (experimental, gated off)");
         caps.addDisabled("fp16/bf16 Metal kernels not implemented");
-        caps.addDisabled("No Qwen loader, KV cache, or full prefill/decode path yet");
+        caps.addDisabled("No Qwen loader/tokenizer/sampling; tiny-block KV cache is host tensors uploaded per attention");
         return caps;
     }
 

@@ -225,3 +225,76 @@ kernel void rope_f32(
     x[base + i] = a * c - b * s;
     x[base + i + half_d] = a * s + b * c;
 }
+
+struct AttentionParams {
+    uint n_q;
+    uint n_kv;
+    uint q_len;
+    uint kv_len;
+    uint kv_stride;
+    uint head_dim;
+};
+
+// One thread per (q_token, q_head). Scores live in thread-local memory.
+// kv_len is capped at 64; the Zig caller returns Unsupported above that.
+kernel void attention_f32(
+    device const float *q [[buffer(0)]],
+    device const float *k [[buffer(1)]],
+    device const float *v [[buffer(2)]],
+    device float *out [[buffer(3)]],
+    constant AttentionParams &p [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint tq = gid.x;
+    uint h = gid.y;
+    if (tq >= p.q_len || h >= p.n_q || p.kv_len > 64) {
+        return;
+    }
+    uint group = p.n_q / p.n_kv;
+    uint kv_h = h / group;
+    uint d = p.head_dim;
+    float scale = rsqrt(float(d));
+    thread float scores[64];
+
+    device const float *qrow = q + (h * p.q_len + tq) * d;
+    float max_s = -INFINITY;
+    for (uint tk = 0; tk < p.kv_len; tk++) {
+        bool causal_ok = (p.kv_len - p.q_len + tq) >= tk;
+        if (!causal_ok) {
+            scores[tk] = -INFINITY;
+            continue;
+        }
+        device const float *krow = k + (kv_h * p.kv_stride + tk) * d;
+        float dot = 0.0f;
+        for (uint i = 0; i < d; i++) {
+            dot += qrow[i] * krow[i];
+        }
+        scores[tk] = dot * scale;
+        max_s = max(max_s, scores[tk]);
+    }
+
+    float sum = 0.0f;
+    for (uint tk = 0; tk < p.kv_len; tk++) {
+        if (isinf(scores[tk])) {
+            scores[tk] = 0.0f;
+        } else {
+            scores[tk] = exp(scores[tk] - max_s);
+            sum += scores[tk];
+        }
+    }
+    float inv = (sum == 0.0f) ? 0.0f : 1.0f / sum;
+    device float *orow = out + (h * p.q_len + tq) * d;
+    for (uint i = 0; i < d; i++) {
+        orow[i] = 0.0f;
+    }
+    for (uint tk = 0; tk < p.kv_len; tk++) {
+        float w = scores[tk] * inv;
+        if (w == 0.0f) {
+            continue;
+        }
+        device const float *vrow = v + (kv_h * p.kv_stride + tk) * d;
+        for (uint i = 0; i < d; i++) {
+            orow[i] += w * vrow[i];
+        }
+    }
+}

@@ -30,6 +30,8 @@ pub const Tensor = struct {
     strides: [max_rank]usize,
     data: []u8,
     allocator: std.mem.Allocator,
+    /// False for `viewAs` results. Only the owning tensor may `deinit`.
+    owns: bool,
 
     pub fn alloc(allocator: std.mem.Allocator, dtype: DType, shape: []const usize) TensorError!Tensor {
         if (shape.len == 0 or shape.len > max_rank) return error.RankTooHigh;
@@ -40,6 +42,7 @@ pub const Tensor = struct {
             .strides = .{ 0, 0, 0, 0 },
             .data = &.{},
             .allocator = allocator,
+            .owns = true,
         };
         for (shape, 0..) |extent, i| {
             if (extent == 0) return error.InvalidShape;
@@ -54,8 +57,29 @@ pub const Tensor = struct {
     }
 
     pub fn deinit(self: *Tensor) void {
-        if (self.data.len != 0) self.allocator.free(self.data);
+        if (self.owns and self.data.len != 0) self.allocator.free(self.data);
         self.data = &.{};
+        self.owns = false;
+    }
+
+    /// Packed row-major view of a prefix of `self`. Do not `deinit` the result.
+    pub fn viewAs(self: Tensor, shape: []const usize) TensorError!Tensor {
+        if (shape.len == 0 or shape.len > max_rank) return error.RankTooHigh;
+        var t = self;
+        t.owns = false;
+        t.rank = @intCast(shape.len);
+        t.shape = .{ 0, 0, 0, 0 };
+        t.strides = .{ 0, 0, 0, 0 };
+        for (shape, 0..) |extent, i| {
+            if (extent == 0) return error.InvalidShape;
+            t.shape[i] = extent;
+        }
+        fillContiguousStrides(&t);
+        const n = t.numel() catch return error.Overflow;
+        const bytes = byteSize(t.dtype, n) catch return error.Overflow;
+        if (bytes > self.data.len) return error.InvalidShape;
+        t.data = self.data[0..bytes];
+        return t;
     }
 
     pub fn numel(self: Tensor) error{Overflow}!usize {
@@ -132,4 +156,14 @@ test "contiguous f32 tensor round-trip" {
 
 test "zero dimension is rejected" {
     try std.testing.expectError(error.InvalidShape, Tensor.alloc(std.testing.allocator, .f32, &.{ 2, 0 }));
+}
+
+test "viewAs packed prefix does not own storage" {
+    var t = try Tensor.alloc(std.testing.allocator, .f32, &.{ 4, 2 });
+    defer t.deinit();
+    try t.fillF32(3);
+    const v = try t.viewAs(&.{ 1, 2 });
+    try std.testing.expect(!v.owns);
+    try std.testing.expectEqual(@as(usize, 2), try v.numel());
+    try std.testing.expectEqual(@as(f32, 3), (try v.f32s())[0]);
 }
