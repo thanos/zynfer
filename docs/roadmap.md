@@ -24,7 +24,7 @@ when correctness is unresolved.
 | 7 | RoPE | CPU + Metal f32; not HIP |
 | 8 | Attention from scratch | CPU + Metal f32 (`kv_len` ≤ 256 on Metal) |
 | 9 | One complete transformer block | **done as tiny fixture**; not a Qwen block |
-| 10 | Checkpoint inspection and artifact compiler | not started (absorbs Qwen loader deferred from Apple-6) |
+| 10 | Checkpoint inspection and artifact compiler | **done** (`.zynfer` v1 + inspect/load; see `bench/results/stage10-dev-laptop.md`) |
 | 11 | Full Qwen3-0.6B forward pass | not started (absorbs golden logits deferred from Apple-6) |
 | 12 | Tokenizer and sampling | not started (absorbs TTFT/tok/s deferred from Apple-6) |
 | 13 | KV cache | **host layout + Metal-resident for tiny block** |
@@ -66,7 +66,46 @@ stress tests; ICB/fp16/extra tiny-block fusions rejected with reasons).
 Do not treat Qwen loading as unfinished Apple Stage 6–8 work—it is
 mapped to curriculum Stages 10–12 / 16 (see `docs/apple-backend.md`).
 
-Do not start a full Qwen forward pass until a checkpoint loader exists.
+Do not start a full Qwen forward pass until a checkpoint loader exists
+(Stage 10 provides the `.zynfer` loader; Stage 11 is the forward).
 
 See `docs/apple-backend.md` for the deferred→stage map and the
 Instruments recipe for wait dominance.
+
+## Post–v0.1.0 plan
+
+Apple Stages 0–8 are **closed**. Remaining work is curriculum Stages
+1–25 (AMD + real model), not more Apple-tiny-block polish.
+
+### Track A — Make it an LLM (Mac-first)
+
+| Order | Stage | Goal |
+| --- | --- | --- |
+| 1 | **10** | **done** — checkpoint inspect + `.zynfer` artifact compiler / loader |
+| 2 | **11** | Full Qwen3-0.6B forward + golden logits (CPU first) |
+| 3 | **12** | Tokenizer + sampling → real TTFT / tok/s / ITL |
+
+Until Stage 12, vocabulary TTFT/tok/s stay N/A in the benchmark matrix.
+
+### Track B — AMD / HIP (when RDNA 4 hardware is available)
+
+| Order | Stage | Goal |
+| --- | --- | --- |
+| parallel | **1** | HIP alloc / copy / streams (Milestone A) |
+| then | **2–8** | Port CPU/Metal math onto HIP |
+| then | **9** | One **Qwen** block on HIP (tiny fixture already done) |
+
+Hardware: Mac daily → economical RDNA 4 lab card → rent R9700 only for
+large/final validation (`baoulo` multi-backend prompt).
+
+### Track C — Engine depth (after tokens exist)
+
+Stages **13–14** expand KV / prefill-decode to Qwen scale; **15**
+profiles one token; **16** takes Qwen-scale fusion / ICB leftovers;
+**17–25** graphs, quant, `gfx1201` tuning, serving, larger checkpoints.
+
+### Do not reopen
+
+Apple 0–8 tiny-block rejects (SME/Core ML inference, Session int8 on the
+toy block, speculative extra MSL fusions) stay closed until Stage 16 has
+realistic shapes.

@@ -106,3 +106,25 @@ test "stage8 prints hardening ledger" {
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "256") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "REJECT") != null);
 }
+
+test "stage10 prints artifact ledger" {
+    var out = try run(&.{"stage10"});
+    defer out.deinit(std.testing.allocator);
+    try expectExited(out, 0);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "Stage 10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "ZYNF") != null);
+}
+
+test "artifact-compile then inspect round-trips" {
+    const path = "zig-out/stage10-fixture.zynfer";
+    var compile = try run(&.{ "artifact-compile", "--out", path });
+    defer compile.deinit(std.testing.allocator);
+    try expectExited(compile, 0);
+    try std.testing.expect(std.mem.indexOf(u8, compile.stdout, "wrote") != null);
+
+    var inspect = try run(&.{ "inspect", path });
+    defer inspect.deinit(std.testing.allocator);
+    try expectExited(inspect, 0);
+    try std.testing.expect(std.mem.indexOf(u8, inspect.stdout, "qwen3-0.6b") != null);
+    try std.testing.expect(std.mem.indexOf(u8, inspect.stdout, "fixture.embed") != null);
+}

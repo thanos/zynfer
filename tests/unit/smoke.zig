@@ -12,6 +12,8 @@ test "library exports runtime and backends" {
     _ = zynfer.backend;
     _ = zynfer.tiny_block;
     _ = zynfer.kv_cache;
+    _ = zynfer.artifact;
+    _ = zynfer.qwen3;
 }
 
 test "HIP error formatting has no stale state initially" {

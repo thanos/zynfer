@@ -11,6 +11,9 @@ const usage =
     \\  zynfer caps         Backend/device capabilities and fallbacks
     \\  zynfer stage7       SME / Core ML Stage 7 probe + retain/reject ledger
     \\  zynfer stage8       Hardening leftovers + retain/reject ledger
+    \\  zynfer stage10      Checkpoint / .zynfer artifact Stage 10 ledger
+    \\  zynfer inspect PATH Validate and print a .zynfer artifact
+    \\  zynfer artifact-compile [--out PATH]  Write Stage 10 fixture .zynfer
     \\  zynfer backends     List selectable backends
     \\  zynfer ops-bench    CPU vs Apple op microbenchmarks
     \\  zynfer block-bench  Tiny-block prefill/decode timings
@@ -42,6 +45,9 @@ pub fn main(init: std.process.Init) !void {
     var command: []const u8 = "all";
     var have_command = false;
     var forced_backend: ?[]const u8 = null;
+    var out_path: ?[]const u8 = null;
+    var positionals: [8][]const u8 = undefined;
+    var n_pos: usize = 0;
     while (args_it.next()) |arg| {
         if (std.mem.eql(u8, arg, "--backend")) {
             forced_backend = args_it.next() orelse {
@@ -50,9 +56,26 @@ pub fn main(init: std.process.Init) !void {
             };
         } else if (std.mem.startsWith(u8, arg, "--backend=")) {
             forced_backend = arg["--backend=".len..];
+        } else if (std.mem.eql(u8, arg, "--out")) {
+            out_path = args_it.next() orelse {
+                std.debug.print("missing value for --out\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.startsWith(u8, arg, "--out=")) {
+            out_path = arg["--out=".len..];
         } else if (!have_command and !std.mem.startsWith(u8, arg, "-")) {
             command = arg;
             have_command = true;
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            if (n_pos >= positionals.len) {
+                std.debug.print("too many arguments\n", .{});
+                std.process.exit(2);
+            }
+            positionals[n_pos] = arg;
+            n_pos += 1;
+        } else {
+            std.debug.print("unknown flag: {s}\n", .{arg});
+            std.process.exit(2);
         }
     }
     if (forced_backend == null) {
@@ -84,6 +107,17 @@ pub fn main(init: std.process.Init) !void {
         try printStage7(writer);
     } else if (std.mem.eql(u8, command, "stage8")) {
         try printStage8(writer);
+    } else if (std.mem.eql(u8, command, "stage10")) {
+        try printStage10(writer);
+    } else if (std.mem.eql(u8, command, "inspect")) {
+        if (n_pos < 1) {
+            std.debug.print("usage: zynfer inspect PATH.zynfer\n", .{});
+            std.process.exit(2);
+        }
+        try runInspect(allocator, io, writer, positionals[0]);
+    } else if (std.mem.eql(u8, command, "artifact-compile")) {
+        const path = out_path orelse (if (n_pos >= 1) positionals[0] else "stage10-fixture.zynfer");
+        try runArtifactCompile(allocator, io, writer, path);
     } else if (std.mem.eql(u8, command, "backends")) {
         try printBackends(writer);
     } else if (std.mem.eql(u8, command, "ops-bench")) {
@@ -232,6 +266,85 @@ fn printStage8(writer: *std.Io.Writer) !void {
     try writer.print("  Accelerate size-gated vDSP (Stage 5)\n", .{});
     try writer.print("  SME/Core ML inference: rejected (Stage 7)\n", .{});
     try writer.print("\nSee bench/results/apple-stage8-dev-laptop.md\n", .{});
+}
+
+fn printStage10(writer: *std.Io.Writer) !void {
+    try writer.print("zynfer Stage 10 — checkpoint inspection + .zynfer artifact\n", .{});
+    try writer.print("=========================================================\n\n", .{});
+    try writer.print("Done\n", .{});
+    try writer.print("  format:           magic ZYNF v{d}, little-endian, 64-byte payload align\n", .{zynfer.artifact.format_version});
+    try writer.print("  meta:             Qwen3-0.6B dims (HF config) in binary Meta\n", .{});
+    try writer.print("  integrity:        SHA-256 over file with checksum field zeroed\n", .{});
+    try writer.print("  Zig API:          artifact.build / validate / Artifact.load*\n", .{});
+    try writer.print("  CLI:              inspect PATH; artifact-compile --out PATH\n", .{});
+    try writer.print("  converter:        tools/checkpoint/safetensors_to_zynfer.py\n\n", .{});
+    try writer.print("Not in Stage 10\n", .{});
+    try writer.print("  full Qwen weight conversion in CI (needs HF download)\n", .{});
+    try writer.print("  forward pass / logits — Stage 11\n", .{});
+    try writer.print("  tokenizer / sampling / TTFT — Stage 12\n\n", .{});
+    try writer.print("See docs/artifact-format.md and bench/results/stage10-dev-laptop.md\n", .{});
+}
+
+fn runInspect(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, path: []const u8) !void {
+    var art = zynfer.artifact.Artifact.loadFile(allocator, io, path) catch |err| {
+        std.debug.print("inspect failed ({s}): {s}\n", .{ path, @errorName(err) });
+        std.process.exit(2);
+    };
+    defer art.deinit();
+
+    var hex_buf: [64]u8 = undefined;
+    const hex = zynfer.artifact.formatSha256(&art.header.sha256, &hex_buf);
+
+    try writer.print("zynfer artifact\n", .{});
+    try writer.print("===============\n\n", .{});
+    try writer.print("path:            {s}\n", .{path});
+    try writer.print("format_version:  {d}\n", .{art.header.version});
+    try writer.print("sha256:          {s}\n", .{hex});
+    try writer.print("bytes:           {d}\n", .{art.bytes.len});
+    try writer.print("payload_bytes:   {d}\n", .{art.header.payload_bytes});
+    try writer.print("\nmodel_id:        {s}\n", .{art.meta.modelIdSlice()});
+    try writer.print("vocab_size:      {d}\n", .{art.meta.vocab_size});
+    try writer.print("hidden_size:     {d}\n", .{art.meta.hidden_size});
+    try writer.print("intermediate:    {d}\n", .{art.meta.intermediate_size});
+    try writer.print("layers:          {d}\n", .{art.meta.num_layers});
+    try writer.print("heads / kv:      {d} / {d}\n", .{ art.meta.num_attention_heads, art.meta.num_key_value_heads });
+    try writer.print("head_dim:        {d}\n", .{art.meta.head_dim});
+    try writer.print("max_position:    {d}\n", .{art.meta.max_position_embeddings});
+    try writer.print("rope_theta:      {d}\n", .{art.meta.rope_theta});
+    try writer.print("rms_norm_eps:    {e}\n", .{art.meta.rms_norm_eps});
+    try writer.print("tie_embeddings:  {d}\n", .{art.meta.tie_word_embeddings});
+    try writer.print("\ntensors ({d}):\n", .{art.entries.len});
+    for (art.entries) |e| {
+        try writer.print("  - {s}  id={d}  dtype={s}  rank={d}  shape=[", .{
+            e.nameSlice(),
+            e.tensor_id,
+            (try e.dtypeTag()).name(),
+            e.rank,
+        });
+        var i: u8 = 0;
+        while (i < e.rank) : (i += 1) {
+            if (i != 0) try writer.writeAll(",");
+            try writer.print("{d}", .{e.shape[i]});
+        }
+        try writer.print("]  nbytes={d}\n", .{e.nbytes});
+    }
+}
+
+fn runArtifactCompile(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, path: []const u8) !void {
+    const bytes = try zynfer.artifact.buildStage10Fixture(allocator);
+    defer allocator.free(bytes);
+
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
+
+    var hex_buf: [64]u8 = undefined;
+    const v = try zynfer.artifact.validate(bytes);
+    const hex = zynfer.artifact.formatSha256(&v.header.sha256, &hex_buf);
+    try writer.print("wrote {s} ({d} bytes, sha256={s}, tensors={d})\n", .{
+        path,
+        bytes.len,
+        hex,
+        v.header.tensor_count,
+    });
 }
 
 fn printCaps(writer: *std.Io.Writer, forced: ?[]const u8) !void {

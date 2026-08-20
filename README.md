@@ -19,6 +19,8 @@ The project is also educational. Every major subsystem is developed in stages, b
 ## Status
 
 **v0.1.0 — Apple Metal tiny-block backend complete (Stages 0–8).**
+Curriculum Stage **10** (`.zynfer` artifact inspect/load) is in-tree next;
+Stages 11–12 are not done.
 
 The Zig repository, HIP device enumeration (when ROCm is present),
 environment report, CPU f32 reference ops, Metal kernels, a tiny
@@ -1059,6 +1061,17 @@ zig build run -- caps
 zig build run -- backends
 zig build run -- stage7    # SME / Core ML Stage 7 probe + retain/reject ledger
 zig build run -- stage8    # hardening leftovers + retain/reject ledger
+zig build stage10          # .zynfer artifact Stage 10 ledger
+# Stage 10 fixture:
+#   ./zig-out/bin/zynfer artifact-compile --out stage10-fixture.zynfer
+#   ./zig-out/bin/zynfer inspect stage10-fixture.zynfer
+# Optional full Qwen weights (use `hf`; `huggingface-cli` is deprecated):
+#   hf download Qwen/Qwen3-0.6B --local-dir models/Qwen3-0.6B
+#   python3 tools/checkpoint/safetensors_to_zynfer.py \
+#     --config models/Qwen3-0.6B/config.json \
+#     --weights models/Qwen3-0.6B/model.safetensors \
+#     --out models/qwen3-0.6b.zynfer
+#   ./zig-out/bin/zynfer inspect models/qwen3-0.6b.zynfer
 zig build ops-bench        # CPU vs Apple Metal op timings
 zig build block-bench      # tiny-block prefill/decode (path labels in JSON)
 # A/B Stage 6 vs per-op:
