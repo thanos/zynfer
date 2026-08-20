@@ -42,8 +42,10 @@ They are not the same enum.
 | HIP probe | `src/hip.zig` + `src/hip_probe.c` | Zig + C | Enumeration only until the AMD op path exists |
 
 The smallest end-to-end fixture is one tiny transformer block with an
-explicit KV cache. Prefill and decode are separate entry points. Qwen
-weights, tokenizer, and sampling are still deferred.
+explicit host KV cache. Prefill and decode are separate entry points.
+Apple Stages 0–4 are closed for that fixture. Qwen weights, tokenizer,
+sampling, Metal-resident KV, and wait/fusion work are deferred (see
+`docs/apple-backend.md`).
 
 ## Apple memory and synchronization
 

@@ -178,7 +178,7 @@ fn printCaps(writer: *std.Io.Writer, forced: ?[]const u8) !void {
                 yn(feat.gpu_family_apple8),
                 yn(feat.gpu_family_apple9),
             });
-            try writer.print("  chosen kernels: naive f32 Metal (add, mul, silu_mul, rmsnorm, softmax, matmul, matvec, rope, attention)\n", .{});
+            try writer.print("  chosen kernels: naive f32 Metal (add, mul, silu_mul, rmsnorm, softmax, matmul, matvec, rope, attention; attention kv_len<=64)\n", .{});
         },
         else => {},
     }
