@@ -40,8 +40,12 @@ pub const AppleMFeatures = struct {
     /// Presence of the feature is not proof that a simdgroup_matrix kernel ran.
     simdgroup_matrix_available: bool = false,
     accelerate_available: bool = false,
+    /// Core ML framework probe succeeded (not proof of ANE execution).
     core_ml_available: bool = false,
+    /// Host `FEAT_SME` (M4+). Not proof that SME kernels run.
     sme_available: bool = false,
+    /// Host `FEAT_SME2`.
+    sme2_available: bool = false,
 
     pub fn nameSlice(self: *const AppleMFeatures) []const u8 {
         return std.mem.sliceTo(&self.device_name, 0);
@@ -76,10 +80,13 @@ pub const Capabilities = struct {
     bf16: bool = false,
     simdgroup_matrix: bool = false,
     accelerate: bool = false,
+    /// Retained Core ML/ANE inference path (Stage 7: always false until measured).
     core_ml: bool = false,
+    /// Retained SME kernel path (Stage 7: always false until measured).
+    sme: bool = false,
     hip: bool = false,
     /// Human-readable reasons that optional paths are disabled.
-    disabled: [8][]const u8 = [_][]const u8{""} ** 8,
+    disabled: [16][]const u8 = [_][]const u8{""} ** 16,
     disabled_len: usize = 0,
 
     pub fn addDisabled(self: *Capabilities, reason: []const u8) void {
@@ -123,6 +130,8 @@ pub fn defaultKind() BackendKind {
 }
 
 pub fn cpuCapabilities() Capabilities {
+    const sme = @import("../backends/cpu/sme.zig");
+    const sme_p = sme.probe();
     var caps = Capabilities{
         .backend = .cpu,
         .arch = .generic_cpu,
@@ -131,15 +140,18 @@ pub fn cpuCapabilities() Capabilities {
         .fp16 = false,
         .bf16 = false,
         .accelerate = build_options.have_apple,
+        .sme = sme_p.path_retained,
+        .core_ml = false,
     };
     caps.addDisabled("fp16 CPU path not implemented (f32 oracle only)");
     if (!build_options.have_apple) {
         caps.addDisabled("Accelerate/BNNS not available on this host; CPU path is the scalar reference");
     } else {
         caps.addDisabled("Accelerate vDSP matmul is size-gated (M*N*K>=262144); scalar remains the oracle");
+        caps.addDisabled("AMX is not a public contract; attribute CPU matrix wins to Accelerate APIs only");
     }
-    caps.addDisabled("SME/SME2 not implemented");
-    caps.addDisabled("Core ML/ANE not implemented");
+    caps.addDisabled(sme_p.detail);
+    caps.addDisabled("Core ML/ANE inference path disabled (Stage 7: no measured subgraph)");
     return caps;
 }
 

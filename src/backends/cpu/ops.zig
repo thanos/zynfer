@@ -1,8 +1,9 @@
 //! Deterministic f32 CPU reference for the operations the LLM actually uses.
 //!
 //! Readable scalar loops on purpose. This is the correctness oracle, not the
-//! production CPU path. Accelerate/SME candidates, if added later, must be
-//! checked against these functions.
+//! production CPU path. Accelerate is size-gated (Stage 5). SME is probed
+//! in Stage 7 (`sme.zig`) but kernels are not retained. Accelerated backends
+//! are differentially checked against these functions.
 
 const std = @import("std");
 const Tensor = @import("../../runtime/tensor.zig").Tensor;

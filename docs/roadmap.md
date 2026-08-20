@@ -13,7 +13,7 @@ when correctness is unresolved.
 | Apple-4 | Prefill/decode + KV cache | **done for tiny-block fixture** (closeout polish: long-context + no-growth tests, Instruments recipe, deferred list) |
 | Apple-5 | simdgroup_matrix / quantized GEMV / Accelerate | **done** (size-gated; see `bench/results/apple-stage5-dev-laptop.md`) |
 | Apple-6 | Fusion / fewer waits / Metal-resident KV | **done** (one CB/wait + resident KV; see `bench/results/apple-stage6-dev-laptop.md`) |
-| Apple-7 | SME / Core ML experiments | deferred (carries Stage 6 SME/ANE leftover) |
+| Apple-7 | SME / Core ML experiments | **done** (probed; both inference paths **rejected** — `bench/results/apple-stage7-dev-laptop.md`) |
 | Apple-8 | Hardening + Stage 6 leftovers | not started (ICB/replay, further fusions, kv_len, fp16, signposts/metrics; fused vs baseline A/B **done**) |
 | 1 | Zig meets HIP (alloc, copy, streams) | not started |
 | 2 | First AMD kernel (vector add) | not started |
@@ -59,11 +59,12 @@ when correctness is unresolved.
 The AMD curriculum still starts at Stage 1 (HIP alloc/copy) on the
 R9700. The development laptop additionally has a CPU oracle, naive
 Apple Metal ops, and a tiny transformer-block prefill/decode fixture.
-Apple Stages 0–6 are closed for the tiny fixture: measured matrix paths
-(Stage 5) and one-CB/wait + Metal-resident KV (Stage 6). Do not treat
-Qwen loading or further speculative fusions as unfinished Stage 6 work—
-they are mapped to Apple-7/8 and curriculum Stages 10–12 / 16 (see
-`docs/apple-backend.md` deferred table).
+Apple Stages 0–7 are closed for the tiny fixture: measured matrix paths
+(Stage 5), one-CB/wait + Metal-resident KV (Stage 6), and Stage 7 SME /
+Core ML probes with both experimental inference paths explicitly
+rejected. Do not treat Qwen loading or further speculative fusions as
+unfinished Stage 6/7 work—they are mapped to Apple-8 and curriculum
+Stages 10–12 / 16 (see `docs/apple-backend.md` deferred table).
 
 Do not start a full Qwen forward pass until a checkpoint loader exists.
 

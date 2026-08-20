@@ -44,10 +44,11 @@ They are not the same enum.
 
 The smallest end-to-end fixture is one tiny transformer block with an
 explicit host KV cache. Prefill and decode are separate entry points.
-Apple Stages 0–6 are closed for that fixture. Deferred leftovers are
-mapped to Apple-7/8 and curriculum Stages 10–12 / 16 (see
-`docs/apple-backend.md`)—Qwen weights, tokenizer, sampling, SME/ANE,
-further fusions, ICB/replay, and vocabulary TTFT are not silent drops.
+Apple Stages 0–7 are closed for that fixture. Deferred leftovers are
+mapped to Apple-8 and curriculum Stages 10–12 / 16 (see
+`docs/apple-backend.md`)—Qwen weights, tokenizer, sampling, further
+fusions, ICB/replay, and vocabulary TTFT are not silent drops. SME and
+Core ML/ANE were probed in Stage 7 and **rejected** as inference paths.
 
 ## Apple memory and synchronization
 
@@ -81,7 +82,8 @@ x[t,H] → RMSNorm → QKV → RoPE → KV append → causal GQA → O + residua
 - No generic tensor framework.
 - No CUDA-shaped graph runtime.
 - No silent backend fallback: `--backend cuda` exits 2.
-- Do not claim AMX, SME/SME2, or ANE/Core ML execution; those remain
-  disabled. `simdgroup_matrix` and Accelerate are used only when
-  capability- and size-gated selection chooses them (see Stage 5 docs).
+- Do not claim AMX, SME/SME2, or ANE/Core ML **execution**; Stage 7
+  probes SME hardware and Core ML availability, then keeps those
+  inference paths disabled. `simdgroup_matrix` and Accelerate are used
+  only when capability- and size-gated selection chooses them.
 - No multi-GPU path.
