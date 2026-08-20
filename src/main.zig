@@ -11,6 +11,7 @@ const usage =
     \\  zynfer caps         Backend/device capabilities and fallbacks
     \\  zynfer backends     List selectable backends
     \\  zynfer ops-bench    CPU vs Apple op microbenchmarks
+    \\  zynfer block-bench  Tiny-block prefill/decode timings
     \\  zynfer bench        HIP query timing (AMD host)
     \\  zynfer help
     \\
@@ -74,6 +75,8 @@ pub fn main(init: std.process.Init) !void {
         try printBackends(writer);
     } else if (std.mem.eql(u8, command, "ops-bench")) {
         try runOpsBench(allocator, io, writer, forced_backend);
+    } else if (std.mem.eql(u8, command, "block-bench")) {
+        try runBlockBench(allocator, io, writer, forced_backend);
     } else if (std.mem.eql(u8, command, "bench")) {
         try printEnv(host, writer);
         try writer.writeAll("\n");
@@ -175,7 +178,7 @@ fn printCaps(writer: *std.Io.Writer, forced: ?[]const u8) !void {
                 yn(feat.gpu_family_apple8),
                 yn(feat.gpu_family_apple9),
             });
-            try writer.print("  chosen kernels: naive f32 Metal (add, mul, silu_mul, rmsnorm, softmax, matmul, matvec, rope)\n", .{});
+            try writer.print("  chosen kernels: naive f32 Metal (add, mul, silu_mul, rmsnorm, softmax, matmul, matvec, rope, attention)\n", .{});
         },
         else => {},
     }
@@ -356,6 +359,174 @@ fn benchMatmul(gpa: std.mem.Allocator, gpu: ?*zynfer.apple.gpu.Gpu) !void {
     } else {
         try zynfer.cpu.ops.matmul(c, a, b);
     }
+}
+
+fn runBlockBench(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, forced: ?[]const u8) !void {
+    const kind = try resolveKind(forced);
+    const spec = zynfer.tiny_block.fixture_spec;
+    const prefill_tokens: usize = 8;
+    const decode_steps: usize = 8;
+    const warmup: usize = 1;
+    const iters: usize = 4;
+
+    try writer.print("zynfer block-bench\n", .{});
+    try writer.print("==================\n", .{});
+    try writer.print("backend={s}  fixture=tiny-block hidden={d} n_q={d} n_kv={d} head_dim={d}\n", .{
+        kind.name(),
+        spec.hidden,
+        spec.n_q,
+        spec.n_kv,
+        spec.head_dim,
+    });
+    try writer.print("prefill_tokens={d} decode_steps={d} max_seq={d}\n", .{ prefill_tokens, decode_steps, spec.max_seq });
+    try writer.print("note: Apple times include per-op shared-buffer fill + encode_and_wait.\n", .{});
+    try writer.print("      This is not Qwen3 and not a production decode path.\n\n", .{});
+
+    var metal_init_ns: ?u64 = null;
+    var gpu_storage: zynfer.apple.gpu.Gpu = undefined;
+    var gpu_ptr: ?*zynfer.apple.gpu.Gpu = null;
+    if (kind == .apple and zynfer.apple.gpu.have_apple) {
+        const t0 = std.Io.Clock.awake.now(io);
+        gpu_storage = zynfer.apple.gpu.Gpu.init() catch |err| {
+            try writer.print("Apple Metal init failed: {s}\n", .{@errorName(err)});
+            try writer.print("If shaders fail to compile, install the Metal Toolchain:\n", .{});
+            try writer.print("  xcodebuild -downloadComponent MetalToolchain\n", .{});
+            return;
+        };
+        gpu_ptr = &gpu_storage;
+        const t1 = std.Io.Clock.awake.now(io);
+        metal_init_ns = nsDelta(t0, t1);
+        try writer.print("metal_device_create_plus_shader_compile_ns={d}\n\n", .{metal_init_ns.?});
+    }
+    defer if (gpu_ptr) |g| g.deinit();
+
+    const cpu_times = try timeBlock(gpa, io, null, spec, prefill_tokens, decode_steps, warmup, iters);
+    try writer.print("cpu prefill_ns={d} decode_ns_per_token={d} iters={d}\n", .{
+        cpu_times.prefill_ns,
+        cpu_times.decode_ns_per_token,
+        iters,
+    });
+
+    var apple_times: ?BlockTimes = null;
+    if (gpu_ptr) |g| {
+        apple_times = try timeBlock(gpa, io, g, spec, prefill_tokens, decode_steps, warmup, iters);
+        try writer.print("apple_metal prefill_ns={d} decode_ns_per_token={d} iters={d}\n", .{
+            apple_times.?.prefill_ns,
+            apple_times.?.decode_ns_per_token,
+            iters,
+        });
+    } else {
+        try writer.print("apple_metal prefill_ns=N/A decode_ns_per_token=N/A\n", .{});
+    }
+
+    try writer.print("\njson\n", .{});
+    try writer.print("{{\"backend\":\"{s}\",\"fixture\":\"tiny-block\",\"hidden\":{d},\"prefill_tokens\":{d},\"decode_steps\":{d},\"warmup\":{d},\"iters\":{d}", .{
+        kind.name(),
+        spec.hidden,
+        prefill_tokens,
+        decode_steps,
+        warmup,
+        iters,
+    });
+    if (metal_init_ns) |ns| {
+        try writer.print(",\"metal_init_ns\":{d}", .{ns});
+    } else {
+        try writer.print(",\"metal_init_ns\":null", .{});
+    }
+    try writer.print(",\"cpu_prefill_ns\":{d},\"cpu_decode_ns_per_token\":{d}", .{
+        cpu_times.prefill_ns,
+        cpu_times.decode_ns_per_token,
+    });
+    if (apple_times) |t| {
+        try writer.print(",\"apple_prefill_ns\":{d},\"apple_decode_ns_per_token\":{d}}}\n", .{
+            t.prefill_ns,
+            t.decode_ns_per_token,
+        });
+    } else {
+        try writer.print(",\"apple_prefill_ns\":null,\"apple_decode_ns_per_token\":null}}\n", .{});
+    }
+}
+
+const BlockTimes = struct {
+    prefill_ns: u64,
+    decode_ns_per_token: u64,
+};
+
+fn nsDelta(start: std.Io.Timestamp, end: std.Io.Timestamp) u64 {
+    return @intCast(@max(@as(i96, 0), end.nanoseconds - start.nanoseconds));
+}
+
+fn timeBlock(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    gpu: ?*zynfer.apple.gpu.Gpu,
+    spec: zynfer.tiny_block.Spec,
+    prefill_tokens: usize,
+    decode_steps: usize,
+    warmup: usize,
+    iters: usize,
+) !BlockTimes {
+    var i: usize = 0;
+    while (i < warmup) : (i += 1) {
+        _ = try runBlockOnce(gpa, io, gpu, spec, prefill_tokens, decode_steps);
+    }
+
+    var prefill_total: u64 = 0;
+    var decode_total: u64 = 0;
+    i = 0;
+    while (i < iters) : (i += 1) {
+        const sample = try runBlockOnce(gpa, io, gpu, spec, prefill_tokens, decode_steps);
+        prefill_total += sample.prefill_ns;
+        decode_total += sample.decode_ns;
+    }
+    return .{
+        .prefill_ns = prefill_total / iters,
+        .decode_ns_per_token = decode_total / (iters * decode_steps),
+    };
+}
+
+fn runBlockOnce(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    gpu: ?*zynfer.apple.gpu.Gpu,
+    spec: zynfer.tiny_block.Spec,
+    prefill_tokens: usize,
+    decode_steps: usize,
+) !struct { prefill_ns: u64, decode_ns: u64 } {
+    var x_prefill = try zynfer.Tensor.alloc(gpa, .f32, &.{ prefill_tokens, spec.hidden });
+    defer x_prefill.deinit();
+    var y_prefill = try zynfer.Tensor.alloc(gpa, .f32, &.{ prefill_tokens, spec.hidden });
+    defer y_prefill.deinit();
+    var x_step = try zynfer.Tensor.alloc(gpa, .f32, &.{ 1, spec.hidden });
+    defer x_step.deinit();
+    var y_step = try zynfer.Tensor.alloc(gpa, .f32, &.{ 1, spec.hidden });
+    defer y_step.deinit();
+    try zynfer.tiny_block.iotaFill(x_prefill, 0.1, 0.01);
+    try zynfer.tiny_block.iotaFill(x_step, 0.2, 0.01);
+
+    if (gpu) |g| {
+        var sess = try zynfer.apple.block.Session.init(gpa, g, spec);
+        defer sess.deinit();
+        try sess.inner.weights.fillFixture();
+        const t0 = std.Io.Clock.awake.now(io);
+        try sess.prefill(x_prefill, y_prefill);
+        const t1 = std.Io.Clock.awake.now(io);
+        var s: usize = 0;
+        while (s < decode_steps) : (s += 1) try sess.decode(x_step, y_step);
+        const t2 = std.Io.Clock.awake.now(io);
+        return .{ .prefill_ns = nsDelta(t0, t1), .decode_ns = nsDelta(t1, t2) };
+    }
+
+    var sess = try zynfer.tiny_block.Session.init(gpa, spec);
+    defer sess.deinit();
+    try sess.weights.fillFixture();
+    const t0 = std.Io.Clock.awake.now(io);
+    try sess.prefill(x_prefill, y_prefill);
+    const t1 = std.Io.Clock.awake.now(io);
+    var s: usize = 0;
+    while (s < decode_steps) : (s += 1) try sess.decode(x_step, y_step);
+    const t2 = std.Io.Clock.awake.now(io);
+    return .{ .prefill_ns = nsDelta(t0, t1), .decode_ns = nsDelta(t1, t2) };
 }
 
 fn runHipBench(io: std.Io, writer: *std.Io.Writer) !void {

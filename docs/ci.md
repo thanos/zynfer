@@ -38,6 +38,7 @@ Metal-vs-CPU when the GPU path is enabled.
 - `help` / `env` / `caps --backend cpu` / `backends` exit 0
 - `--backend cuda` and unknown commands exit 2
 - `ops-bench --backend cpu` prints a JSON object with `cpu_ns`
+- `block-bench --backend cpu` prints a JSON object with `cpu_prefill_ns`
 
 ## Coverage
 

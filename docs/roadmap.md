@@ -10,7 +10,7 @@ when correctness is unresolved.
 | Apple-1 | Backend-neutral types + CPU oracle | **done** |
 | Apple-2 | Metal device / shared buffers / trivial kernel | **done** |
 | Apple-3 | Metal LLM ops vs CPU + SwiGLU fixture | **done** |
-| Apple-4 | Prefill/decode + KV cache | deferred (no model) |
+| Apple-4 | Prefill/decode + KV cache | **done for tiny-block fixture** |
 | Apple-5 | simdgroup_matrix / quantized GEMM | deferred |
 | Apple-6 | Fusion / fewer waits | deferred |
 | Apple-7 | SME / Core ML experiments | deferred |
@@ -21,13 +21,13 @@ when correctness is unresolved.
 | 5 | GEMV and GEMM | CPU + Metal f32; not HIP |
 | 6 | SiLU and SwiGLU | CPU + Metal f32; not HIP |
 | 7 | RoPE | CPU + Metal f32; not HIP |
-| 8 | Attention from scratch | CPU only |
-| 9 | One complete transformer block | not started (SwiGLU residual fixture only) |
+| 8 | Attention from scratch | CPU + Metal f32 (`kv_len` ≤ 64 on Metal) |
+| 9 | One complete transformer block | **done as tiny fixture**; not a Qwen block |
 | 10 | Checkpoint inspection and artifact compiler | not started |
 | 11 | Full Qwen3-0.6B forward pass | not started |
 | 12 | Tokenizer and sampling | not started |
-| 13 | KV cache | not started |
-| 14 | Prefill vs decode | not started |
+| 13 | KV cache | **host layout for tiny block**; not Metal-resident |
+| 14 | Prefill vs decode | **done for tiny block** |
 | 15 | Profiling the whole token | not started |
 | 16 | Kernel fusion | not started |
 | 17 | HIP graphs | not started |
@@ -56,8 +56,8 @@ when correctness is unresolved.
 ## Current rule
 
 The AMD curriculum still starts at Stage 1 (HIP alloc/copy) on the
-R9700. The development laptop additionally has a CPU oracle and a
-naive Apple Metal op suite. Do not start a full Qwen forward pass until
-the Metal op suite stays green and a checkpoint loader exists.
+R9700. The development laptop additionally has a CPU oracle, naive
+Apple Metal ops, and a tiny transformer-block prefill/decode fixture.
+Do not start a full Qwen forward pass until a checkpoint loader exists.
 
 See `docs/apple-backend.md` for Apple-specific deferred work.

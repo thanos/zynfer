@@ -198,6 +198,70 @@ pub fn rope(gpu: *Gpu, x: Tensor, pos0: usize, theta: f32) Error!void {
     try download(xb, x);
 }
 
+/// Thread-local softmax; `kv_len` must be <= `max_attention_kv`.
+pub const max_attention_kv: usize = 64;
+
+const AttentionParams = extern struct {
+    n_q: u32,
+    n_kv: u32,
+    q_len: u32,
+    kv_len: u32,
+    kv_stride: u32,
+    head_dim: u32,
+};
+
+pub fn attention(
+    gpu: *Gpu,
+    out: Tensor,
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    kv_len: usize,
+    kv_stride: usize,
+) Error!void {
+    if (q.rank != 3 or k.rank != 3 or v.rank != 3 or out.rank != 3) return error.InvalidShape;
+    const n_q = q.shape[0];
+    const q_len = q.shape[1];
+    const d = q.shape[2];
+    const n_kv = k.shape[0];
+    if (k.shape[1] != kv_stride or v.shape[1] != kv_stride) return error.ShapeMismatch;
+    if (k.shape[2] != d or v.shape[0] != n_kv or v.shape[2] != d) return error.ShapeMismatch;
+    if (out.shape[0] != n_q or out.shape[1] != q_len or out.shape[2] != d) return error.ShapeMismatch;
+    if (n_q == 0 or n_kv == 0 or n_q % n_kv != 0) return error.InvalidShape;
+    if (kv_len == 0 or q_len == 0 or kv_len > kv_stride or q_len > kv_len) return error.InvalidShape;
+    if (kv_len > max_attention_kv) return error.Unsupported;
+
+    var qb = try upload(gpu, q);
+    defer qb.deinit();
+    var kb = try upload(gpu, k);
+    defer kb.deinit();
+    var vb = try upload(gpu, v);
+    defer vb.deinit();
+    var ob = try gpu.allocShared(out.data.len);
+    defer ob.deinit();
+    const params = AttentionParams{
+        .n_q = @intCast(n_q),
+        .n_kv = @intCast(n_kv),
+        .q_len = @intCast(q_len),
+        .kv_len = @intCast(kv_len),
+        .kv_stride = @intCast(kv_stride),
+        .head_dim = @intCast(d),
+    };
+    try launchBufs(
+        gpu,
+        "attention_f32",
+        @intCast(q_len),
+        @intCast(n_q),
+        1,
+        1,
+        1,
+        1,
+        &.{ qb, kb, vb, ob },
+        std.mem.asBytes(&params),
+    );
+    try download(ob, out);
+}
+
 pub fn swigluResidual(
     gpu: *Gpu,
     out: Tensor,
@@ -313,6 +377,24 @@ test "Metal ops match CPU reference" {
     try cpu.rope(rc, 3, 10_000);
     try rope(&gpu, r, 3, 10_000);
     try compare.expectClose(try rc.f32s(), try r.f32s(), 1e-4, 1e-4);
+
+    var q = try Tensor.alloc(gpa, .f32, &.{ 2, 3, 4 });
+    defer q.deinit();
+    var k = try Tensor.alloc(gpa, .f32, &.{ 1, 4, 4 });
+    defer k.deinit();
+    var v = try Tensor.alloc(gpa, .f32, &.{ 1, 4, 4 });
+    defer v.deinit();
+    var acpu = try Tensor.alloc(gpa, .f32, &.{ 2, 3, 4 });
+    defer acpu.deinit();
+    var agpu = try Tensor.alloc(gpa, .f32, &.{ 2, 3, 4 });
+    defer agpu.deinit();
+    try fillIota(q);
+    try fillIota(k);
+    try fillIota(v);
+    var scores: [4]f32 = undefined;
+    try cpu.attentionInto(acpu, q, k, v, 4, 4, &scores);
+    try attention(&gpu, agpu, q, k, v, 4, 4);
+    try compare.expectClose(try acpu.f32s(), try agpu.f32s(), 2e-4, 2e-4);
 }
 
 test "tiny SwiGLU residual matches CPU" {

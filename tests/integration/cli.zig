@@ -88,3 +88,12 @@ test "cpu ops-bench emits json with cpu_ns" {
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "\"cpu_ns\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "add_f32_4096") != null);
 }
+
+test "cpu block-bench emits json with prefill timing" {
+    var out = try run(&.{ "block-bench", "--backend", "cpu" });
+    defer out.deinit(std.testing.allocator);
+    try expectExited(out, 0);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "\"backend\":\"cpu\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "\"cpu_prefill_ns\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "tiny-block") != null);
+}

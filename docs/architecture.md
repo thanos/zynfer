@@ -6,10 +6,10 @@ Metal path on macOS, and an AMD HIP probe that will later own RDNA 4
 kernels. Model math must not import Metal or HIP types.
 
 ```text
-Model architecture (not loaded yet: Qwen3-0.6B)
+Model architecture (fixture: tiny block; not loaded: Qwen3-0.6B)
         |
         v
-Backend-neutral tensors, dtypes, LLM ops
+Backend-neutral tensors, KV cache, block schedule
         |
         +-----------+-----------+
         |           |           |
@@ -29,19 +29,21 @@ They are not the same enum.
 
 | Layer | Owner | Language | Notes |
 | --- | --- | --- | --- |
-| CLI | `src/main.zig` | Zig | `env`, `gpu`, `caps`, `backends`, `ops-bench`, `bench` |
+| CLI | `src/main.zig` | Zig | `env`, `gpu`, `caps`, `backends`, `ops-bench`, `block-bench`, `bench` |
 | Env report | `src/env_report.zig` | Zig | Host/toolchain; HIP optional; Apple compile flag |
 | Backend identity | `src/runtime/backend.zig` | Zig | Kind vs architecture; fallback reasons |
 | Tensors | `src/runtime/tensor.zig` | Zig | Rank ≤ 4, contiguous, overflow-safe byte sizes |
+| KV cache | `src/runtime/kv_cache.zig` | Zig | Host `[n_kv, max_seq, head_dim]`; append/used |
+| Tiny block | `src/model/tiny_block.zig` | Zig | Prefill/decode schedule; no Metal/HIP imports |
 | CPU oracle | `src/backends/cpu/ops.zig` | Zig | Scalar f32; correctness reference |
 | Apple bridge | `src/backends/apple/bridge.m` | ObjC/ARC | Device, shared buffers, compile, wait |
 | Apple kernels | `src/backends/apple/kernels.metal` | MSL | Naive f32; no `simdgroup_matrix` |
-| Apple dispatch | `src/backends/apple/gpu.zig`, `ops.zig` | Zig | Policy, launches, CPU differential tests |
+| Apple dispatch | `src/backends/apple/gpu.zig`, `ops.zig`, `block.zig` | Zig | Policy, launches, CPU differential tests |
 | HIP probe | `src/hip.zig` + `src/hip_probe.c` | Zig + C | Enumeration only until the AMD op path exists |
 
-Model / tokenizer / KV-cache / engine modules do not exist yet. The
-smallest end-to-end fixture is a SwiGLU residual fragment compared
-CPU vs Metal.
+The smallest end-to-end fixture is one tiny transformer block with an
+explicit KV cache. Prefill and decode are separate entry points. Qwen
+weights, tokenizer, and sampling are still deferred.
 
 ## Apple memory and synchronization
 
@@ -59,14 +61,13 @@ the binary still builds and device APIs return `error.HipUnavailable`.
 
 ## What is required to generate a token?
 
-Nothing in this tree generates tokens. The functions that will sit on
-that path are not present. What exists today:
+Nothing in this tree generates vocabulary tokens. The tiny-block fixture
+runs a synthetic residual stream through one attention+MLP block with a
+host KV cache. A Qwen forward pass, tokenizer, and sampler are deferred.
 
 ```text
-host tensor → CPU op or Metal kernel → host tensor
+x[t,H] → RMSNorm → QKV → RoPE → KV append → causal GQA → O + residual → SwiGLU residual
 ```
-
-A Qwen forward pass, tokenizer, sampler, and KV cache are deferred.
 
 ## Non-goals that already constrain the architecture
 

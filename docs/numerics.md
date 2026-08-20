@@ -22,7 +22,8 @@ Every numerical test states atol/rtol. Exact equality is not required
 for GPU results. Tolerances are not loosened to hide a mismatch.
 
 Current Metal vs CPU checks use roughly `1e-5` for elementwise ops and
-`1e-4`–`2e-4` for reductions, matmul, RoPE, and the SwiGLU residual.
+`1e-4`–`3e-4` for reductions, matmul, RoPE, attention, SwiGLU, and the
+tiny transformer block.
 
 On mismatch, `src/runtime/compare.zig` prints max abs, max rel, RMS,
 failing index, and expected/actual.
