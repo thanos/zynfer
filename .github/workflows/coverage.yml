@@ -1,0 +1,50 @@
+name: Coverage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  kcov:
+    name: kcov (src/)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: actions/cache@v4
+        id: cache-kcov
+        with:
+          path: .kcov-prefix
+          key: kcov-v43-${{ runner.os }}-${{ runner.arch }}
+      - name: Install kcov
+        env:
+          KCOV_VERSION: "43"
+          KCOV_PREFIX: ${{ github.workspace }}/.kcov-prefix
+        run: bash scripts/ci/install-kcov.sh
+      - name: Run coverage
+        run: bash scripts/ci/coverage.sh
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: zig-out/coverage
+          if-no-files-found: warn
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        continue-on-error: true
+        with:
+          fail_ci_if_error: false
+          directory: zig-out/coverage
+          flags: unittests
+          name: zynfer-src

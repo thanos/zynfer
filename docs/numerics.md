@@ -1,28 +1,34 @@
 # Numerics
 
-Stage 0 does not compute model numerics. This file exists so later
-stages have a single place to pin dtypes, accumulation rules, and
-tolerances.
+The CPU backend is the floating-point oracle. Accelerated ops are
+accepted only when they match it within an explicit tolerance.
 
-## Planned defaults
+## Current defaults
 
-| Quantity | Initial choice | Notes |
+| Quantity | Choice | Notes |
 | --- | --- | --- |
-| Weights / activations | BF16 or FP16 as appropriate | Confirm against the Qwen3-0.6B checkpoint |
-| Reductions / softmax acc | FP32 | Stability before speed |
-| RMSNorm acc | FP32 | Same reason |
-| Reference oracle | CPU Zig + PyTorch fixtures | Oracle is never a runtime dependency |
+| CPU oracle | f32 | Scalar loops in `src/backends/cpu/ops.zig` |
+| Metal baseline | f32 | Same formulas; reduction in threadgroup memory |
+| Weights / activations in a real model | not loaded | Qwen3-0.6B dtypes are not pinned yet |
+| RMSNorm / softmax accumulation | f32 | Stability before speed |
+| RoPE | f32 split-half | Matches the CPU Qwen3-style pairing |
+
+fp16 and bf16 exist as `DType` tags. No CPU or Metal kernel uses them
+yet. `caps` reports those paths as disabled.
 
 ## Tolerance policy
 
-Every numerical test must state an explicit tolerance. "Looks close" is
-not a criterion.
+Every numerical test states atol/rtol. Exact equality is not required
+for GPU results. Tolerances are not loosened to hide a mismatch.
 
-Until the first kernel lands, there is nothing to tolerate.
+Current Metal vs CPU checks use roughly `1e-5` for elementwise ops and
+`1e-4`–`2e-4` for reductions, matmul, RoPE, and the SwiGLU residual.
 
-## Questions this file will answer
+On mismatch, `src/runtime/compare.zig` prints max abs, max rel, RMS,
+failing index, and expected/actual.
 
-- FP32 vs BF16 vs FP16 for each tensor class
-- Why some ops accumulate wider
-- What "numerical stability" means for softmax and RMSNorm
-- What quantization changes, once we have a floating-point baseline
+## Questions still open
+
+- FP32 vs BF16 vs FP16 for each tensor class once a checkpoint is read
+- Whether softmax/RMSNorm should accumulate in higher precision on GPU
+- What quantization changes, once a floating-point baseline model exists

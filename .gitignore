@@ -2,6 +2,7 @@
 zig-out/
 .zig-cache/
 zig-cache/
+.kcov-prefix/
 
 # Editor / OS
 .DS_Store
@@ -21,6 +22,7 @@ models/
 # Local profiler dumps
 *.csv
 *.json
+!bench/baselines/*.json
 prof/
 trace/
 

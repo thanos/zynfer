@@ -18,11 +18,18 @@ The project is also educational. Every major subsystem is developed in stages, b
 
 ## Status
 
-**Stage 0 — development environment.**
+**CPU oracle + Apple Metal baseline ops; Stage 0 diagnostics remain.**
 
-The Zig repository, HIP device enumeration, environment report, and the first two tutorials exist. Transformer code does not.
+The Zig repository, HIP device enumeration (when ROCm is present),
+environment report, CPU f32 reference ops, and naive Metal kernels
+exist. Qwen3-0.6B is not loaded. Transformer blocks, tokenizer, sampler,
+and KV cache do not exist.
 
-Zynfer is being built from first principles. The initial milestones intentionally prioritize understanding and numerical correctness over headline benchmark numbers.
+On a Mac, `zig build test` differential-checks Metal against CPU.
+`--backend` / `ZYNFER_BACKEND` select `cpu`, `apple`, or `amd-hip`.
+Unknown names fail; they do not fall back.
+
+See `docs/apple-backend.md` and `docs/architecture.md`.
 
 The development sequence begins with:
 
@@ -1007,6 +1014,8 @@ Pinned Zig version: **0.16.0** (see `.tool-versions`).
 ./scripts/check-env.sh
 zig build
 zig build test
+zig build integration
+zig build ci            # fmt + test + integration + autodoc
 zig build run
 
 # Linux GPU host with ROCm: HIP is linked automatically when found
@@ -1019,22 +1028,36 @@ zig build run -- gpu
 `/opt/rocm` contains `include/hip/hip_runtime_api.h`. `-Dhip=off` forces
 a host-only binary.
 
-GPU kernel compilation is not part of Stage 0. Later stages may invoke
-the ROCm/HIP compiler for AMD code objects.
+GPU kernel compilation is not part of the AMD Stage 0 probe. On macOS
+the Apple backend compiles embedded MSL at runtime (`newLibraryWithSource`).
+That requires the Metal Toolchain:
+
+```bash
+xcodebuild -downloadComponent MetalToolchain
+```
 
 ---
 
 ## Running
 
-Stage 0 CLI:
-
 ```bash
-zig build run              # environment report + GPU enumeration
+zig build run              # environment report + capabilities + HIP probe
 zig build run -- env
 zig build run -- gpu
+zig build run -- caps
+zig build run -- backends
+zig build ops-bench        # CPU vs Apple Metal op timings
 zig build bench            # time HIP property queries
+zig build integration      # CLI contracts against the installed binary
+zig build docs             # Zig autodoc → zig-out/docs/api
 ./scripts/check-env.sh     # shell diagnostic, does not require a build
 ```
+
+CI workflows (format, tests, coverage, benches, docs) are described in
+`docs/ci.md`.
+
+`--backend cpu|apple|amd-hip` or `ZYNFER_BACKEND` forces a backend.
+Unknown names exit 2.
 
 The eventual inference CLI is expected to resemble:
 
@@ -1052,12 +1075,18 @@ That interface is not implemented yet.
 
 ```text
 zynfer/
+├── .github/workflows/     # CI, coverage, bench, docs
 ├── build.zig
 ├── build.zig.zon
 ├── README.md
-├── scripts/check-env.sh
+├── scripts/
+│   ├── check-env.sh
+│   ├── build-docs-site.sh
+│   └── ci/
 ├── docs/
 │   ├── architecture.md
+│   ├── apple-backend.md
+│   ├── ci.md
 │   ├── roadmap.md
 │   ├── benchmarks.md
 │   ├── numerics.md
@@ -1071,7 +1100,11 @@ zynfer/
 │   ├── hip.zig
 │   ├── hip_probe.c
 │   ├── device.zig
-│   └── env_report.zig
+│   ├── env_report.zig
+│   ├── runtime/           # dtype, tensor, backend, compare
+│   └── backends/
+│       ├── cpu/ops.zig
+│       └── apple/         # bridge.m, kernels.metal, gpu.zig, ops.zig
 ├── kernels/                 # empty until Stage 2
 ├── tools/
 ├── tests/
@@ -1081,8 +1114,8 @@ zynfer/
 └── bench/results/
 ```
 
-Later stages add `tensor.zig`, `model.zig`, `tokenizer.zig`, `kv_cache.zig`,
-and `engine.zig`. They are omitted until they have a job.
+Later stages add `model.zig`, `tokenizer.zig`, `kv_cache.zig`, and
+`engine.zig`. They are omitted until they have a job.
 
 This will evolve as implementation reveals the correct boundaries.
 
@@ -1119,15 +1152,15 @@ License to be selected before the first public release.
 
 ```text
 Language       Zig
-Platform       Linux
-GPU vendor     AMD
-GPU            Radeon AI PRO R9700
-Architecture   RDNA 4
-LLVM target    gfx1201
-GPU runtime    ROCm / HIP
-Bootstrap LLM  Qwen3-0.6B
+Platform       Linux (AMD target) and macOS (Apple backend)
+GPU vendor     AMD (target) / Apple (dev laptop)
+GPU            Radeon AI PRO R9700 / Apple M-series
+Architecture   RDNA 4 / Apple GPU family 7+
+LLVM target    gfx1201 (AMD)
+GPU runtime    ROCm/HIP (AMD) and Metal (Apple)
+Bootstrap LLM  Qwen3-0.6B (not loaded yet)
 Execution      Single GPU
-Status         Stage 0 — environment
+Status         CPU oracle + Metal baseline ops; no token generation
 ```
 
 ---

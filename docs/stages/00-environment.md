@@ -10,6 +10,6 @@ Commands:
 zig build
 zig build test
 zig build run
-zig build run -- gpu
-zig build bench
+zig build run -- caps
+zig build ops-bench
 ```
