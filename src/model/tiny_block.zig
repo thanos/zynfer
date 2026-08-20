@@ -419,3 +419,87 @@ test "cache overflow is reported" {
     try iotaFill(step_in, 0.3, 0.1);
     try std.testing.expectError(error.InvalidShape, sess.decode(step_in, step_out));
 }
+
+test "prefill matches stepwise decode over full max_seq" {
+    const spec = fixture_spec;
+    const gpa = std.testing.allocator;
+    var sess = try Session.init(gpa, spec);
+    defer sess.deinit();
+    try sess.weights.fillFixture();
+
+    const tokens = spec.max_seq;
+    var x = try Tensor.alloc(gpa, .f32, &.{ tokens, spec.hidden });
+    defer x.deinit();
+    try iotaFill(x, 0.05, 0.01);
+    var prefill_out = try Tensor.alloc(gpa, .f32, &.{ tokens, spec.hidden });
+    defer prefill_out.deinit();
+    try sess.prefill(x, prefill_out);
+    try std.testing.expectEqual(tokens, sess.cache.used);
+
+    sess.reset();
+    try std.testing.expectEqual(@as(usize, 0), sess.cache.used);
+    var decode_out = try Tensor.alloc(gpa, .f32, &.{ tokens, spec.hidden });
+    defer decode_out.deinit();
+    var step_in = try Tensor.alloc(gpa, .f32, &.{ 1, spec.hidden });
+    defer step_in.deinit();
+    var step_out = try Tensor.alloc(gpa, .f32, &.{ 1, spec.hidden });
+    defer step_out.deinit();
+    const xs = try x.f32s();
+    const ds = try decode_out.f32s();
+    var i: usize = 0;
+    while (i < tokens) : (i += 1) {
+        @memcpy(try step_in.f32s(), xs[i * spec.hidden ..][0..spec.hidden]);
+        try sess.decode(step_in, step_out);
+        @memcpy(ds[i * spec.hidden ..][0..spec.hidden], try step_out.f32s());
+    }
+    try std.testing.expectEqual(tokens, sess.cache.used);
+    try compare.expectClose(try prefill_out.f32s(), try decode_out.f32s(), 1e-5, 1e-5);
+}
+
+test "repeated reset prefill and decode do not allocate host memory" {
+    const spec = fixture_spec;
+    var fa = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var sess = try Session.init(fa.allocator(), spec);
+    defer sess.deinit();
+    try sess.weights.fillFixture();
+
+    const gpa = std.testing.allocator;
+    var x_prefill = try Tensor.alloc(gpa, .f32, &.{ 4, spec.hidden });
+    defer x_prefill.deinit();
+    var y_prefill = try Tensor.alloc(gpa, .f32, &.{ 4, spec.hidden });
+    defer y_prefill.deinit();
+    var x_step = try Tensor.alloc(gpa, .f32, &.{ 1, spec.hidden });
+    defer x_step.deinit();
+    var y_step = try Tensor.alloc(gpa, .f32, &.{ 1, spec.hidden });
+    defer y_step.deinit();
+    try iotaFill(x_prefill, 0.1, 0.02);
+    try iotaFill(x_step, 0.2, 0.02);
+
+    const rounds: usize = 64;
+    var r: usize = 0;
+    while (r < rounds) : (r += 1) {
+        sess.reset();
+        const allocs_before = fa.allocations;
+        try sess.prefill(x_prefill, y_prefill);
+        try sess.decode(x_step, y_step);
+        try std.testing.expectEqual(allocs_before, fa.allocations);
+        try std.testing.expectEqual(@as(usize, 5), sess.cache.used);
+    }
+}
+
+test "create destroy many sessions does not leak host tensors" {
+    const spec = fixture_spec;
+    const gpa = std.testing.allocator;
+    var i: usize = 0;
+    while (i < 32) : (i += 1) {
+        var sess = try Session.init(gpa, spec);
+        try sess.weights.fillFixture();
+        var x = try Tensor.alloc(gpa, .f32, &.{ 2, spec.hidden });
+        defer x.deinit();
+        var out = try Tensor.alloc(gpa, .f32, &.{ 2, spec.hidden });
+        defer out.deinit();
+        try iotaFill(x, 0.1, 0.01);
+        try sess.prefill(x, out);
+        sess.deinit();
+    }
+}

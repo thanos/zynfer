@@ -62,8 +62,10 @@ Local captures that should not be committed:
 
 ## Inference metrics (tiny-block fixture only)
 
-Vocabulary TTFT still N/A — no tokenizer. The tiny block reports wall
-time for a synthetic residual stream:
+Vocabulary TTFT still N/A — no tokenizer (deferred past Apple-4). The
+tiny block reports wall time for a synthetic residual stream. For what
+Apple-4 deliberately deferred (Metal-resident KV, wait removal, Qwen),
+see `docs/apple-backend.md`.
 
 | Metric | Status |
 | --- | --- |

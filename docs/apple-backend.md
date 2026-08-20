@@ -51,13 +51,48 @@ xcrun -sdk macosx metal -c src/backends/apple/kernels.metal -o /tmp/zynfer_kerne
 Labels are set on command buffers and encoders (kernel name). The
 baseline submits one command buffer per op and waits.
 
-1. **Time Profiler** (Instruments): CPU cost of encoding, buffer
-   alloc/fill, and `waitUntilCompleted`. Hypothesis for this baseline:
-   launch + wait dominate small ops.
-2. **Metal System Trace**: queue occupancy and the gap after each wait.
-   Expect serial kernels, not overlap.
-3. **Xcode GPU capture** / Metal debugger: kernel duration vs memory
-   traffic for `matmul_f32` / `matvec_f32`.
+### Recipe: capture wait dominance on `block-bench`
+
+Run on a Mac with the Metal Toolchain installed:
+
+```bash
+zig build -Doptimize=ReleaseSafe
+# Terminal A — keep the binary warm once so shader compile is not in the
+# profile window if you prefer a steady-state capture:
+./zig-out/bin/zynfer block-bench --backend apple
+```
+
+1. Open **Instruments** → **Metal System Trace** (or **Game Performance**
+   with Metal).
+2. Choose the `zynfer` process (or launch
+   `./zig-out/bin/zynfer block-bench --backend apple` from Instruments).
+3. Record one `block-bench` run (~seconds). Stop.
+4. In the timeline, select GPU / command-buffer lanes. Expect:
+   - many short compute dispatches named after kernels
+     (`rmsnorm_f32`, `matmul_f32`, `attention_f32`, …);
+   - a **gap after every dispatch** while the CPU sits in
+     `waitUntilCompleted` inside `zynfer_mtl_encode_and_wait`;
+   - **no overlapping** kernels on the same queue for one decode step.
+5. Optionally attach **Time Profiler** in the same template and confirm
+   CPU time in buffer create/`memcpy`/encode/`waitUntilCompleted` rather
+   than in a long GPU kernel.
+
+Expected reading (Stage 4 baseline, not a bug):
+
+| Signal | Meaning |
+| --- | --- |
+| Serial gaps between kernels | Per-op `waitUntilCompleted` |
+| Many tiny dispatches per decode token | ~14 ops × one command buffer each |
+| Short GPU kernel durations vs long wall time | Launch/sync bound, not FLOP bound |
+| Command-buffer labels = kernel names | Bridge labels are working |
+
+Do not treat a capture of this baseline as proof that Metal cannot be
+fast. It proves the **current schedule** is wait-bound. Removing waits
+and buffer churn is Stage 6 work; see deferred list below.
+
+Xcode **GPU capture** / Metal debugger is useful for a single
+`matmul_f32` / `attention_f32` duration vs memory traffic once the
+schedule is less sync-bound.
 
 Signposts are not wired yet. Cheap compile-time instrumentation can be
 added around `zynfer_mtl_encode_and_wait` without changing the op API.
@@ -73,6 +108,19 @@ added around `zynfer_mtl_encode_and_wait` without changing the op API.
   Removing the wait is deferred until a fused/overlapped decode path
   exists to measure overlap against.
 
+### Case study (wait dominance on tiny-block decode)
+
+- **Hypothesis:** Metal `block-bench` is slower than CPU because each
+  tiny-block op pays encode + shared-buffer alloc + `waitUntilCompleted`,
+  not because M1 Max loses on `1×8` matmul FLOPs.
+- **Evidence:** Debug and ReleaseSafe `block-bench` numbers in
+  `bench/results/apple-block-dev-laptop.md`; CPU drops to ~2 µs/token in
+  ReleaseSafe while Metal stays ~4 ms/token; Instruments recipe above
+  shows serial gaps. Written breakdown:
+  [Why Metal is slower on the tiny block](#why-metal-is-slower-on-the-tiny-block).
+- **Decision:** keep the correctness baseline. Optimize only after
+  persistent buffers / fewer waits are measured on a representative loop.
+
 ## Prefill vs decode (tiny block)
 
 `src/model/tiny_block.zig` owns the schedule and the host KV cache.
@@ -80,6 +128,14 @@ added around `zynfer_mtl_encode_and_wait` without changing the op API.
 device. Layout permute and cache append stay on the host. Each Metal
 kernel still waits. Attention uploads the full host K/V tensors every
 call; that is not a Metal-resident cache.
+
+Fixture limits:
+
+| Limit | Value | Notes |
+| --- | ---: | --- |
+| `max_seq` (CPU + host KV) | 32 | Prefill/decode tested through full length |
+| Metal `attention_f32` `kv_len` | ≤ 64 | Thread-local scores; larger → `Unsupported` |
+| Host alloc in decode/prefill after init | 0 | Scratch preallocated; multi-reset stress tested |
 
 See [Why Metal is slower on the tiny block](#why-metal-is-slower-on-the-tiny-block)
 for a breakdown of the measured gap vs the CPU oracle.
@@ -220,19 +276,32 @@ confirms it.
 `zig build run -- caps` prints the disabled-path list. Forced
 `--backend apple` on a non-macOS build exits 2.
 
-## Deferred work (evidence)
+## Deferred work (Stage 4 closeout — intentionally not done)
 
-- **Qwen3-0.6B loader / tokenizer / sampling** — no checkpoint compiler
-  or tokenizer in the tree; the tiny block is a synthetic fixture.
-- **Metal-resident KV cache / remove per-op wait and GPU buffer alloc** —
-  decode no longer allocates host tensors; each Metal op still creates
-  shared buffers and `waitUntilCompleted`. Needs a profiled decode loop
-  with persistent device buffers before claiming overlap.
-- **Fused kernels** — launch overhead is visible on tiny shapes; fusion
-  waits until a representative Qwen block is scheduled.
-- **Quantized GEMV/GEMM** — no quantized weights loaded.
-- **Accelerate / SME / ANE experiments** — optional; only retain if a
-  named workload improves without becoming a hard dependency.
+Apple Stages 0–4 are **done for the tiny-block fixture**. The items
+below were *not* treated as Stage 4 polish; they need Stage 5+, a real
+model, or both. Do not start them under an “Apple-4 leftover” label.
+
+| Deferred item | Why deferred | Belongs in |
+| --- | --- | --- |
+| **Metal-resident KV cache** | Host layout + lifetime exist; attention still uploads full K/V each call. Device-resident append/read needs persistent buffers and a profiled decode loop. | Apple-5/6 memory plan |
+| **Remove per-op `waitUntilCompleted` and per-op shared-buffer alloc** | Correctness baseline is one command buffer + wait per kernel. Fewer waits / fused encode is Stage 6. | Apple-6 |
+| **Qwen loader / tokenizer / sampling / golden logits** | No checkpoint or vocab in tree. “Full inference” and TTFT/tok/s need a model, not a larger synthetic block. | Checkpoint stages / Apple after loader |
+| **`simdgroup_matrix` / quantized GEMM** | Capability may report yes; no optimized kernel shipped. | Apple-5 |
+| **Fused kernels** | Launch overhead is known; fuse only after Instruments on a representative schedule. | Apple-6 |
+| **Accelerate / SME / ANE** | Optional; retain only if a named workload improves without becoming a hard dependency. | Apple-7 |
+
+Evidence and recipe for the wait-bound baseline:
+[Why Metal is slower…](#why-metal-is-slower-on-the-tiny-block) and the
+Instruments section above.
+
+### Earlier deferred notes (still true)
+
+- Tiny block is a synthetic residual stream, not Qwen3-0.6B.
+- Metal attention hard-caps `kv_len` at 64; the CPU path is not capped
+  by that constant (fixture `max_seq` is 32 today).
+- Peak RSS / energy/token are not claimed; growth is checked via host
+  allocator counters and create/destroy leak tests.
 
 ## Measured on this development laptop (2026-08-19)
 

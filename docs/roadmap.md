@@ -10,9 +10,9 @@ when correctness is unresolved.
 | Apple-1 | Backend-neutral types + CPU oracle | **done** |
 | Apple-2 | Metal device / shared buffers / trivial kernel | **done** |
 | Apple-3 | Metal LLM ops vs CPU + SwiGLU fixture | **done** |
-| Apple-4 | Prefill/decode + KV cache | **done for tiny-block fixture** |
+| Apple-4 | Prefill/decode + KV cache | **done for tiny-block fixture** (closeout polish: long-context + no-growth tests, Instruments recipe, deferred list) |
 | Apple-5 | simdgroup_matrix / quantized GEMM | deferred |
-| Apple-6 | Fusion / fewer waits | deferred |
+| Apple-6 | Fusion / fewer waits / Metal-resident KV | deferred |
 | Apple-7 | SME / Core ML experiments | deferred |
 | 1 | Zig meets HIP (alloc, copy, streams) | not started |
 | 2 | First AMD kernel (vector add) | not started |
@@ -58,6 +58,10 @@ when correctness is unresolved.
 The AMD curriculum still starts at Stage 1 (HIP alloc/copy) on the
 R9700. The development laptop additionally has a CPU oracle, naive
 Apple Metal ops, and a tiny transformer-block prefill/decode fixture.
+Apple Stages 0–4 are closed for that fixture; do not treat Metal-resident
+KV, wait removal, or Qwen loading as unfinished Stage 4 work.
+
 Do not start a full Qwen forward pass until a checkpoint loader exists.
 
-See `docs/apple-backend.md` for Apple-specific deferred work.
+See `docs/apple-backend.md` for the deferred table and the Instruments
+recipe for wait dominance.
