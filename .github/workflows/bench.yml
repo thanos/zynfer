@@ -31,7 +31,7 @@ jobs:
       - name: Compare against sanity ceiling
         run: /usr/bin/python3 scripts/ci/compare-bench.py bench/results/local/ops-bench.txt
       - name: Upload raw bench output
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: ops-bench-cpu
