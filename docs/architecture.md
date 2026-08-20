@@ -42,9 +42,10 @@ They are not the same enum.
 | CPU Accelerate | `src/backends/cpu/accelerate.zig` | Zig+vDSP | Size-gated matmul/matvec; oracle remains scalar |
 | HIP probe | `src/hip.zig` + `src/hip_probe.c` | Zig + C | Enumeration only until the AMD op path exists |
 
-The smallest end-to-end fixture is one tiny transformer block with an
-explicit host KV cache. Prefill and decode are separate entry points.
-Apple Stages 0–8 are closed for that fixture. Deferred leftovers are
+The smallest end-to-end fixture is one tiny transformer block with
+separate prefill/decode entry points. The CPU path uses an explicit host
+KV cache; the default Apple Stage 6 path keeps KV Metal-resident. Apple
+Stages 0–8 are closed for that fixture. Deferred leftovers are
 mapped to curriculum Stages 10–12 / 16 (see `docs/apple-backend.md`)—
 Qwen weights, tokenizer, sampling, further fusions at model scale, and
 vocabulary TTFT are not silent drops. SME/Core ML (Stage 7) and

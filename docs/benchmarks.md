@@ -43,7 +43,7 @@ Prefill (8 tokens) and decode (8 steps) are reported separately.
 
 When Metal is much slower than CPU on this fixture, that is expected for
 the Stage 4 baseline. See
-[Why Metal is slower on the tiny block](apple-backend.md#why-metal-is-slower-on-the-tiny-block).
+[Why Metal was slower on the tiny block (Stage 4 baseline)](apple-backend.md#why-metal-was-slower-on-the-tiny-block-stage-4-baseline).
 
 On a machine without HIP, `zig build bench` still runs and reports that
 GPU timing is unavailable.

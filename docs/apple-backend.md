@@ -128,11 +128,14 @@ Measured A/B: `bench/results/apple-stage6-dev-laptop.md` (~8× decode).
 
 ## Prefill vs decode (tiny block)
 
-`src/model/tiny_block.zig` owns the schedule and the host KV cache.
-`src/backends/apple/block.zig` runs the same ops on a persistent Metal
-device. Layout permute and cache append stay on the host. Each Metal
-kernel still waits. Attention uploads the full host K/V tensors every
-call; that is not a Metal-resident cache.
+`src/model/tiny_block.zig` owns the schedule and the **host** KV layout
+(CPU path / baseline A/B). The default Apple path is
+`src/backends/apple/block.zig`: persistent shared weights/scratch,
+**Metal-resident KV** (`kv_append_f32` + GPU permutes), and **one**
+command buffer / one `waitUntilCompleted` per prefill or decode
+(`path=batched_resident_kv_fused`). Set `ZYNFER_APPLE_BLOCK=baseline`
+to force the Stage 4/5 per-op schedule (host permute/append + upload +
+wait per kernel) for differential A/B only.
 
 Fixture limits:
 
@@ -142,24 +145,32 @@ Fixture limits:
 | Metal `attention_f32` `kv_len` | ≤ 256 | Thread-local scores (Stage 8); larger → `Unsupported` |
 | Host alloc in decode/prefill after init | 0 | Scratch preallocated; multi-reset stress tested |
 
-See [Why Metal is slower on the tiny block](#why-metal-is-slower-on-the-tiny-block)
-for a breakdown of the measured gap vs the CPU oracle.
+See [Why Metal was slower…](#why-metal-was-slower-on-the-tiny-block-stage-4-baseline)
+for the Stage 4 baseline diagnosis; Stage 6 closed the wait/alloc story
+for this fixture.
 
-## Why Metal is slower on the tiny block
+## Why Metal was slower on the tiny block (Stage 4 baseline)
 
-Metal is much slower than the CPU oracle on `block-bench` because the
-Stage 4 path is a **correctness baseline**, not a tuned decode pipeline.
-The GPU does almost no useful math per launch; most of the time goes to
-setup, copies, and waiting.
+Historical diagnosis of the **per-op** path (`ZYNFER_APPLE_BLOCK=baseline`
+/ Stage 4 schedule). The **default** Stage 6 path no longer waits per
+kernel and no longer re-uploads KV each step—see
+[What changed the picture](#what-changed-the-picture-stage-5-6).
+Metal remains slower than the CPU oracle on this microscopic fixture
+because FLOPs are tiny; Stage 6 removed wait dominance (~8× vs baseline),
+not CPU absolute wins.
+
+The Stage 4 path is a **correctness baseline**, not a tuned decode
+pipeline. The GPU does almost no useful math per launch; most of the
+time goes to setup, copies, and waiting.
 
 This is expected. It is not a bug and does not mean the M-series GPU
-is bad at inference. It means the current schedule pays full driver and
-sync cost on every op while the tensors are too small for compute to
+is bad at inference. It means that schedule paid full driver and
+sync cost on every op while the tensors were too small for compute to
 matter.
 
-### 1. Every op pays full launch + wait
+### 1. Every op pays full launch + wait (baseline only)
 
-Each Metal op goes through `zynfer_mtl_encode_and_wait` in
+Each per-op Metal call goes through `zynfer_mtl_encode_and_wait` in
 `src/backends/apple/bridge.m`, which ends with a blocking wait:
 
 ```objc
@@ -167,7 +178,7 @@ Each Metal op goes through `zynfer_mtl_encode_and_wait` in
 [cb waitUntilCompleted];
 ```
 
-One decode token runs the full block schedule in
+One decode token on the baseline schedule runs the full block in
 `src/model/tiny_block.zig`:
 
 - RMSNorm (attention)
@@ -182,31 +193,19 @@ One decode token runs the full block schedule in
 - matmul (down)
 - add (final residual)
 
-That is roughly **14 separate Metal submissions per forward**, each with
-its own command buffer and `waitUntilCompleted`. There is no batching
-and no overlap between kernels.
+That is roughly **14–15 separate Metal submissions per forward**, each
+with its own command buffer and `waitUntilCompleted`. Stage 6 collapses
+this to **one** wait.
 
 At roughly 0.3–0.7 ms per op (consistent with `ops-bench` on small
 kernels), launch + wait alone account for about **4–6 ms per decode
-token**, which matches the ~5.9 ms measured in Debug on this laptop.
+token** on the baseline path.
 
-### 2. Fresh GPU buffers on every op
+### 2. Fresh GPU buffers on every op (baseline / ops path)
 
-Each call in `src/backends/apple/ops.zig` allocates new shared buffers,
-copies host data in, runs the kernel, copies out, then frees:
-
-```zig
-fn upload(gpu: *Gpu, t: Tensor) !Buffer {
-    var buf = try gpu.allocShared(...);
-    @memcpy(buf.f32s()[0..src.len], src);
-    return buf;
-}
-```
-
-Decode avoids **host** tensor allocation (scratch is preallocated), but
-Metal still **creates and destroys buffers per kernel**. That
-alloc/memcpy/wait cost dominates when each matmul is tiny (for example
-`1×8×8`).
+Each call in the per-op `src/backends/apple/ops.zig` helpers allocates
+new shared buffers, copies host data in, runs the kernel, copies out,
+then frees. The Stage 6 Session keeps persistent device weights/scratch/KV.
 
 ### 3. The work is too small for the GPU
 
@@ -216,40 +215,34 @@ The fixture is deliberately tiny:
 - decode = **1 token** at a time
 
 A single-token matmul is a handful of FMAs. The CPU oracle runs that in
-microseconds. The Metal path still pays driver encode, dispatch, and
-sync — often hundreds of microseconds to milliseconds regardless of
-FLOPs.
+microseconds. Even one-CB Metal still pays encode + sync overhead that
+dominates microscopic FLOPs.
 
-ReleaseSafe makes this clear: CPU decode dropped to ~2 µs/token while
-Metal stayed ~4 ms/token. Optimizing scalar CPU math barely moved Metal
-because Metal was never bound on compute.
+### 4. Attention re-uploads the whole KV cache (baseline only)
 
-### 4. Attention re-uploads the whole KV cache
+On the baseline path, attention reads the **entire** growing K/V cache
+from host tensors and uploads them again every step. Stage 6 keeps KV
+Metal-resident via `kv_append_f32`.
 
-On decode, attention reads the **entire** growing K/V cache from host
-tensors and uploads them again every step. After `n` tokens that is
-`O(n)` host→shared-buffer traffic **per decode step**, with no
-Metal-resident cache. That is intentional for Stage 4 correctness, not
-performance.
+### 5. Some work never hits the GPU (baseline only)
 
-### 5. Some work never hits the GPU
+On the baseline schedule, layout permute and KV `append` stay on the
+CPU between kernels. Stage 6 moves permutes and append onto the GPU
+inside the single command buffer.
 
-Layout permute (`tokensHeadsToHeadsTokens`) and KV `append` stay on the
-CPU. Metal only runs the op wrappers; the schedule still bounces through
-host memory between kernels.
-
-### What the numbers mean
+### What the numbers mean (Stage 4 baseline)
 
 | Observation | Interpretation |
 | --- | --- |
-| Metal ~500× slower than CPU on decode | ~14 synchronous micro-kernel launches on microscopic tensors |
+| Metal ~500× slower than CPU on decode (Stage 4) | ~14 synchronous micro-kernel launches on microscopic tensors |
 | `ops-bench` Metal often ~2× slower even on 4096-element adds | Launch + wait dominate before compute does |
 | ReleaseSafe helps CPU much more than Metal | Bottleneck is encode/sync/buffer churn, not scalar loops |
 | Prefill gap similar to decode | Same per-op pattern; prefill just runs more tokens in one forward |
 
-**Bottom line:** the gap measures **14+ synchronous micro-kernel launches
-on tiny tensors**, not “M1 Max matmul vs scalar CPU.” Stage 4 proves
-correctness and schedule; it does not claim GPU throughput.
+**Bottom line (historical):** the Stage 4 gap measured **14+ synchronous
+micro-kernel launches on tiny tensors**, not “M1 Max matmul vs scalar
+CPU.” Stage 4 proved correctness and schedule; Stage 6 is the retained
+tiny-block throughput path.
 
 ### What changed the picture (Stage 5–6)
 
@@ -303,14 +296,14 @@ Apple Stage 7/8 or curriculum Stages 10–12 / 16 land.
 | `add_rmsnorm_f32` + existing `silu_mul` | tiny-block fused path |
 | Persistent int8 for ops | `Q8DeviceWeights` / `*Q8Persistent` |
 
-### Still open — Apple Stage 7
+### Closed — Apple Stage 7
 
 | Item | Notes |
 | --- | --- |
 | **SME / SME2** | **done (rejected)** — `cpu.sme` detects FEAT_SME/SME2; kernels not retained (`bench/results/apple-stage7-dev-laptop.md`) |
 | **Core ML / ANE** | **done (rejected)** — framework probe only; no verified ANE subgraph |
 
-### Still open — Apple Stage 8
+### Closed — Apple Stage 8
 
 | Item | Notes |
 | --- | --- |
@@ -342,7 +335,7 @@ Stage 5 matrix paths: `bench/results/apple-stage5-dev-laptop.md`.
 Stage 6 block A/B: `bench/results/apple-stage6-dev-laptop.md`.
 
 Historical wait-bound writeup (pre-Stage 6):
-[Why Metal is slower…](#why-metal-is-slower-on-the-tiny-block).
+[Why Metal was slower…](#why-metal-was-slower-on-the-tiny-block-stage-4-baseline).
 
 ### Still true
 
@@ -375,6 +368,6 @@ iters 4, 8 prefill tokens, 8 decode steps):
 | Metal | 6012323 | 5855778 |
 
 Full record: `bench/results/apple-block-dev-laptop.md`. For why Metal
-is orders of magnitude slower on this fixture, see
-[Why Metal is slower on the tiny block](apple-backend.md#why-metal-is-slower-on-the-tiny-block)
-in `docs/apple-backend.md`.
+was orders of magnitude slower on the Stage 4 baseline path, see
+[Why Metal was slower on the tiny block (Stage 4 baseline)](#why-metal-was-slower-on-the-tiny-block-stage-4-baseline).
+Stage 6 (~8× vs that baseline) is the retained tiny-block schedule.

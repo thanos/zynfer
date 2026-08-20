@@ -50,4 +50,4 @@ shader compile: `metal_device_create_plus_shader_compile_ns=44651584`
 Metal is slower than the CPU oracle on this shape because launch + wait
 dominate. That is the Stage 4 baseline, not a regression to hide.
 
-Explanation: [docs/apple-backend.md#why-metal-is-slower-on-the-tiny-block](../docs/apple-backend.md#why-metal-is-slower-on-the-tiny-block)
+Explanation: [docs/apple-backend.md#why-metal-was-slower-on-the-tiny-block-stage-4-baseline](../docs/apple-backend.md#why-metal-was-slower-on-the-tiny-block-stage-4-baseline)

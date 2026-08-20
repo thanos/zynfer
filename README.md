@@ -18,18 +18,21 @@ The project is also educational. Every major subsystem is developed in stages, b
 
 ## Status
 
-**CPU oracle + Apple Metal tiny-block prefill/decode; Stages 5–8.**
+**v0.1.0 — Apple Metal tiny-block backend complete (Stages 0–8).**
 
 The Zig repository, HIP device enumeration (when ROCm is present),
-environment report, CPU f32 reference ops, naive Metal kernels, a tiny
+environment report, CPU f32 reference ops, Metal kernels, a tiny
 transformer-block fixture with Metal-resident KV and one-CB/wait
 scheduling, capability-gated `simdgroup_matrix` matmul (incl. forceable
 `_x4`), int8 GEMV/GEMM, and Accelerate vDSP matmul/matvec exist.
 Stage 7 probes SME/SME2 and Core ML/ANE and **rejects** both as
 inference paths. Stage 8 hardens the path (`kv_len`≤256, signposts,
-peak RSS, stress tests) and rejects ICB/fp16/extra tiny-block fusions
-with documented reasons. Qwen3-0.6B is not loaded. Tokenizer and sampling
-do not exist.
+peak RSS, stress + dual-`Gpu` concurrency) and rejects ICB/fp16/extra
+tiny-block fusions with documented reasons.
+
+**Not in v0.1.0:** Qwen3-0.6B load, tokenizer, sampling, vocabulary TTFT
+or tok/s. Those are curriculum Stages 10–12. Release notes:
+`docs/releases/v0.1.0.md`.
 
 On a Mac, `zig build test` differential-checks Metal against CPU, including
 Stage 6 (`batched_resident_kv_fused`) vs per-op baseline

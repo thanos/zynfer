@@ -10,7 +10,7 @@ when correctness is unresolved.
 | Apple-1 | Backend-neutral types + CPU oracle | **done** |
 | Apple-2 | Metal device / shared buffers / trivial kernel | **done** |
 | Apple-3 | Metal LLM ops vs CPU + SwiGLU fixture | **done** |
-| Apple-4 | Prefill/decode + KV cache | **done for tiny-block fixture** (closeout polish: long-context + no-growth tests, Instruments recipe, deferred list) |
+| Apple-4 | Prefill/decode + KV cache | **done** (tiny-block; Stage 6 owns resident-KV schedule) |
 | Apple-5 | simdgroup_matrix / quantized GEMV / Accelerate | **done** (size-gated; see `bench/results/apple-stage5-dev-laptop.md`) |
 | Apple-6 | Fusion / fewer waits / Metal-resident KV | **done** (one CB/wait + resident KV; see `bench/results/apple-stage6-dev-laptop.md`) |
 | Apple-7 | SME / Core ML experiments | **done** (probed; both inference paths **rejected** — `bench/results/apple-stage7-dev-laptop.md`) |
