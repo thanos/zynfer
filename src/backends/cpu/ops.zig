@@ -139,6 +139,41 @@ pub fn matvecF32(y: []f32, a: []const f32, x: []const f32, m: usize, k: usize) v
     }
 }
 
+/// Pack row-major f32 weights [m,k] into int8 + per-row scale.
+/// scale[i] = max_abs(row_i) / 127; q = round(w / scale).
+pub fn packRowQ8(weights: []const f32, m: usize, k: usize, q_out: []i8, scale_out: []f32) OpsError!void {
+    if (weights.len != m * k or q_out.len != m * k or scale_out.len != m) return error.ShapeMismatch;
+    var r: usize = 0;
+    while (r < m) : (r += 1) {
+        const row = weights[r * k ..][0..k];
+        var max_abs: f32 = 0;
+        for (row) |v| max_abs = @max(max_abs, @abs(v));
+        const scale = if (max_abs == 0) 1 else max_abs / 127.0;
+        scale_out[r] = scale;
+        const inv = 1.0 / scale;
+        var c: usize = 0;
+        while (c < k) : (c += 1) {
+            const q = @round(row[c] * inv);
+            const clamped = @max(-127.0, @min(127.0, q));
+            q_out[r * k + c] = @intFromFloat(clamped);
+        }
+    }
+}
+
+/// y[m] = (q[m,k] * scale[m]) @ x[k]
+pub fn matvecQ8(y: []f32, q: []const i8, scale: []const f32, x: []const f32, m: usize, k: usize) OpsError!void {
+    if (y.len != m or scale.len != m or q.len != m * k or x.len != k) return error.ShapeMismatch;
+    var r: usize = 0;
+    while (r < m) : (r += 1) {
+        var acc: f32 = 0;
+        var c: usize = 0;
+        while (c < k) : (c += 1) {
+            acc += @as(f32, @floatFromInt(q[r * k + c])) * x[c];
+        }
+        y[r] = acc * scale[r];
+    }
+}
+
 /// Qwen3-style RoPE: rotate the first and second halves of the last axis.
 /// `x` is [tokens, n_heads, head_dim] or [n_heads, head_dim] with positions
 /// starting at `pos0`.
@@ -525,4 +560,28 @@ test "randomized matvec matches matmul with N=1 seed 7" {
     try matvec(y, a, x);
     try matmul(c, a, b);
     try compare.expectClose(try y.f32s(), try c.f32s(), 1e-5, 1e-5);
+}
+
+test "packRowQ8 matvec approximates f32 matvec" {
+    const m: usize = 8;
+    const k: usize = 16;
+    var w = try Tensor.alloc(std.testing.allocator, .f32, &.{ m, k });
+    defer w.deinit();
+    var x = try Tensor.alloc(std.testing.allocator, .f32, &.{k});
+    defer x.deinit();
+    var y_f = try Tensor.alloc(std.testing.allocator, .f32, &.{m});
+    defer y_f.deinit();
+    var y_q = try Tensor.alloc(std.testing.allocator, .f32, &.{m});
+    defer y_q.deinit();
+    try iotaFill(w, 0.01, 0.02);
+    try iotaFill(x, 0.1, 0.05);
+    try matvec(y_f, w, x);
+    const q = try std.testing.allocator.alloc(i8, m * k);
+    defer std.testing.allocator.free(q);
+    const scale = try std.testing.allocator.alloc(f32, m);
+    defer std.testing.allocator.free(scale);
+    try packRowQ8(try w.f32s(), m, k, q, scale);
+    try matvecQ8(try y_q.f32s(), q, scale, try x.f32s(), m, k);
+    // Quantization error is bounded; atol is loose on purpose.
+    try compare.expectClose(try y_f.f32s(), try y_q.f32s(), 0.15, 0.05);
 }

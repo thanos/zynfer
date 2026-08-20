@@ -8,6 +8,9 @@ Metal bridge. It is not the AMD production target.
 - CPU f32 oracle in `src/backends/cpu/ops.zig`
 - Metal f32 kernels: add, mul, silu_mul, rmsnorm, softmax, matmul,
   matvec, rope (Qwen3-style split-half), causal GQA attention (`kv_len` ≤ 64)
+- Stage 5: capability-gated `matmul_f32_simdgroup` (Apple7+, size-gated),
+  `matvec_q8_f32` (int8 weights + per-row scale), Accelerate `vDSP_mmul`
+  for large CPU matmuls
 - Tiny transformer block: RMSNorm → QKV → RoPE → host KV append →
   attention → O + residual → SwiGLU residual
 - Separate `prefill` and `decode` entry points; decode does not allocate
@@ -16,9 +19,12 @@ Metal bridge. It is not the AMD production target.
 - Op microbenchmarks: `zig build ops-bench`
 - Block timings: `zig build block-bench`
 
-`simdgroup_matrix` hardware may be present on Apple7+ GPUs. This build
-does **not** launch a simdgroup matrix kernel. The capability flag is
-discovery only.
+`simdgroup_matrix` is **used** when hardware reports Apple7+ and the
+matmul shape meets the measured size gate (`M·N·K ≥ 64³`, dims ≥ 8).
+Smaller shapes keep the naive `matmul_f32` fallback. Force with
+`ZYNFER_MATMUL_PATH=naive|simdgroup`.
+
+Measured selection evidence: `bench/results/apple-stage5-dev-laptop.md`.
 
 ## Commands
 
@@ -265,9 +271,10 @@ confirms it.
 | Path | Status |
 | --- | --- |
 | CPU scalar f32 | implemented; oracle |
+| CPU Accelerate vDSP matmul | size-gated on macOS; differential vs scalar |
 | Metal naive f32 | implemented; differentially tested |
-| Metal `simdgroup_matrix` | hardware may report yes; kernel not shipped |
-| Accelerate / BNNS / AMX | not wired |
+| Metal `simdgroup_matrix` matmul | Apple7+; auto when M·N·K≥64³ |
+| Metal int8 GEMV (`matvec_q8_f32`) | explicit API; not auto over f32 |
 | SME / SME2 | not implemented |
 | Core ML / ANE | not implemented |
 | fp16 / bf16 Metal | dtype exists; kernels are f32 only |
@@ -276,32 +283,31 @@ confirms it.
 `zig build run -- caps` prints the disabled-path list. Forced
 `--backend apple` on a non-macOS build exits 2.
 
-## Deferred work (Stage 4 closeout — intentionally not done)
+## Deferred work (after Stage 5)
 
-Apple Stages 0–4 are **done for the tiny-block fixture**. The items
-below were *not* treated as Stage 4 polish; they need Stage 5+, a real
-model, or both. Do not start them under an “Apple-4 leftover” label.
+Apple Stages 0–5 are **done for the tiny-block fixture and measured
+matrix paths**. Remaining items need Stage 6+, a real model, or both.
 
 | Deferred item | Why deferred | Belongs in |
 | --- | --- | --- |
-| **Metal-resident KV cache** | Host layout + lifetime exist; attention still uploads full K/V each call. Device-resident append/read needs persistent buffers and a profiled decode loop. | Apple-5/6 memory plan |
-| **Remove per-op `waitUntilCompleted` and per-op shared-buffer alloc** | Correctness baseline is one command buffer + wait per kernel. Fewer waits / fused encode is Stage 6. | Apple-6 |
-| **Qwen loader / tokenizer / sampling / golden logits** | No checkpoint or vocab in tree. “Full inference” and TTFT/tok/s need a model, not a larger synthetic block. | Checkpoint stages / Apple after loader |
-| **`simdgroup_matrix` / quantized GEMM** | Capability may report yes; no optimized kernel shipped. | Apple-5 |
-| **Fused kernels** | Launch overhead is known; fuse only after Instruments on a representative schedule. | Apple-6 |
-| **Accelerate / SME / ANE** | Optional; retain only if a named workload improves without becoming a hard dependency. | Apple-7 |
+| **Metal-resident KV cache** | Host layout + lifetime exist; attention still uploads full K/V each call. | Apple-6 |
+| **Remove per-op `waitUntilCompleted` and per-op shared-buffer alloc** | Still one command buffer + wait per kernel. | Apple-6 |
+| **Persistent int8 weight buffers** | `matvec_q8_f32` exists; pack+upload each call does not beat f32. | Apple-6 / quant load |
+| **Qwen loader / tokenizer / sampling / golden logits** | No checkpoint or vocab in tree. | Checkpoint stages |
+| **Fused kernels** | Fuse only after Instruments on a representative schedule. | Apple-6 |
+| **SME / ANE** | Optional; retain only if a named workload improves. | Apple-7 |
 
-Evidence and recipe for the wait-bound baseline:
-[Why Metal is slower…](#why-metal-is-slower-on-the-tiny-block) and the
-Instruments section above.
+Stage 5 measurements and selection table:
+`bench/results/apple-stage5-dev-laptop.md`.
 
-### Earlier deferred notes (still true)
+Wait-bound tiny-block baseline:
+[Why Metal is slower…](#why-metal-is-slower-on-the-tiny-block).
+
+### Still true
 
 - Tiny block is a synthetic residual stream, not Qwen3-0.6B.
-- Metal attention hard-caps `kv_len` at 64; the CPU path is not capped
-  by that constant (fixture `max_seq` is 32 today).
-- Peak RSS / energy/token are not claimed; growth is checked via host
-  allocator counters and create/destroy leak tests.
+- Metal attention hard-caps `kv_len` at 64; fixture `max_seq` is 32.
+- Peak RSS / energy/token are not claimed.
 
 ## Measured on this development laptop (2026-08-19)
 

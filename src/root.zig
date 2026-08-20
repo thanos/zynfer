@@ -17,6 +17,7 @@ pub const tiny_block = @import("model/tiny_block.zig");
 
 pub const cpu = struct {
     pub const ops = @import("backends/cpu/ops.zig");
+    pub const accelerate = @import("backends/cpu/accelerate.zig");
 };
 
 pub const apple = struct {
@@ -42,6 +43,7 @@ test {
     _ = kv_cache;
     _ = tiny_block;
     _ = cpu.ops;
+    _ = cpu.accelerate;
     _ = apple.gpu;
     _ = apple.ops;
     _ = apple.block;

@@ -55,6 +55,7 @@ Committed templates:
 - `bench/results/stage0-dev-laptop.md`
 - `bench/results/apple-ops-dev-laptop.md`
 - `bench/results/apple-block-dev-laptop.md`
+- `bench/results/apple-stage5-dev-laptop.md`
 
 Local captures that should not be committed:
 
@@ -64,7 +65,7 @@ Local captures that should not be committed:
 
 Vocabulary TTFT still N/A — no tokenizer (deferred past Apple-4). The
 tiny block reports wall time for a synthetic residual stream. For what
-Apple-4 deliberately deferred (Metal-resident KV, wait removal, Qwen),
+is still deferred after Stage 5 (Metal-resident KV, wait removal, Qwen),
 see `docs/apple-backend.md`.
 
 | Metric | Status |
@@ -93,9 +94,11 @@ stages, not this baseline.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | CPU reference | Zig scalar f32 | none | op microbench | N/A | N/A | N/A | N/A | N/A | N/A | N/A | correctness oracle |
 | CPU reference | Zig scalar f32 | tiny-block f32 | prefill 8 / decode 8 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | `block-bench`; ns not tok/s |
+| CPU optimized | Accelerate vDSP | f32 | matmul ≥64³ | N/A | N/A | N/A | N/A | N/A | N/A | N/A | size-gated; stage5 result |
 | Metal baseline | naive MSL f32 | none | op microbench | N/A | N/A | N/A | N/A | N/A | N/A | N/A | implemented; see apple-ops result |
 | Metal baseline | naive MSL f32 | tiny-block f32 | prefill 8 / decode 8 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | per-op wait; host KV |
-| Metal optimized | simdgroup_matrix | — | — | N/A | N/A | N/A | N/A | N/A | N/A | N/A | capability discovered; kernel not shipped |
+| Metal optimized | simdgroup_matrix | f32 | matmul 64³ / 256³ | N/A | N/A | N/A | N/A | N/A | N/A | N/A | auto when M·N·K≥64³ |
+| Metal int8 GEMV | matvec_q8_f32 | int8×f32 scale | 256×256 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | explicit API; not auto over f32 |
 | Metal fused | fused MSL | — | — | N/A | N/A | N/A | N/A | N/A | N/A | N/A | not built |
 | Core ML/ANE hybrid | — | — | — | N/A | N/A | N/A | N/A | N/A | N/A | N/A | not built |
 | HIP | RDNA 4 | — | device enum | N/A | N/A | N/A | N/A | N/A | N/A | N/A | Stage 0 probe only |

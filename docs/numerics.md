@@ -22,8 +22,10 @@ Every numerical test states atol/rtol. Exact equality is not required
 for GPU results. Tolerances are not loosened to hide a mismatch.
 
 Current Metal vs CPU checks use roughly `1e-5` for elementwise ops and
-`1e-4`–`3e-4` for reductions, matmul, RoPE, attention, SwiGLU, and the
-tiny transformer block.
+`1e-4`–`3e-4` for reductions, matmul (including simdgroup), RoPE,
+attention, SwiGLU, int8 GEMV vs its dequant oracle, and the tiny
+transformer block. Quantized vs full-precision f32 uses a looser bound
+on purpose (packing error).
 
 On mismatch, `src/runtime/compare.zig` prints max abs, max rel, RMS,
 failing index, and expected/actual.

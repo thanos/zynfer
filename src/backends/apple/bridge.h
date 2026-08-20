@@ -62,7 +62,9 @@ int zynfer_mtl_encode_and_wait(
     ZynferMtlBuffer **bufs,
     uint32_t nbufs,
     const void *params,
-    uint32_t params_len);
+    uint32_t params_len,
+    uint32_t threadgroup_mem_bytes,
+    int dispatch_threadgroups);
 
 #ifdef __cplusplus
 }

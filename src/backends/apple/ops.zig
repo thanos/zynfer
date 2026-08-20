@@ -42,12 +42,28 @@ fn launchBufs(
     bufs: []const Buffer,
     params: []const u8,
 ) Error!void {
+    try launchBufsOpts(gpu, kernel, grid_x, grid_y, grid_z, tg_x, tg_y, tg_z, bufs, params, .{});
+}
+
+fn launchBufsOpts(
+    gpu: *Gpu,
+    kernel: [:0]const u8,
+    grid_x: u32,
+    grid_y: u32,
+    grid_z: u32,
+    tg_x: u32,
+    tg_y: u32,
+    tg_z: u32,
+    bufs: []const Buffer,
+    params: []const u8,
+    opts: gpu_mod.Gpu.LaunchOpts,
+) Error!void {
     if (!have_apple) return error.AppleUnavailable;
     if (have_apple) {
         var tmp: [8]*gpu_mod.MtlBuffer = undefined;
         if (bufs.len > tmp.len) return error.Unsupported;
         for (bufs, 0..) |b, i| tmp[i] = b.handle;
-        try gpu.launch(kernel, grid_x, grid_y, grid_z, tg_x, tg_y, tg_z, tmp[0..bufs.len], params);
+        try gpu.launchOpts(kernel, grid_x, grid_y, grid_z, tg_x, tg_y, tg_z, tmp[0..bufs.len], params, opts);
     }
 }
 
@@ -139,7 +155,49 @@ const MatmulParams = extern struct {
     k: u32,
 };
 
+pub const MatmulPath = enum {
+    naive,
+    simdgroup,
+
+    pub fn name(self: MatmulPath) []const u8 {
+        return switch (self) {
+            .naive => "matmul_f32",
+            .simdgroup => "matmul_f32_simdgroup",
+        };
+    }
+};
+
+/// Minimum M*N*K before simdgroup is preferred over naive.
+/// Below this, launch+sync dominate and naive is kept as the measured fallback.
+pub const simdgroup_min_flops: usize = 64 * 64 * 64;
+
+/// Force matmul path via `ZYNFER_MATMUL_PATH=naive|simdgroup`. Invalid values are ignored.
+pub fn forcedMatmulPath() ?MatmulPath {
+    if (comptime !have_apple) return null;
+    const raw = std.c.getenv("ZYNFER_MATMUL_PATH") orelse return null;
+    const v = std.mem.span(raw);
+    if (std.mem.eql(u8, v, "naive")) return .naive;
+    if (std.mem.eql(u8, v, "simdgroup")) return .simdgroup;
+    return null;
+}
+
+pub fn selectMatmulPath(gpu: *const Gpu, m: usize, n: usize, k: usize) MatmulPath {
+    if (forcedMatmulPath()) |forced| {
+        if (forced == .simdgroup and !gpu.features.simdgroup_matrix_available) return .naive;
+        return forced;
+    }
+    if (!gpu.features.simdgroup_matrix_available) return .naive;
+    if (m < 8 or n < 8 or k < 8) return .naive;
+    if (m * n * k < simdgroup_min_flops) return .naive;
+    return .simdgroup;
+}
+
 pub fn matmul(gpu: *Gpu, c: Tensor, a: Tensor, b: Tensor) Error!void {
+    const path = selectMatmulPath(gpu, a.shape[0], b.shape[1], a.shape[1]);
+    try matmulPath(gpu, c, a, b, path);
+}
+
+pub fn matmulPath(gpu: *Gpu, c: Tensor, a: Tensor, b: Tensor, path: MatmulPath) Error!void {
     const m: u32 = @intCast(a.shape[0]);
     const k: u32 = @intCast(a.shape[1]);
     const n: u32 = @intCast(b.shape[1]);
@@ -150,8 +208,33 @@ pub fn matmul(gpu: *Gpu, c: Tensor, a: Tensor, b: Tensor) Error!void {
     var cb = try gpu.allocShared(c.data.len);
     defer cb.deinit();
     const params = MatmulParams{ .m = m, .n = n, .k = k };
-    const tg: u32 = 16;
-    try launchBufs(gpu, "matmul_f32", n, m, 1, tg, tg, 1, &.{ ab, bb, cb }, std.mem.asBytes(&params));
+    switch (path) {
+        .naive => {
+            const tg: u32 = 16;
+            try launchBufs(gpu, "matmul_f32", n, m, 1, tg, tg, 1, &.{ ab, bb, cb }, std.mem.asBytes(&params));
+        },
+        .simdgroup => {
+            if (!gpu.features.simdgroup_matrix_available) return error.Unsupported;
+            const tile: u32 = 8;
+            const tg_x = (n + tile - 1) / tile;
+            const tg_y = (m + tile - 1) / tile;
+            // One simdgroup: A/B/C staging = 3 * 64 * 4 bytes.
+            const tg_mem: u32 = 3 * 64 * 4;
+            try launchBufsOpts(
+                gpu,
+                "matmul_f32_simdgroup",
+                tg_x,
+                tg_y,
+                1,
+                32,
+                1,
+                1,
+                &.{ ab, bb, cb },
+                std.mem.asBytes(&params),
+                .{ .threadgroup_mem_bytes = tg_mem, .threadgroups = true },
+            );
+        },
+    }
     try download(cb, c);
 }
 
@@ -167,6 +250,37 @@ pub fn matvec(gpu: *Gpu, y: Tensor, a: Tensor, x: Tensor) Error!void {
     const params = MatmulParams{ .m = m, .n = 1, .k = k };
     const tg = gpu.threadgroup1d();
     try launchBufs(gpu, "matvec_f32", m, 1, 1, tg, 1, 1, &.{ ab, xb, yb }, std.mem.asBytes(&params));
+    try download(yb, y);
+}
+
+/// y = (int8_weights * per_row_scale) @ x. Weights are row-major int8 [m,k].
+pub fn matvecQ8(
+    gpu: *Gpu,
+    y: Tensor,
+    w_q8: []const i8,
+    scale: []const f32,
+    x: Tensor,
+) Error!void {
+    if (y.rank != 1 or x.rank != 1) return error.InvalidShape;
+    const m = y.shape[0];
+    const k = x.shape[0];
+    if (w_q8.len != m * k or scale.len != m) return error.ShapeMismatch;
+
+    var wb = try gpu.allocShared(w_q8.len);
+    defer wb.deinit();
+    @memcpy(wb.bytes[0..w_q8.len], @as([*]const u8, @ptrCast(w_q8.ptr))[0..w_q8.len]);
+
+    var sb = try gpu.allocShared(scale.len * @sizeOf(f32));
+    defer sb.deinit();
+    @memcpy(sb.f32s()[0..scale.len], scale);
+
+    var xb = try upload(gpu, x);
+    defer xb.deinit();
+    var yb = try gpu.allocShared(y.data.len);
+    defer yb.deinit();
+    const params = MatmulParams{ .m = @intCast(m), .n = 1, .k = @intCast(k) };
+    const tg = gpu.threadgroup1d();
+    try launchBufs(gpu, "matvec_q8_f32", @intCast(m), 1, 1, tg, 1, 1, &.{ wb, sb, xb, yb }, std.mem.asBytes(&params));
     try download(yb, y);
 }
 
@@ -357,6 +471,22 @@ test "Metal ops match CPU reference" {
     try matmul(&gpu, Cgpu, A, B);
     try compare.expectClose(try Ccpu.f32s(), try Cgpu.f32s(), 1e-4, 1e-4);
 
+    if (gpu.features.simdgroup_matrix_available) {
+        var As = try Tensor.alloc(gpa, .f32, &.{ 64, 64 });
+        defer As.deinit();
+        var Bs = try Tensor.alloc(gpa, .f32, &.{ 64, 64 });
+        defer Bs.deinit();
+        var Ccpu_s = try Tensor.alloc(gpa, .f32, &.{ 64, 64 });
+        defer Ccpu_s.deinit();
+        var Cgpu_s = try Tensor.alloc(gpa, .f32, &.{ 64, 64 });
+        defer Cgpu_s.deinit();
+        try fillIota(As);
+        try fillIota(Bs);
+        try cpu.matmul(Ccpu_s, As, Bs);
+        try matmulPath(&gpu, Cgpu_s, As, Bs, .simdgroup);
+        try compare.expectClose(try Ccpu_s.f32s(), try Cgpu_s.f32s(), 2e-4, 2e-4);
+    }
+
     var xv = try Tensor.alloc(gpa, .f32, &.{3});
     defer xv.deinit();
     var yv = try Tensor.alloc(gpa, .f32, &.{4});
@@ -367,6 +497,29 @@ test "Metal ops match CPU reference" {
     try cpu.matvec(yv, A, xv);
     try matvec(&gpu, yvg, A, xv);
     try compare.expectClose(try yv.f32s(), try yvg.f32s(), 1e-4, 1e-4);
+
+    {
+        const mq: usize = 32;
+        const kq: usize = 64;
+        var W = try Tensor.alloc(gpa, .f32, &.{ mq, kq });
+        defer W.deinit();
+        var xq = try Tensor.alloc(gpa, .f32, &.{kq});
+        defer xq.deinit();
+        var y_cpu = try Tensor.alloc(gpa, .f32, &.{mq});
+        defer y_cpu.deinit();
+        var y_gpu = try Tensor.alloc(gpa, .f32, &.{mq});
+        defer y_gpu.deinit();
+        try fillIota(W);
+        try fillIota(xq);
+        const q = try gpa.alloc(i8, mq * kq);
+        defer gpa.free(q);
+        const scale = try gpa.alloc(f32, mq);
+        defer gpa.free(scale);
+        try cpu.packRowQ8(try W.f32s(), mq, kq, q, scale);
+        try cpu.matvecQ8(try y_cpu.f32s(), q, scale, try xq.f32s(), mq, kq);
+        try matvecQ8(&gpu, y_gpu, q, scale, xq);
+        try compare.expectClose(try y_cpu.f32s(), try y_gpu.f32s(), 2e-4, 2e-4);
+    }
 
     var r = try Tensor.alloc(gpa, .f32, &.{ 2, 2, 4 });
     defer r.deinit();

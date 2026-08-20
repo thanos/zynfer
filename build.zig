@@ -237,6 +237,7 @@ fn configureApple(b: *std.Build, mod: *std.Build.Module, have_apple: bool) void 
     mod.addIncludePath(b.path("src/backends/apple"));
     mod.linkFramework("Foundation", .{});
     mod.linkFramework("Metal", .{});
+    mod.linkFramework("Accelerate", .{});
     mod.addCSourceFile(.{
         .file = b.path("src/backends/apple/bridge.m"),
         .flags = &.{"-fobjc-arc"},

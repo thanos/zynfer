@@ -37,8 +37,9 @@ They are not the same enum.
 | Tiny block | `src/model/tiny_block.zig` | Zig | Prefill/decode schedule; no Metal/HIP imports |
 | CPU oracle | `src/backends/cpu/ops.zig` | Zig | Scalar f32; correctness reference |
 | Apple bridge | `src/backends/apple/bridge.m` | ObjC/ARC | Device, shared buffers, compile, wait |
-| Apple kernels | `src/backends/apple/kernels.metal` | MSL | Naive f32; no `simdgroup_matrix` |
+| Apple kernels | `src/backends/apple/kernels.metal` | MSL | Naive f32 + `matmul_f32_simdgroup` + `matvec_q8_f32` |
 | Apple dispatch | `src/backends/apple/gpu.zig`, `ops.zig`, `block.zig` | Zig | Policy, launches, CPU differential tests |
+| CPU Accelerate | `src/backends/cpu/accelerate.zig` | Zig+vDSP | Size-gated; oracle remains scalar |
 | HIP probe | `src/hip.zig` + `src/hip_probe.c` | Zig + C | Enumeration only until the AMD op path exists |
 
 The smallest end-to-end fixture is one tiny transformer block with an
@@ -77,7 +78,7 @@ x[t,H] → RMSNorm → QKV → RoPE → KV append → causal GQA → O + residua
 - No generic tensor framework.
 - No CUDA-shaped graph runtime.
 - No silent backend fallback: `--backend cuda` exits 2.
-- Do not claim AMX, SME/SME2, ANE/Core ML, or `simdgroup_matrix`
-  execution; those capabilities may be discovered and are disabled with
-  an explicit reason.
+- Do not claim AMX, SME/SME2, or ANE/Core ML execution; those remain
+  disabled. `simdgroup_matrix` and Accelerate are used only when
+  capability- and size-gated selection chooses them (see Stage 5 docs).
 - No multi-GPU path.

@@ -178,7 +178,10 @@ fn printCaps(writer: *std.Io.Writer, forced: ?[]const u8) !void {
                 yn(feat.gpu_family_apple8),
                 yn(feat.gpu_family_apple9),
             });
-            try writer.print("  chosen kernels: naive f32 Metal (add, mul, silu_mul, rmsnorm, softmax, matmul, matvec, rope, attention; attention kv_len<=64)\n", .{});
+            try writer.print("  chosen kernels: naive f32 Metal + capability-gated matmul_f32_simdgroup (M*N*K>={d}) + matvec_q8_f32; attention kv_len<=64\n", .{zynfer.apple.ops.simdgroup_min_flops});
+            const auto64: []const u8 = if (feat.simdgroup_matrix_available) "matmul_f32_simdgroup" else "matmul_f32";
+            try writer.print("  matmul auto-path policy (64x64x64): {s}  (override with ZYNFER_MATMUL_PATH=naive|simdgroup)\n", .{auto64});
+            try writer.print("  Accelerate CPU matmul: size-gated vDSP when M*N*K>={d}\n", .{zynfer.cpu.accelerate.min_flops});
         },
         else => {},
     }
@@ -222,11 +225,18 @@ fn runOpsBench(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, force
     }
     defer if (gpu_ptr) |g| g.deinit();
 
-    var rows: [4]BenchRow = undefined;
+    var rows: [11]BenchRow = undefined;
     rows[0] = try benchNamed(gpa, io, writer, gpu_ptr, "add_f32_4096", benchAdd, warmup, iters);
     rows[1] = try benchNamed(gpa, io, writer, gpu_ptr, "silu_mul_f32_4096", benchSiluMul, warmup, iters);
     rows[2] = try benchNamed(gpa, io, writer, gpu_ptr, "matvec_f32_256x256", benchMatvec, warmup, iters);
     rows[3] = try benchNamed(gpa, io, writer, gpu_ptr, "matmul_f32_32x64x64", benchMatmul, warmup, iters);
+    rows[4] = try benchNamed(gpa, io, writer, gpu_ptr, "matmul_f32_naive_64x64x64", benchMatmulNaive64, warmup, iters);
+    rows[5] = try benchNamed(gpa, io, writer, gpu_ptr, "matmul_f32_simdgroup_64x64x64", benchMatmulSimd64, warmup, iters);
+    rows[6] = try benchNamed(gpa, io, writer, gpu_ptr, "matmul_f32_naive_256x256x256", benchMatmulNaive256, warmup, iters);
+    rows[7] = try benchNamed(gpa, io, writer, gpu_ptr, "matmul_f32_simdgroup_256x256x256", benchMatmulSimd256, warmup, iters);
+    rows[8] = try benchNamed(gpa, io, writer, gpu_ptr, "matmul_f32_auto_64x64x64", benchMatmulAuto64, warmup, iters);
+    rows[9] = try benchNamed(gpa, io, writer, gpu_ptr, "matvec_q8_f32_256x256", benchMatvecQ8, warmup, iters);
+    rows[10] = try benchNamed(gpa, io, writer, null, "matmul_accelerate_64x64x64", benchMatmulAccelerate64, warmup, iters);
 
     try writer.print("\njson\n", .{});
     try writer.print("{{\"backend\":\"{s}\",\"zig\":\"{s}\",\"warmup\":{d},\"iters\":{d}", .{
@@ -356,6 +366,102 @@ fn benchMatmul(gpa: std.mem.Allocator, gpu: ?*zynfer.apple.gpu.Gpu) !void {
     try b.fillF32(0.02);
     if (gpu) |g| {
         try zynfer.apple.ops.matmul(g, c, a, b);
+    } else {
+        try zynfer.cpu.ops.matmul(c, a, b);
+    }
+}
+
+fn benchMatmulNaive64(gpa: std.mem.Allocator, gpu: ?*zynfer.apple.gpu.Gpu) !void {
+    try benchMatmulPathSized(gpa, gpu, .naive, 64);
+}
+
+fn benchMatmulSimd64(gpa: std.mem.Allocator, gpu: ?*zynfer.apple.gpu.Gpu) !void {
+    try benchMatmulPathSized(gpa, gpu, .simdgroup, 64);
+}
+
+fn benchMatmulNaive256(gpa: std.mem.Allocator, gpu: ?*zynfer.apple.gpu.Gpu) !void {
+    try benchMatmulPathSized(gpa, gpu, .naive, 256);
+}
+
+fn benchMatmulSimd256(gpa: std.mem.Allocator, gpu: ?*zynfer.apple.gpu.Gpu) !void {
+    try benchMatmulPathSized(gpa, gpu, .simdgroup, 256);
+}
+
+fn benchMatmulAuto64(gpa: std.mem.Allocator, gpu: ?*zynfer.apple.gpu.Gpu) !void {
+    var a = try zynfer.Tensor.alloc(gpa, .f32, &.{ 64, 64 });
+    defer a.deinit();
+    var b = try zynfer.Tensor.alloc(gpa, .f32, &.{ 64, 64 });
+    defer b.deinit();
+    var c = try zynfer.Tensor.alloc(gpa, .f32, &.{ 64, 64 });
+    defer c.deinit();
+    try a.fillF32(0.01);
+    try b.fillF32(0.02);
+    if (gpu) |g| {
+        try zynfer.apple.ops.matmul(g, c, a, b);
+    } else {
+        try zynfer.cpu.ops.matmul(c, a, b);
+    }
+}
+
+fn benchMatmulPath(gpa: std.mem.Allocator, gpu: ?*zynfer.apple.gpu.Gpu, path: zynfer.apple.ops.MatmulPath) !void {
+    try benchMatmulPathSized(gpa, gpu, path, 64);
+}
+
+fn benchMatmulPathSized(gpa: std.mem.Allocator, gpu: ?*zynfer.apple.gpu.Gpu, path: zynfer.apple.ops.MatmulPath, dim: usize) !void {
+    var a = try zynfer.Tensor.alloc(gpa, .f32, &.{ dim, dim });
+    defer a.deinit();
+    var b = try zynfer.Tensor.alloc(gpa, .f32, &.{ dim, dim });
+    defer b.deinit();
+    var c = try zynfer.Tensor.alloc(gpa, .f32, &.{ dim, dim });
+    defer c.deinit();
+    try a.fillF32(0.01);
+    try b.fillF32(0.02);
+    if (gpu) |g| {
+        if (path == .simdgroup and !g.features.simdgroup_matrix_available) {
+            try zynfer.apple.ops.matmulPath(g, c, a, b, .naive);
+            return;
+        }
+        try zynfer.apple.ops.matmulPath(g, c, a, b, path);
+    } else {
+        try zynfer.cpu.ops.matmul(c, a, b);
+    }
+}
+
+fn benchMatvecQ8(gpa: std.mem.Allocator, gpu: ?*zynfer.apple.gpu.Gpu) !void {
+    const m: usize = 256;
+    const k: usize = 256;
+    var w = try zynfer.Tensor.alloc(gpa, .f32, &.{ m, k });
+    defer w.deinit();
+    var x = try zynfer.Tensor.alloc(gpa, .f32, &.{k});
+    defer x.deinit();
+    var y = try zynfer.Tensor.alloc(gpa, .f32, &.{m});
+    defer y.deinit();
+    try w.fillF32(0.01);
+    try x.fillF32(0.02);
+    const q = try gpa.alloc(i8, m * k);
+    defer gpa.free(q);
+    const scale = try gpa.alloc(f32, m);
+    defer gpa.free(scale);
+    try zynfer.cpu.ops.packRowQ8(try w.f32s(), m, k, q, scale);
+    if (gpu) |g| {
+        try zynfer.apple.ops.matvecQ8(g, y, q, scale, x);
+    } else {
+        try zynfer.cpu.ops.matvecQ8(try y.f32s(), q, scale, try x.f32s(), m, k);
+    }
+}
+
+fn benchMatmulAccelerate64(gpa: std.mem.Allocator, gpu: ?*zynfer.apple.gpu.Gpu) !void {
+    _ = gpu;
+    var a = try zynfer.Tensor.alloc(gpa, .f32, &.{ 64, 64 });
+    defer a.deinit();
+    var b = try zynfer.Tensor.alloc(gpa, .f32, &.{ 64, 64 });
+    defer b.deinit();
+    var c = try zynfer.Tensor.alloc(gpa, .f32, &.{ 64, 64 });
+    defer c.deinit();
+    try a.fillF32(0.01);
+    try b.fillF32(0.02);
+    if (zynfer.cpu.accelerate.have_accelerate) {
+        try zynfer.cpu.accelerate.matmul(c, a, b);
     } else {
         try zynfer.cpu.ops.matmul(c, a, b);
     }
