@@ -446,7 +446,8 @@ pub fn rope(gpu: *Gpu, x: Tensor, pos0: usize, theta: f32) Error!void {
 }
 
 /// Thread-local softmax; `kv_len` must be <= `max_attention_kv`.
-pub const max_attention_kv: usize = 64;
+/// Stage 8 raised the cap from 64 → 256 (still thread-local scores).
+pub const max_attention_kv: usize = 256;
 
 const AttentionParams = extern struct {
     n_q: u32,
@@ -1004,4 +1005,66 @@ test "tiny SwiGLU residual matches CPU" {
 test "forced Apple selection fails on a non-Apple build" {
     if (have_apple) return error.SkipZigTest;
     try std.testing.expectError(error.AppleUnavailable, Gpu.init());
+}
+
+/// Stage 8: fp16 Metal kernels are not retained. Callers must keep f32 or fail loudly.
+pub fn matmulF16(gpu: *Gpu, c_out: Tensor, a: Tensor, b: Tensor) Error!void {
+    _ = gpu;
+    _ = c_out;
+    _ = a;
+    _ = b;
+    return error.Unsupported;
+}
+
+pub fn matvecF16(gpu: *Gpu, y: Tensor, a: Tensor, x: Tensor) Error!void {
+    _ = gpu;
+    _ = y;
+    _ = a;
+    _ = x;
+    return error.Unsupported;
+}
+
+test "fp16 Metal matmul/matvec are Unsupported" {
+    if (gpu_mod.skipAppleGpuTests()) return error.SkipZigTest;
+    var gpu = try Gpu.init();
+    defer gpu.deinit();
+    const gpa = std.testing.allocator;
+    var a = try Tensor.alloc(gpa, .f32, &.{ 2, 2 });
+    defer a.deinit();
+    var b = try Tensor.alloc(gpa, .f32, &.{ 2, 2 });
+    defer b.deinit();
+    var c = try Tensor.alloc(gpa, .f32, &.{ 2, 2 });
+    defer c.deinit();
+    try std.testing.expectError(error.Unsupported, matmulF16(&gpu, c, a, b));
+    var x = try Tensor.alloc(gpa, .f32, &.{2});
+    defer x.deinit();
+    var y = try Tensor.alloc(gpa, .f32, &.{2});
+    defer y.deinit();
+    try std.testing.expectError(error.Unsupported, matvecF16(&gpu, y, a, x));
+}
+
+test "Metal attention matches CPU at kv_len 96 (Stage 8 raised cap)" {
+    if (gpu_mod.skipAppleGpuTests()) return error.SkipZigTest;
+    var gpu = try Gpu.init();
+    defer gpu.deinit();
+    const gpa = std.testing.allocator;
+    const kv_len: usize = 96;
+    try std.testing.expect(kv_len <= max_attention_kv);
+    var q = try Tensor.alloc(gpa, .f32, &.{ 2, 1, 4 });
+    defer q.deinit();
+    var k = try Tensor.alloc(gpa, .f32, &.{ 1, kv_len, 4 });
+    defer k.deinit();
+    var v = try Tensor.alloc(gpa, .f32, &.{ 1, kv_len, 4 });
+    defer v.deinit();
+    var acpu = try Tensor.alloc(gpa, .f32, &.{ 2, 1, 4 });
+    defer acpu.deinit();
+    var agpu = try Tensor.alloc(gpa, .f32, &.{ 2, 1, 4 });
+    defer agpu.deinit();
+    try fillIota(q);
+    try fillIota(k);
+    try fillIota(v);
+    var scores: [96]f32 = undefined;
+    try cpu.attentionInto(acpu, q, k, v, kv_len, kv_len, &scores);
+    try attention(&gpu, agpu, q, k, v, kv_len, kv_len);
+    try compare.expectClose(try acpu.f32s(), try agpu.f32s(), 2e-4, 2e-4);
 }

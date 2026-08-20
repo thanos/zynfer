@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const Host = struct {
     gpa: std.mem.Allocator,
@@ -32,6 +33,19 @@ pub fn fileExists(io: std.Io, path: []const u8) bool {
     }
     std.Io.Dir.cwd().access(io, path, .{}) catch return false;
     return true;
+}
+
+/// Peak resident set size in bytes when available.
+/// Darwin reports bytes in `ru_maxrss`; Linux reports KiB.
+pub fn peakRssBytes() ?u64 {
+    switch (builtin.os.tag) {
+        .macos, .ios, .linux => {
+            const usage = std.posix.getrusage(std.c.rusage.SELF);
+            const raw: u64 = @intCast(@max(@as(i64, 0), usage.maxrss));
+            return if (builtin.os.tag == .linux) raw * 1024 else raw;
+        },
+        else => return null,
+    }
 }
 
 pub fn findOnPath(host: Host, name: []const u8) ?[]u8 {

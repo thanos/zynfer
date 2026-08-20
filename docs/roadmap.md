@@ -14,7 +14,7 @@ when correctness is unresolved.
 | Apple-5 | simdgroup_matrix / quantized GEMV / Accelerate | **done** (size-gated; see `bench/results/apple-stage5-dev-laptop.md`) |
 | Apple-6 | Fusion / fewer waits / Metal-resident KV | **done** (one CB/wait + resident KV; see `bench/results/apple-stage6-dev-laptop.md`) |
 | Apple-7 | SME / Core ML experiments | **done** (probed; both inference paths **rejected** — `bench/results/apple-stage7-dev-laptop.md`) |
-| Apple-8 | Hardening + Stage 6 leftovers | not started (ICB/replay, further fusions, kv_len, fp16, signposts/metrics; fused vs baseline A/B **done**) |
+| Apple-8 | Hardening + Stage 6 leftovers | **done** (kv_len 256, signposts, RSS, stress; ICB/fp16/extra fusion rejected — `bench/results/apple-stage8-dev-laptop.md`) |
 | 1 | Zig meets HIP (alloc, copy, streams) | not started |
 | 2 | First AMD kernel (vector add) | not started |
 | 3 | Tensor representation and memory planning | partial (host tensors exist; no GPU planner) |
@@ -22,7 +22,7 @@ when correctness is unresolved.
 | 5 | GEMV and GEMM | CPU + Metal f32; not HIP |
 | 6 | SiLU and SwiGLU | CPU + Metal f32; not HIP |
 | 7 | RoPE | CPU + Metal f32; not HIP |
-| 8 | Attention from scratch | CPU + Metal f32 (`kv_len` ≤ 64 on Metal) |
+| 8 | Attention from scratch | CPU + Metal f32 (`kv_len` ≤ 256 on Metal) |
 | 9 | One complete transformer block | **done as tiny fixture**; not a Qwen block |
 | 10 | Checkpoint inspection and artifact compiler | not started (absorbs Qwen loader deferred from Apple-6) |
 | 11 | Full Qwen3-0.6B forward pass | not started (absorbs golden logits deferred from Apple-6) |
@@ -59,12 +59,12 @@ when correctness is unresolved.
 The AMD curriculum still starts at Stage 1 (HIP alloc/copy) on the
 R9700. The development laptop additionally has a CPU oracle, naive
 Apple Metal ops, and a tiny transformer-block prefill/decode fixture.
-Apple Stages 0–7 are closed for the tiny fixture: measured matrix paths
-(Stage 5), one-CB/wait + Metal-resident KV (Stage 6), and Stage 7 SME /
-Core ML probes with both experimental inference paths explicitly
-rejected. Do not treat Qwen loading or further speculative fusions as
-unfinished Stage 6/7 work—they are mapped to Apple-8 and curriculum
-Stages 10–12 / 16 (see `docs/apple-backend.md` deferred table).
+Apple Stages 0–8 are closed for the tiny fixture: measured matrix paths
+(Stage 5), one-CB/wait + Metal-resident KV (Stage 6), Stage 7 SME /
+Core ML rejection, and Stage 8 hardening (kv_len 256, signposts, RSS,
+stress tests; ICB/fp16/extra tiny-block fusions rejected with reasons).
+Do not treat Qwen loading as unfinished Apple Stage 6–8 work—it is
+mapped to curriculum Stages 10–12 / 16 (see `docs/apple-backend.md`).
 
 Do not start a full Qwen forward pass until a checkpoint loader exists.
 

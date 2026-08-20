@@ -209,7 +209,7 @@ pub const Gpu = struct {
         caps.addDisabled("Core ML/ANE inference path not retained (Stage 7: no measured end-to-end subgraph)");
         caps.addDisabled("AMX is not a public contract; CPU matrix wins attribute to Accelerate only");
         caps.addDisabled("No Qwen loader/tokenizer/sampling; tiny-block only");
-        caps.addDisabled("Metal attention_f32 caps kv_len at 64 (thread-local scores); larger returns Unsupported");
+        caps.addDisabled("Metal attention_f32 caps kv_len at 256 (thread-local scores); larger returns Unsupported");
         caps.addDisabled("Per-op apple.ops path still waits each kernel; Stage 6 batch+resident KV is the tiny-block schedule");
         if (!self.features.simdgroup_matrix_available) {
             caps.addDisabled("simdgroup_matrix hardware not available; matmul uses naive f32 only");

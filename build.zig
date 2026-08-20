@@ -85,6 +85,14 @@ pub fn build(b: *std.Build) void {
     const stage7_step = b.step("stage7", "SME / Core ML Stage 7 probe and retain/reject ledger");
     stage7_step.dependOn(&stage7_cmd.step);
 
+    const stage8_cmd = b.addRunArtifact(exe);
+    stage8_cmd.step.dependOn(b.getInstallStep());
+    stage8_cmd.addArg("stage8");
+    stage8_cmd.expectStdOutMatch("Stage 8");
+    stage8_cmd.expectExitCode(0);
+    const stage8_step = b.step("stage8", "Apple Stage 8 hardening ledger");
+    stage8_step.dependOn(&stage8_cmd.step);
+
     const ops_bench_cmd = b.addRunArtifact(exe);
     ops_bench_cmd.step.dependOn(b.getInstallStep());
     ops_bench_cmd.addArg("ops-bench");
@@ -235,6 +243,13 @@ pub fn build(b: *std.Build) void {
     integration_step.dependOn(&stage7_ok.step);
     integration_step.dependOn(&force_sme.step);
     integration_step.dependOn(&force_coreml.step);
+
+    const stage8_ok = b.addRunArtifact(exe);
+    stage8_ok.addArg("stage8");
+    stage8_ok.expectStdOutMatch("Stage 8");
+    stage8_ok.expectStdOutMatch("REJECT");
+    stage8_ok.expectExitCode(0);
+    integration_step.dependOn(&stage8_ok.step);
 
     const docs_lib = b.addLibrary(.{
         .name = "zynfer",

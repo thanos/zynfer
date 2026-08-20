@@ -58,6 +58,7 @@ Committed templates:
 - `bench/results/apple-stage5-dev-laptop.md`
 - `bench/results/apple-stage6-dev-laptop.md`
 - `bench/results/apple-stage7-dev-laptop.md`
+- `bench/results/apple-stage8-dev-laptop.md`
 
 Local captures that should not be committed:
 

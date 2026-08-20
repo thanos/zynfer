@@ -7,7 +7,7 @@ Metal bridge. It is not the AMD production target.
 
 - CPU f32 oracle in `src/backends/cpu/ops.zig`
 - Metal f32 kernels: add, mul, silu_mul, rmsnorm, softmax, matmul,
-  matvec, rope (Qwen3-style split-half), causal GQA attention (`kv_len` ≤ 64)
+  matvec, rope (Qwen3-style split-half), causal GQA attention (`kv_len` ≤ 256)
 - Stage 5: capability-gated `matmul_f32_simdgroup` / `matmul_f32_simdgroup_x4`
   (Apple7+, size-gated), `matvec_q8_f32` / `matmul_q8_f32` (per-row or
   per-tensor scale), Accelerate `vDSP_mmul` for large CPU matmul and matvec
@@ -19,11 +19,14 @@ Metal bridge. It is not the AMD production target.
   both inference paths **rejected** (see `zynfer stage7` /
   `bench/results/apple-stage7-dev-laptop.md`). Accelerate retained;
   do not claim AMX.
+- Stage 8: attention `kv_len` ≤ **256**, opt-in signposts
+  (`ZYNFER_SIGNPOSTS=1`), `peak_rss_bytes` in block-bench, stress tests;
+  ICB/fp16/extra tiny-block fusions **rejected** (`zynfer stage8`).
 - Tiny transformer block: RMSNorm → QKV → RoPE → KV append →
   attention → O + residual → SwiGLU residual
 - Separate `prefill` and `decode` entry points; decode does not allocate
   host tensors
-- Capability dump: `zig build run -- caps` / `zynfer stage7`
+- Capability dump: `zig build run -- caps` / `zynfer stage7` / `zynfer stage8`
 - Op microbenchmarks: `zig build ops-bench`
 - Block timings: `zig build block-bench`
 
@@ -130,7 +133,7 @@ Fixture limits:
 | Limit | Value | Notes |
 | --- | ---: | --- |
 | `max_seq` (CPU + host KV) | 32 | Prefill/decode tested through full length |
-| Metal `attention_f32` `kv_len` | ≤ 64 | Thread-local scores; larger → `Unsupported` |
+| Metal `attention_f32` `kv_len` | ≤ 256 | Thread-local scores (Stage 8); larger → `Unsupported` |
 | Host alloc in decode/prefill after init | 0 | Scratch preallocated; multi-reset stress tested |
 
 See [Why Metal is slower on the tiny block](#why-metal-is-slower-on-the-tiny-block)
@@ -269,9 +272,10 @@ Stage 6 A/B: `bench/results/apple-stage6-dev-laptop.md`.
 | Metal `simdgroup_matrix` matmul | Apple7+; auto when M·N·K≥64³; `_x4` force-only (slower at 256³) |
 | Metal int8 GEMV/GEMM (`matvec_q8_f32` / `matmul_q8_f32`) | explicit API; fair (prepacked) benches; not auto over f32 |
 | Metal fused / batched tiny-block | Stage 6 one CB/wait + resident KV; ~8× vs per-op baseline |
+| Metal attention long context | Stage 8: `kv_len` ≤ 256 |
 | SME / SME2 | hardware probed (`FEAT_SME`); kernels **rejected** (Stage 7) |
 | Core ML / ANE | framework probed; inference path **rejected** (no verified subgraph) |
-| fp16 / bf16 Metal | dtype exists; kernels are f32 only |
+| fp16 / bf16 Metal | **rejected** Stage 8 (`Unsupported`); kernels remain f32 |
 | HIP transformer ops | not implemented (probe only) |
 
 `zig build run -- caps` and `zynfer stage7` print the Stage 7 ledger.
@@ -304,14 +308,19 @@ Apple Stage 7/8 or curriculum Stages 10–12 / 16 land.
 
 | Item | Notes |
 | --- | --- |
-| **Fused vs `baseline` numerical A/B test** | **done** — `Metal Stage 6 path matches baseline path and CPU` |
-| **Reusable execution encoding** (ICB / encode-once) | Buffers reused; CB still re-encoded each forward |
-| **Further MSL fusions** | Only if Instruments still shows wins after one-CB/wait |
-| **Int8 weights in tiny-block Session** | Ops path only today |
-| **Metal attention `kv_len` > 64** | Hard cap; fixture `max_seq` 32 |
-| **fp16 / bf16 Metal kernels** | Dtype tags only |
-| **Signposts / peak RSS / energy-per-token** | Not claimed |
+| **Fused vs `baseline` numerical A/B test** | **done** — Stage 6 |
+| **Attention `kv_len` cap** | **done** — raised to **256**; tested at 96 |
+| **Signposts** | **done** — `ZYNFER_SIGNPOSTS=1` |
+| **Peak RSS** | **done** — `peak_rss_bytes` in block-bench JSON |
+| **Stress / cancel paths** | **done** — repeated Session + batch abort tests |
+| **fp16 / bf16 Metal** | **rejected** — `Unsupported` stubs |
+| **Reusable execution encoding** (ICB) | **rejected** — see stage8 results |
+| **Further MSL fusions** | **rejected** for tiny-block; → Stage 16 |
+| **Int8 weights in tiny-block Session** | **rejected** for now; ops path keeps `Q8DeviceWeights` |
 | **Benchmark matrix TTFT/tok/s fill-in** | After Stages 10–12 produce tokens |
+| **Energy/token** | N/A — not measured |
+
+Stage 8 ledger: `bench/results/apple-stage8-dev-laptop.md`.
 
 ### Still open — curriculum (not Apple-6)
 
@@ -332,8 +341,8 @@ Historical wait-bound writeup (pre-Stage 6):
 ### Still true
 
 - Tiny block is a synthetic residual stream, not Qwen3-0.6B.
-- Metal attention hard-caps `kv_len` at 64; fixture `max_seq` is 32.
-- Peak RSS / energy/token are not claimed.
+- Metal attention hard-caps `kv_len` at **256**; fixture `max_seq` is 32.
+- Energy/token is not claimed; `peak_rss_bytes` is reported when available.
 - Stage 6 Metal is still slower than scalar CPU on this tiny shape.
 
 ## Measured on this development laptop (2026-08-19)
