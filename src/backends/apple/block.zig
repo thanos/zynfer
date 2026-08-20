@@ -260,11 +260,15 @@ pub const Session = struct {
     }
 
     pub fn prefill(self: *Session, x: Tensor, out: Tensor) !void {
+        const sid = gpu_mod.signpostBegin("prefill");
+        defer gpu_mod.signpostEnd(sid, "prefill");
         try self.forward(x, out);
     }
 
     pub fn decode(self: *Session, x: Tensor, out: Tensor) !void {
         if (x.rank != 2 or x.shape[0] != 1) return error.InvalidShape;
+        const sid = gpu_mod.signpostBegin("decode");
+        defer gpu_mod.signpostEnd(sid, "decode");
         try self.forward(x, out);
     }
 
@@ -291,6 +295,8 @@ pub const Session = struct {
         if (pos0 + t > apple_ops.max_attention_kv) return error.Unsupported;
 
         if (self.weights_dirty) {
+            const sid = gpu_mod.signpostBegin("weights_upload");
+            defer gpu_mod.signpostEnd(sid, "weights_upload");
             try self.weights_gpu.uploadFrom(self.inner.weights);
             self.weights_dirty = false;
         }
@@ -490,15 +496,16 @@ test "Metal attention rejects kv_len above the thread-local cap" {
     var gpu = try Gpu.init();
     defer gpu.deinit();
     const gpa = std.testing.allocator;
+    const over = apple_ops.max_attention_kv + 1;
     var q = try Tensor.alloc(gpa, .f32, &.{ 1, 1, 2 });
     defer q.deinit();
-    var k = try Tensor.alloc(gpa, .f32, &.{ 1, 65, 2 });
+    var k = try Tensor.alloc(gpa, .f32, &.{ 1, over, 2 });
     defer k.deinit();
-    var v = try Tensor.alloc(gpa, .f32, &.{ 1, 65, 2 });
+    var v = try Tensor.alloc(gpa, .f32, &.{ 1, over, 2 });
     defer v.deinit();
     var o = try Tensor.alloc(gpa, .f32, &.{ 1, 1, 2 });
     defer o.deinit();
-    try std.testing.expectError(error.Unsupported, apple_ops.attention(&gpu, o, q, k, v, 65, 65));
+    try std.testing.expectError(error.Unsupported, apple_ops.attention(&gpu, o, q, k, v, over, over));
 }
 
 test "Metal batch two adds matches sequential" {
@@ -523,4 +530,116 @@ test "Metal batch two adds matches sequential" {
     try std.testing.expectEqual(@as(u32, 2), gpu.last_batch_encodes);
     try std.testing.expectEqual(@as(f32, 2), out.f32s()[0]);
     try std.testing.expectEqual(@as(f32, 17), out.f32s()[15]);
+}
+
+test "Metal Session stress: repeated init and full max_seq" {
+    if (gpu_mod.skipAppleGpuTests()) return error.SkipZigTest;
+    defer force_baseline_path = null;
+    force_baseline_path = false;
+
+    var gpu = try Gpu.init();
+    defer gpu.deinit();
+    const gpa = std.testing.allocator;
+    const spec = tiny.fixture_spec;
+
+    var round: usize = 0;
+    while (round < 3) : (round += 1) {
+        var sess = try Session.init(gpa, &gpu, spec);
+        defer sess.deinit();
+        try sess.inner.weights.fillFixture();
+        sess.markWeightsDirty();
+
+        var step_in = try Tensor.alloc(gpa, .f32, &.{ 1, spec.hidden });
+        defer step_in.deinit();
+        var step_out = try Tensor.alloc(gpa, .f32, &.{ 1, spec.hidden });
+        defer step_out.deinit();
+        try tiny.iotaFill(step_in, 0.01, 0.001);
+
+        var t: usize = 0;
+        while (t < spec.max_seq) : (t += 1) {
+            try sess.decode(step_in, step_out);
+        }
+        try std.testing.expectEqual(spec.max_seq, sess.inner.cache.used);
+        try std.testing.expectError(error.InvalidShape, sess.decode(step_in, step_out));
+        try std.testing.expectEqualStrings(path_staged, last_block_path);
+        try std.testing.expectEqual(@as(u32, 1), last_block_waits);
+    }
+}
+
+test "Metal batch abort leaves device usable" {
+    if (gpu_mod.skipAppleGpuTests()) return error.SkipZigTest;
+    var gpu = try Gpu.init();
+    defer gpu.deinit();
+    const n: usize = 8;
+    var a = try gpu.allocShared(f32Bytes(n));
+    defer a.deinit();
+    var b = try gpu.allocShared(f32Bytes(n));
+    defer b.deinit();
+    var out = try gpu.allocShared(f32Bytes(n));
+    defer out.deinit();
+    for (a.f32s()) |*v| v.* = 1;
+    for (b.f32s()) |*v| v.* = 2;
+    try gpu.batchBegin();
+    try apple_ops.encodeAdd(&gpu, out, a, b, @intCast(n));
+    gpu.batchAbort();
+    try gpu.batchBegin();
+    try apple_ops.encodeAdd(&gpu, out, a, b, @intCast(n));
+    try gpu.batchCommit();
+    try std.testing.expectEqual(@as(f32, 3), out.f32s()[0]);
+}
+
+test "two Metal Sessions on separate Gpu threads" {
+    if (gpu_mod.skipAppleGpuTests()) return error.SkipZigTest;
+    defer force_baseline_path = null;
+    force_baseline_path = false;
+
+    const Worker = struct {
+        fn run(ok: *std.atomic.Value(bool)) void {
+            const gpa = std.heap.page_allocator;
+            var gpu = Gpu.init() catch {
+                ok.store(false, .seq_cst);
+                return;
+            };
+            defer gpu.deinit();
+            var sess = Session.init(gpa, &gpu, tiny.fixture_spec) catch {
+                ok.store(false, .seq_cst);
+                return;
+            };
+            defer sess.deinit();
+            sess.inner.weights.fillFixture() catch {
+                ok.store(false, .seq_cst);
+                return;
+            };
+            sess.markWeightsDirty();
+
+            var xin = Tensor.alloc(gpa, .f32, &.{ 1, tiny.fixture_spec.hidden }) catch {
+                ok.store(false, .seq_cst);
+                return;
+            };
+            defer xin.deinit();
+            var xout = Tensor.alloc(gpa, .f32, &.{ 1, tiny.fixture_spec.hidden }) catch {
+                ok.store(false, .seq_cst);
+                return;
+            };
+            defer xout.deinit();
+            tiny.iotaFill(xin, 0.02, 0.001) catch {
+                ok.store(false, .seq_cst);
+                return;
+            };
+            sess.decode(xin, xout) catch {
+                ok.store(false, .seq_cst);
+                return;
+            };
+            ok.store(true, .seq_cst);
+        }
+    };
+
+    var ok0 = std.atomic.Value(bool).init(false);
+    var ok1 = std.atomic.Value(bool).init(false);
+    const t0 = try std.Thread.spawn(.{}, Worker.run, .{&ok0});
+    const t1 = try std.Thread.spawn(.{}, Worker.run, .{&ok1});
+    t0.join();
+    t1.join();
+    try std.testing.expect(ok0.load(.seq_cst));
+    try std.testing.expect(ok1.load(.seq_cst));
 }

@@ -1,6 +1,8 @@
 #import "bridge.h"
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <os/log.h>
+#import <os/signpost.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +21,39 @@ struct ZynferMtlDevice {
 struct ZynferMtlBuffer {
     __strong id<MTLBuffer> buffer;
 };
+
+static os_log_t zynfer_signpost_log(void) {
+    static os_log_t log;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        log = os_log_create("com.zynfer.metal", "stage8");
+    });
+    return log;
+}
+
+static int signposts_enabled(void) {
+    const char *e = getenv("ZYNFER_SIGNPOSTS");
+    if (e == NULL) {
+        return 0;
+    }
+    return strcmp(e, "1") == 0 || strcmp(e, "true") == 0 || strcmp(e, "on") == 0;
+}
+
+uint64_t zynfer_signpost_interval_begin(const char *name) {
+    if (!signposts_enabled() || name == NULL) {
+        return 0;
+    }
+    const os_signpost_id_t sid = os_signpost_id_generate(zynfer_signpost_log());
+    os_signpost_interval_begin(zynfer_signpost_log(), sid, "interval", "%s", name);
+    return (uint64_t)sid;
+}
+
+void zynfer_signpost_interval_end(uint64_t id, const char *name) {
+    if (id == 0 || name == NULL) {
+        return;
+    }
+    os_signpost_interval_end(zynfer_signpost_log(), (os_signpost_id_t)id, "interval", "%s", name);
+}
 
 static void set_error(ZynferMtlDevice *dev, NSString *msg) {
     if (dev == NULL) {
@@ -224,6 +259,12 @@ int zynfer_mtl_encode_and_wait(
         return ZYNFER_MTL_ENCODE;
     }
     enc.label = cb.label;
+    const int sp = signposts_enabled();
+    os_signpost_id_t sid = OS_SIGNPOST_ID_INVALID;
+    if (sp) {
+        sid = os_signpost_id_generate(zynfer_signpost_log());
+        os_signpost_interval_begin(zynfer_signpost_log(), sid, "encode_and_wait", "%s", kernel);
+    }
     [enc setComputePipelineState:pso];
     for (uint32_t i = 0; i < nbufs; i++) {
         if (bufs[i] == NULL || bufs[i]->buffer == nil) {
@@ -248,6 +289,9 @@ int zynfer_mtl_encode_and_wait(
     [enc endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
+    if (sp) {
+        os_signpost_interval_end(zynfer_signpost_log(), sid, "encode_and_wait", "%s", kernel);
+    }
     if (cb.error != nil) {
         set_error(dev, cb.error.localizedDescription);
         return ZYNFER_MTL_ENCODE;
@@ -269,6 +313,9 @@ int zynfer_mtl_batch_begin(ZynferMtlDevice *dev) {
         return ZYNFER_MTL_ENCODE;
     }
     cb.label = @"zynfer_batch";
+    if (signposts_enabled()) {
+        os_signpost_event_emit(zynfer_signpost_log(), OS_SIGNPOST_ID_EXCLUSIVE, "batch_begin");
+    }
     /* Encoder is created per dispatch in batch_encode. */
     dev->batch_cb = cb;
     dev->batch_enc = nil;
@@ -389,8 +436,17 @@ int zynfer_mtl_batch_commit_and_wait(ZynferMtlDevice *dev) {
         dev->batch_enc = nil;
     }
     id<MTLCommandBuffer> cb = dev->batch_cb;
+    const int sp = signposts_enabled();
+    os_signpost_id_t sid = OS_SIGNPOST_ID_INVALID;
+    if (sp) {
+        sid = os_signpost_id_generate(zynfer_signpost_log());
+        os_signpost_interval_begin(zynfer_signpost_log(), sid, "batch_commit_and_wait");
+    }
     [cb commit];
     [cb waitUntilCompleted];
+    if (sp) {
+        os_signpost_interval_end(zynfer_signpost_log(), sid, "batch_commit_and_wait");
+    }
     const int ok = (cb.error == nil) ? ZYNFER_MTL_OK : ZYNFER_MTL_ENCODE;
     if (ok != ZYNFER_MTL_OK) {
         set_error(dev, cb.error.localizedDescription);

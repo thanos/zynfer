@@ -10,6 +10,7 @@ const usage =
     \\  zynfer gpu          HIP device enumeration (AMD host)
     \\  zynfer caps         Backend/device capabilities and fallbacks
     \\  zynfer stage7       SME / Core ML Stage 7 probe + retain/reject ledger
+    \\  zynfer stage8       Hardening leftovers + retain/reject ledger
     \\  zynfer backends     List selectable backends
     \\  zynfer ops-bench    CPU vs Apple op microbenchmarks
     \\  zynfer block-bench  Tiny-block prefill/decode timings
@@ -81,6 +82,8 @@ pub fn main(init: std.process.Init) !void {
         try printCaps(writer, forced_backend);
     } else if (std.mem.eql(u8, command, "stage7")) {
         try printStage7(writer);
+    } else if (std.mem.eql(u8, command, "stage8")) {
+        try printStage8(writer);
     } else if (std.mem.eql(u8, command, "backends")) {
         try printBackends(writer);
     } else if (std.mem.eql(u8, command, "ops-bench")) {
@@ -200,6 +203,37 @@ fn printStage7(writer: *std.Io.Writer) !void {
     try writer.print("\nSee bench/results/apple-stage7-dev-laptop.md\n", .{});
 }
 
+fn printStage8(writer: *std.Io.Writer) !void {
+    try writer.print("zynfer Stage 8 — hardening + Stage 6 leftovers\n", .{});
+    try writer.print("==============================================\n\n", .{});
+
+    try writer.print("Done in Stage 8\n", .{});
+    try writer.print("  attention kv_len cap:     {d} (was 64; thread-local scores)\n", .{zynfer.apple.ops.max_attention_kv});
+    try writer.print("  fused vs baseline A/B:    retained (Stage 6 test)\n", .{});
+    try writer.print("  signposts:                ZYNFER_SIGNPOSTS=1 (prefill/decode/weights_upload + encode/batch)\n", .{});
+    try writer.print("  peak_rss_bytes:           block-bench JSON + docs/benchmarks.md matrix Peak memory\n", .{});
+    try writer.print("  energy_per_token:         null (not measured)\n", .{});
+    try writer.print("  stress tests:             Session init×3 + full max_seq; batch abort; dual-Gpu concurrency\n", .{});
+    try writer.print("  fp16/bf16 Metal:          Unsupported stubs (matmulF16/matvecF16)\n\n", .{});
+
+    try writer.print("Rejected / deferred with reasons\n", .{});
+    try writer.print("  ICB / encode-once replay: REJECT — KV/q_len change every decode step;\n", .{});
+    try writer.print("                            Stage 6 already collapsed waits; re-encode is cheap\n", .{});
+    try writer.print("  Extra MSL fusions:        REJECT for tiny-block — add_rmsnorm did not beat\n", .{});
+    try writer.print("                            unfused Stage 6 batching in ns; revisit at Qwen scale\n", .{});
+    try writer.print("                            (master Stage 16)\n", .{});
+    try writer.print("  Int8 tiny-block Session:  REJECT — ops Q8DeviceWeights retained; Session stays\n", .{});
+    try writer.print("                            f32 until realistic shapes (Stages 11/16)\n", .{});
+    try writer.print("  TTFT / tok/s:             N/A until Stages 10–12\n\n", .{});
+
+    try writer.print("Retained paths\n", .{});
+    try writer.print("  Metal Stage 6 path={s}\n", .{zynfer.apple.block.path_staged});
+    try writer.print("  Baseline A/B path={s}\n", .{zynfer.apple.block.path_baseline});
+    try writer.print("  Accelerate size-gated vDSP (Stage 5)\n", .{});
+    try writer.print("  SME/Core ML inference: rejected (Stage 7)\n", .{});
+    try writer.print("\nSee bench/results/apple-stage8-dev-laptop.md\n", .{});
+}
+
 fn printCaps(writer: *std.Io.Writer, forced: ?[]const u8) !void {
     const kind = try resolveKind(forced);
     try writer.print("zynfer capabilities\n", .{});
@@ -250,8 +284,9 @@ fn printCaps(writer: *std.Io.Writer, forced: ?[]const u8) !void {
                 yn(feat.gpu_family_apple8),
                 yn(feat.gpu_family_apple9),
             });
-            try writer.print("  chosen kernels: naive f32 Metal + gated matmul_f32_simdgroup (M*N*K>={d}) + forceable matmul_f32_simdgroup_x4 + matvec/matmul_q8_f32; attention kv_len<=64\n", .{
+            try writer.print("  chosen kernels: naive f32 Metal + gated matmul_f32_simdgroup (M*N*K>={d}) + forceable matmul_f32_simdgroup_x4 + matvec/matmul_q8_f32; attention kv_len<={d}\n", .{
                 zynfer.apple.ops.simdgroup_min_flops,
+                zynfer.apple.ops.max_attention_kv,
             });
             const auto64: []const u8 = if (feat.simdgroup_matrix_available) "matmul_f32_simdgroup" else "matmul_f32";
             const auto256: []const u8 = if (feat.simdgroup_matrix_available) "matmul_f32_simdgroup" else "matmul_f32";
@@ -264,6 +299,7 @@ fn printCaps(writer: *std.Io.Writer, forced: ?[]const u8) !void {
             try writer.print("  Stage 6 tiny-block path={s}: one CB/wait + resident KV + add_rmsnorm\n", .{zynfer.apple.block.path_staged});
             try writer.print("  A/B: ZYNFER_APPLE_BLOCK=baseline → path={s} (per-op waits)\n", .{zynfer.apple.block.path_baseline});
             try writer.print("  Stage 7: SME/Core ML inference paths rejected; see `zynfer stage7`\n", .{});
+            try writer.print("  Stage 8: kv_len<={d}; signposts via ZYNFER_SIGNPOSTS=1; see `zynfer stage8`\n", .{zynfer.apple.ops.max_attention_kv});
         },
         else => {},
     }
@@ -834,7 +870,8 @@ fn runBlockBench(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, for
     try writer.print("prefill_tokens={d} decode_steps={d} max_seq={d}\n", .{ prefill_tokens, decode_steps, spec.max_seq });
     try writer.print("note: Apple Stage 6 default path={s} (one CB/wait + resident KV + add_rmsnorm).\n", .{zynfer.apple.block.path_staged});
     try writer.print("      ZYNFER_APPLE_BLOCK=baseline → path={s} (per-op waits) for A/B.\n", .{zynfer.apple.block.path_baseline});
-    try writer.print("      JSON fields: apple_block_path / apple_block_waits / apple_block_encodes.\n", .{});
+    try writer.print("      JSON fields: apple_block_path / apple_block_waits / apple_block_encodes / peak_rss_bytes.\n", .{});
+    try writer.print("      Optional: ZYNFER_SIGNPOSTS=1 for Instruments (prefill/decode/weights_upload + encode/batch).\n", .{});
     try writer.print("      This is not Qwen3 and not a production decode path.\n\n", .{});
 
     var metal_init_ns: ?u64 = null;
@@ -888,6 +925,12 @@ fn runBlockBench(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, for
     } else {
         try writer.print(",\"metal_init_ns\":null", .{});
     }
+    if (zynfer.util.peakRssBytes()) |rss| {
+        try writer.print(",\"peak_rss_bytes\":{d}", .{rss});
+    } else {
+        try writer.print(",\"peak_rss_bytes\":null", .{});
+    }
+    try writer.print(",\"energy_per_token\":null", .{});
     try writer.print(",\"cpu_prefill_ns\":{d},\"cpu_decode_ns_per_token\":{d}", .{
         cpu_times.prefill_ns,
         cpu_times.decode_ns_per_token,

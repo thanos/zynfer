@@ -460,7 +460,7 @@ struct AttentionParams {
 };
 
 // One thread per (q_token, q_head). Scores live in thread-local memory.
-// kv_len is capped at 64; the Zig caller returns Unsupported above that.
+// kv_len is capped at 256 (Stage 8); Zig returns Unsupported above that.
 kernel void attention_f32(
     device const float *q [[buffer(0)]],
     device const float *k [[buffer(1)]],
@@ -471,14 +471,14 @@ kernel void attention_f32(
 {
     uint tq = gid.x;
     uint h = gid.y;
-    if (tq >= p.q_len || h >= p.n_q || p.kv_len > 64) {
+    if (tq >= p.q_len || h >= p.n_q || p.kv_len > 256) {
         return;
     }
     uint group = p.n_q / p.n_kv;
     uint kv_h = h / group;
     uint d = p.head_dim;
     float scale = rsqrt(float(d));
-    thread float scores[64];
+    thread float scores[256];
 
     device const float *qrow = q + (h * p.q_len + tq) * d;
     float max_s = -INFINITY;
