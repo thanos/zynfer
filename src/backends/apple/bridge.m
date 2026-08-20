@@ -192,7 +192,9 @@ int zynfer_mtl_encode_and_wait(
     ZynferMtlBuffer **bufs,
     uint32_t nbufs,
     const void *params,
-    uint32_t params_len)
+    uint32_t params_len,
+    uint32_t threadgroup_mem_bytes,
+    int dispatch_threadgroups)
 {
     if (dev == NULL || kernel == NULL || grid_x == 0 || tg_x == 0) {
         return ZYNFER_MTL_INVALID;
@@ -224,9 +226,16 @@ int zynfer_mtl_encode_and_wait(
     if (params != NULL && params_len > 0) {
         [enc setBytes:params length:params_len atIndex:nbufs];
     }
+    if (threadgroup_mem_bytes > 0) {
+        [enc setThreadgroupMemoryLength:threadgroup_mem_bytes atIndex:0];
+    }
     MTLSize grid = MTLSizeMake(grid_x, grid_y == 0 ? 1 : grid_y, grid_z == 0 ? 1 : grid_z);
     MTLSize tg = MTLSizeMake(tg_x, tg_y == 0 ? 1 : tg_y, tg_z == 0 ? 1 : tg_z);
-    [enc dispatchThreads:grid threadsPerThreadgroup:tg];
+    if (dispatch_threadgroups) {
+        [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
+    } else {
+        [enc dispatchThreads:grid threadsPerThreadgroup:tg];
+    }
     [enc endEncoding];
     [cb commit];
     [cb waitUntilCompleted];

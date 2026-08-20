@@ -130,9 +130,14 @@ pub fn cpuCapabilities() Capabilities {
         .fp32 = true,
         .fp16 = false,
         .bf16 = false,
+        .accelerate = build_options.have_apple,
     };
     caps.addDisabled("fp16 CPU path not implemented (f32 oracle only)");
-    caps.addDisabled("Accelerate/BNNS not wired; CPU path is the scalar reference");
+    if (!build_options.have_apple) {
+        caps.addDisabled("Accelerate/BNNS not available on this host; CPU path is the scalar reference");
+    } else {
+        caps.addDisabled("Accelerate vDSP matmul is size-gated (M*N*K>=262144); scalar remains the oracle");
+    }
     caps.addDisabled("SME/SME2 not implemented");
     caps.addDisabled("Core ML/ANE not implemented");
     return caps;

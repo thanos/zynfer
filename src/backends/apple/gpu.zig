@@ -66,6 +66,8 @@ const c = if (have_apple) struct {
         nbufs: u32,
         params: ?*const anyopaque,
         params_len: u32,
+        threadgroup_mem_bytes: u32,
+        dispatch_threadgroups: c_int,
     ) c_int;
 } else struct {};
 
@@ -154,7 +156,7 @@ pub const Gpu = struct {
         self.features.gpu_family_apple8 = raw.gpu_family_apple8 != 0;
         self.features.gpu_family_apple9 = raw.gpu_family_apple9 != 0;
         self.features.simdgroup_matrix_available = raw.simdgroup_matrix_available != 0;
-        self.features.accelerate_available = false;
+        self.features.accelerate_available = true; // linked on Apple builds; path is size-gated
         self.features.core_ml_available = false;
         self.features.sme_available = false;
     }
@@ -168,15 +170,18 @@ pub const Gpu = struct {
             .fp16 = false,
             .bf16 = false,
             .simdgroup_matrix = self.features.simdgroup_matrix_available,
+            .accelerate = self.features.accelerate_available,
         };
-        caps.addDisabled("Metal path is naive f32 kernels (no simdgroup_matrix kernel in this build)");
-        caps.addDisabled("encode_and_wait uses waitUntilCompleted after every kernel; unified memory is not treated as free coherence");
-        caps.addDisabled("Accelerate/BNNS not selected; would be a separate CPU-optimized path");
+        caps.addDisabled("encode_and_wait uses waitUntilCompleted after every kernel; unified memory is not free coherence");
+        caps.addDisabled("fp16/bf16 Metal kernels not implemented");
         caps.addDisabled("SME/SME2 not implemented with the supported Zig/Clang toolchain");
         caps.addDisabled("Core ML/ANE not implemented (experimental, gated off)");
-        caps.addDisabled("fp16/bf16 Metal kernels not implemented");
-        caps.addDisabled("No Qwen loader/tokenizer/sampling; tiny-block host KV uploaded per attention (not Metal-resident)");
+        caps.addDisabled("Metal fuse/wait reduction not implemented (Stage 6)");
+        caps.addDisabled("No Qwen loader/tokenizer/sampling; tiny-block host KV uploaded per attention");
         caps.addDisabled("Metal attention_f32 caps kv_len at 64 (thread-local scores); larger returns Unsupported");
+        if (!self.features.simdgroup_matrix_available) {
+            caps.addDisabled("simdgroup_matrix hardware not available; matmul uses naive f32 only");
+        }
         return caps;
     }
 
@@ -197,6 +202,13 @@ pub const Gpu = struct {
         };
     }
 
+    pub const LaunchOpts = struct {
+        /// Bytes of `[[threadgroup(0)]]` memory. 0 means none.
+        threadgroup_mem_bytes: u32 = 0,
+        /// If true, grid_* are threadgroup counts (`dispatchThreadgroups`).
+        threadgroups: bool = false,
+    };
+
     pub fn launch(
         self: *Gpu,
         kernel: [:0]const u8,
@@ -208,6 +220,22 @@ pub const Gpu = struct {
         tg_z: u32,
         bufs: []const *MtlBuffer,
         params: []const u8,
+    ) Error!void {
+        try self.launchOpts(kernel, grid_x, grid_y, grid_z, tg_x, tg_y, tg_z, bufs, params, .{});
+    }
+
+    pub fn launchOpts(
+        self: *Gpu,
+        kernel: [:0]const u8,
+        grid_x: u32,
+        grid_y: u32,
+        grid_z: u32,
+        tg_x: u32,
+        tg_y: u32,
+        tg_z: u32,
+        bufs: []const *MtlBuffer,
+        params: []const u8,
+        opts: LaunchOpts,
     ) Error!void {
         if (!have_apple) return error.AppleUnavailable;
         const st = c.zynfer_mtl_encode_and_wait(
@@ -223,6 +251,8 @@ pub const Gpu = struct {
             @intCast(bufs.len),
             if (params.len == 0) null else params.ptr,
             @intCast(params.len),
+            opts.threadgroup_mem_bytes,
+            if (opts.threadgroups) 1 else 0,
         );
         if (st != 0) {
             self.captureError();

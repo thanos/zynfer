@@ -11,7 +11,7 @@ when correctness is unresolved.
 | Apple-2 | Metal device / shared buffers / trivial kernel | **done** |
 | Apple-3 | Metal LLM ops vs CPU + SwiGLU fixture | **done** |
 | Apple-4 | Prefill/decode + KV cache | **done for tiny-block fixture** (closeout polish: long-context + no-growth tests, Instruments recipe, deferred list) |
-| Apple-5 | simdgroup_matrix / quantized GEMM | deferred |
+| Apple-5 | simdgroup_matrix / quantized GEMV / Accelerate | **done** (size-gated; see `bench/results/apple-stage5-dev-laptop.md`) |
 | Apple-6 | Fusion / fewer waits / Metal-resident KV | deferred |
 | Apple-7 | SME / Core ML experiments | deferred |
 | 1 | Zig meets HIP (alloc, copy, streams) | not started |
@@ -58,8 +58,10 @@ when correctness is unresolved.
 The AMD curriculum still starts at Stage 1 (HIP alloc/copy) on the
 R9700. The development laptop additionally has a CPU oracle, naive
 Apple Metal ops, and a tiny transformer-block prefill/decode fixture.
-Apple Stages 0–4 are closed for that fixture; do not treat Metal-resident
-KV, wait removal, or Qwen loading as unfinished Stage 4 work.
+Apple Stages 0–5 are closed for the tiny fixture and measured matrix
+paths (simdgroup(+x4) matmul, int8 GEMV/GEMM API, Accelerate vDSP
+matmul/matvec). Do not treat Metal-resident KV, wait removal, or Qwen
+loading as unfinished Stage 5 work.
 
 Do not start a full Qwen forward pass until a checkpoint loader exists.
 
