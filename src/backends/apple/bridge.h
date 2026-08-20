@@ -66,6 +66,29 @@ int zynfer_mtl_encode_and_wait(
     uint32_t threadgroup_mem_bytes,
     int dispatch_threadgroups);
 
+/* Stage 6: encode many dispatches into one command buffer, one wait.
+ * begin → encode* → commit_and_wait. abort cancels without waiting.
+ * Nested begin, or encode outside a batch, returns ZYNFER_MTL_INVALID.
+ */
+int zynfer_mtl_batch_begin(ZynferMtlDevice *dev);
+int zynfer_mtl_batch_encode(
+    ZynferMtlDevice *dev,
+    const char *kernel,
+    uint32_t grid_x,
+    uint32_t grid_y,
+    uint32_t grid_z,
+    uint32_t tg_x,
+    uint32_t tg_y,
+    uint32_t tg_z,
+    ZynferMtlBuffer **bufs,
+    uint32_t nbufs,
+    const void *params,
+    uint32_t params_len,
+    uint32_t threadgroup_mem_bytes,
+    int dispatch_threadgroups);
+int zynfer_mtl_batch_commit_and_wait(ZynferMtlDevice *dev);
+void zynfer_mtl_batch_abort(ZynferMtlDevice *dev);
+
 #ifdef __cplusplus
 }
 #endif

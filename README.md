@@ -18,16 +18,18 @@ The project is also educational. Every major subsystem is developed in stages, b
 
 ## Status
 
-**CPU oracle + Apple Metal tiny-block prefill/decode; Stage 5 matrix paths.**
+**CPU oracle + Apple Metal tiny-block prefill/decode; Stages 5–6.**
 
 The Zig repository, HIP device enumeration (when ROCm is present),
 environment report, CPU f32 reference ops, naive Metal kernels, a tiny
-transformer-block fixture with an explicit KV cache, capability-gated
-`simdgroup_matrix` matmul (incl. forceable `_x4`), int8 GEMV/GEMM, and
-Accelerate vDSP matmul/matvec exist.
+transformer-block fixture with Metal-resident KV and one-CB/wait
+scheduling, capability-gated `simdgroup_matrix` matmul (incl. forceable
+`_x4`), int8 GEMV/GEMM, and Accelerate vDSP matmul/matvec exist.
 Qwen3-0.6B is not loaded. Tokenizer and sampling do not exist.
 
-On a Mac, `zig build test` differential-checks Metal against CPU.
+On a Mac, `zig build test` differential-checks Metal against CPU, including
+Stage 6 (`batched_resident_kv_fused`) vs per-op baseline
+(`baseline_per_op` via `ZYNFER_APPLE_BLOCK=baseline`).
 `--backend` / `ZYNFER_BACKEND` select `cpu`, `apple`, or `amd-hip`.
 Unknown names fail; they do not fall back.
 
@@ -1049,7 +1051,9 @@ zig build run -- gpu
 zig build run -- caps
 zig build run -- backends
 zig build ops-bench        # CPU vs Apple Metal op timings
-zig build block-bench      # tiny-block prefill/decode timings
+zig build block-bench      # tiny-block prefill/decode (path labels in JSON)
+# A/B Stage 6 vs per-op:
+#   ZYNFER_APPLE_BLOCK=baseline zig build -Doptimize=ReleaseSafe block-bench -- --backend apple
 zig build bench            # time HIP property queries
 zig build integration      # CLI contracts against the installed binary
 zig build docs             # Zig autodoc → zig-out/docs/api

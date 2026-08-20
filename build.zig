@@ -183,6 +183,10 @@ pub fn build(b: *std.Build) void {
     bad_backend.addArg("caps");
     bad_backend.addArg("--backend");
     bad_backend.addArg("cuda");
+    // Zig 0.16 treats unmatched stderr as a diagnostic warning ("w" / "failed
+    // command") unless a stderr check is present. Assert the message so this
+    // intentional rejection is a real check, not a spurious build warning.
+    bad_backend.expectStdErrMatch("unknown backend");
     bad_backend.expectExitCode(2);
 
     const block_cpu = b.addRunArtifact(exe);

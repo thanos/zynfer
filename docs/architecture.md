@@ -37,24 +37,27 @@ They are not the same enum.
 | Tiny block | `src/model/tiny_block.zig` | Zig | Prefill/decode schedule; no Metal/HIP imports |
 | CPU oracle | `src/backends/cpu/ops.zig` | Zig | Scalar f32; correctness reference |
 | Apple bridge | `src/backends/apple/bridge.m` | ObjC/ARC | Device, shared buffers, compile, wait |
-| Apple kernels | `src/backends/apple/kernels.metal` | MSL | Naive f32 + simdgroup(+x4) + q8 matvec/matmul |
-| Apple dispatch | `src/backends/apple/gpu.zig`, `ops.zig`, `block.zig` | Zig | Policy, launches, CPU differential tests |
+| Apple kernels | `src/backends/apple/kernels.metal` | MSL | Naive f32 + simdgroup(+x4) + q8 + Stage 6 permute/kv_append |
+| Apple dispatch | `src/backends/apple/gpu.zig`, `ops.zig`, `block.zig` | Zig | Policy, batch CB, resident KV schedule, CPU differential tests |
 | CPU Accelerate | `src/backends/cpu/accelerate.zig` | Zig+vDSP | Size-gated matmul/matvec; oracle remains scalar |
 | HIP probe | `src/hip.zig` + `src/hip_probe.c` | Zig + C | Enumeration only until the AMD op path exists |
 
 The smallest end-to-end fixture is one tiny transformer block with an
 explicit host KV cache. Prefill and decode are separate entry points.
-Apple Stages 0–4 are closed for that fixture. Qwen weights, tokenizer,
-sampling, Metal-resident KV, and wait/fusion work are deferred (see
-`docs/apple-backend.md`).
+Apple Stages 0–6 are closed for that fixture. Deferred leftovers are
+mapped to Apple-7/8 and curriculum Stages 10–12 / 16 (see
+`docs/apple-backend.md`)—Qwen weights, tokenizer, sampling, SME/ANE,
+further fusions, ICB/replay, and vocabulary TTFT are not silent drops.
 
 ## Apple memory and synchronization
 
 Shared `MTLBuffer` storage (`MTLResourceStorageModeShared`) is
 CPU-writable on unified memory. Filling `contents` is not a PCIe copy.
-It is also not free coherence: the baseline path calls
-`waitUntilCompleted` after every kernel. Do not describe this as
-zero-copy overlap.
+
+The **tiny-block Stage 6 path** encodes ~20 dispatches into one command
+buffer and waits once. The **per-op `apple.ops` path** (ops-bench /
+baseline) still calls `waitUntilCompleted` after every kernel. Do not
+describe either as free overlap with the CPU.
 
 ## HIP boundary
 

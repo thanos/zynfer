@@ -60,9 +60,10 @@ Override Metal matmul: `ZYNFER_MATMUL_PATH=naive|simdgroup|simdgroup_x4`.
   wins grow with problem size (clear at 256³). The 4-SG tile did not
   beat 1-SG at 256³ under the per-op wait baseline.
 - Fair int8 GEMV (pack excluded) beats scalar CPU f32 and is slightly
-  under Metal f32 while still uploading weights each call. Do not claim
-  a decode win until persistent int8 weight buffers exist.
-- Fair int8 GEMM at 128³ is slower than Metal f32 under the same upload
-  model; keep as an explicit API for stored quantized weights.
+  under Metal f32 while still uploading weights each call.
+- **Persistent** int8 weights (`Q8DeviceWeights`) avoid re-upload; see
+  `matvec_q8_*_persistent` / `matmul_q8_*_persistent` in ops-bench.
+- Fair int8 GEMM at 128³ under upload-per-call is slower than Metal f32;
+  keep as an explicit API for stored quantized weights.
 - Accelerate matmul/matvec are optimized **CPU** paths checked against
   the scalar oracle; they are not used by the Metal block schedule.

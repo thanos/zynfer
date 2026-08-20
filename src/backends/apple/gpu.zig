@@ -69,6 +69,25 @@ const c = if (have_apple) struct {
         threadgroup_mem_bytes: u32,
         dispatch_threadgroups: c_int,
     ) c_int;
+    pub extern fn zynfer_mtl_batch_begin(dev: *MtlDevice) c_int;
+    pub extern fn zynfer_mtl_batch_encode(
+        dev: *MtlDevice,
+        kernel: [*:0]const u8,
+        grid_x: u32,
+        grid_y: u32,
+        grid_z: u32,
+        tg_x: u32,
+        tg_y: u32,
+        tg_z: u32,
+        bufs: [*]*MtlBuffer,
+        nbufs: u32,
+        params: ?*const anyopaque,
+        params_len: u32,
+        threadgroup_mem_bytes: u32,
+        dispatch_threadgroups: c_int,
+    ) c_int;
+    pub extern fn zynfer_mtl_batch_commit_and_wait(dev: *MtlDevice) c_int;
+    pub extern fn zynfer_mtl_batch_abort(dev: *MtlDevice) void;
 } else struct {};
 
 const kernels_source: [:0]const u8 = if (have_apple) @embedFile("kernels.metal") else "";
@@ -106,6 +125,10 @@ pub const Gpu = struct {
     handle: if (have_apple) *MtlDevice else void,
     features: backend_mod.AppleMFeatures = .{},
     last_error_buf: [512]u8 = [_]u8{0} ** 512,
+    /// True between `batchBegin` and `batchCommit`/`batchAbort`.
+    batch_active: bool = false,
+    /// Dispatches encoded in the current (or last completed) batch.
+    last_batch_encodes: u32 = 0,
 
     pub fn init() Error!Gpu {
         if (!have_apple) return error.AppleUnavailable;
@@ -126,6 +149,7 @@ pub const Gpu = struct {
 
     pub fn deinit(self: *Gpu) void {
         if (!have_apple) return;
+        if (self.batch_active) self.batchAbort();
         c.zynfer_mtl_device_destroy(self.handle);
         self.* = undefined;
     }
@@ -172,17 +196,48 @@ pub const Gpu = struct {
             .simdgroup_matrix = self.features.simdgroup_matrix_available,
             .accelerate = self.features.accelerate_available,
         };
-        caps.addDisabled("encode_and_wait uses waitUntilCompleted after every kernel; unified memory is not free coherence");
         caps.addDisabled("fp16/bf16 Metal kernels not implemented");
         caps.addDisabled("SME/SME2 not implemented with the supported Zig/Clang toolchain");
         caps.addDisabled("Core ML/ANE not implemented (experimental, gated off)");
-        caps.addDisabled("Metal fuse/wait reduction not implemented (Stage 6)");
-        caps.addDisabled("No Qwen loader/tokenizer/sampling; tiny-block host KV uploaded per attention");
+        caps.addDisabled("No Qwen loader/tokenizer/sampling; tiny-block only");
         caps.addDisabled("Metal attention_f32 caps kv_len at 64 (thread-local scores); larger returns Unsupported");
+        caps.addDisabled("Per-op apple.ops path still waits each kernel; Stage 6 batch+resident KV is the tiny-block schedule");
         if (!self.features.simdgroup_matrix_available) {
             caps.addDisabled("simdgroup_matrix hardware not available; matmul uses naive f32 only");
         }
         return caps;
+    }
+
+    /// Open a multi-dispatch command buffer. `launch`/`launchOpts` encode onto it
+    /// until `batchCommit` (one wait) or `batchAbort`.
+    pub fn batchBegin(self: *Gpu) Error!void {
+        if (!have_apple) return error.AppleUnavailable;
+        if (self.batch_active) return error.Invalid;
+        const st = c.zynfer_mtl_batch_begin(self.handle);
+        if (st != 0) {
+            self.captureError();
+            return statusToError(st);
+        }
+        self.batch_active = true;
+        self.last_batch_encodes = 0;
+    }
+
+    pub fn batchCommit(self: *Gpu) Error!void {
+        if (!have_apple) return error.AppleUnavailable;
+        if (!self.batch_active) return error.Invalid;
+        const st = c.zynfer_mtl_batch_commit_and_wait(self.handle);
+        self.batch_active = false;
+        if (st != 0) {
+            self.captureError();
+            return statusToError(st);
+        }
+    }
+
+    pub fn batchAbort(self: *Gpu) void {
+        if (!have_apple) return;
+        if (!self.batch_active) return;
+        c.zynfer_mtl_batch_abort(self.handle);
+        self.batch_active = false;
     }
 
     pub fn allocShared(self: *Gpu, bytes: usize) Error!Buffer {
@@ -238,26 +293,46 @@ pub const Gpu = struct {
         opts: LaunchOpts,
     ) Error!void {
         if (!have_apple) return error.AppleUnavailable;
-        const st = c.zynfer_mtl_encode_and_wait(
-            self.handle,
-            kernel.ptr,
-            grid_x,
-            grid_y,
-            grid_z,
-            tg_x,
-            tg_y,
-            tg_z,
-            @constCast(bufs.ptr),
-            @intCast(bufs.len),
-            if (params.len == 0) null else params.ptr,
-            @intCast(params.len),
-            opts.threadgroup_mem_bytes,
-            if (opts.threadgroups) 1 else 0,
-        );
+        const st = if (self.batch_active)
+            c.zynfer_mtl_batch_encode(
+                self.handle,
+                kernel.ptr,
+                grid_x,
+                grid_y,
+                grid_z,
+                tg_x,
+                tg_y,
+                tg_z,
+                @constCast(bufs.ptr),
+                @intCast(bufs.len),
+                if (params.len == 0) null else params.ptr,
+                @intCast(params.len),
+                opts.threadgroup_mem_bytes,
+                if (opts.threadgroups) 1 else 0,
+            )
+        else
+            c.zynfer_mtl_encode_and_wait(
+                self.handle,
+                kernel.ptr,
+                grid_x,
+                grid_y,
+                grid_z,
+                tg_x,
+                tg_y,
+                tg_z,
+                @constCast(bufs.ptr),
+                @intCast(bufs.len),
+                if (params.len == 0) null else params.ptr,
+                @intCast(params.len),
+                opts.threadgroup_mem_bytes,
+                if (opts.threadgroups) 1 else 0,
+            );
         if (st != 0) {
             self.captureError();
+            if (self.batch_active) self.batchAbort();
             return statusToError(st);
         }
+        if (self.batch_active) self.last_batch_encodes += 1;
     }
 
     pub fn threadgroup1d(self: *const Gpu) u32 {

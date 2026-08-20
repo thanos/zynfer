@@ -57,6 +57,51 @@ struct RmsNormParams {
     float eps;
 };
 
+// sum_out = x + residual; norm_out = rmsnorm(sum_out, w).
+// Keeps the residual stream for later use (e.g. MLP residual add).
+kernel void add_rmsnorm_f32(
+    device const float *x [[buffer(0)]],
+    device const float *residual [[buffer(1)]],
+    device const float *w [[buffer(2)]],
+    device float *sum_out [[buffer(3)]],
+    device float *norm_out [[buffer(4)]],
+    constant RmsNormParams &p [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint2 lid2 [[thread_position_in_threadgroup]],
+    uint2 tgs2 [[threads_per_threadgroup]])
+{
+    uint row = gid.y;
+    uint lid = lid2.x;
+    uint tgs = tgs2.x;
+    if (row >= p.rows) {
+        return;
+    }
+    threadgroup float scratch[256];
+    device const float *row_x = x + row * p.cols;
+    device const float *row_r = residual + row * p.cols;
+    device float *row_sum = sum_out + row * p.cols;
+    device float *row_norm = norm_out + row * p.cols;
+
+    float acc = 0.0f;
+    for (uint i = lid; i < p.cols; i += tgs) {
+        float v = row_x[i] + row_r[i];
+        row_sum[i] = v;
+        acc += v * v;
+    }
+    scratch[lid] = acc;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = tgs / 2; stride > 0; stride >>= 1) {
+        if (lid < stride) {
+            scratch[lid] += scratch[lid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float inv = rsqrt(scratch[0] / float(p.cols) + p.eps);
+    for (uint i = lid; i < p.cols; i += tgs) {
+        row_norm[i] = w[i] * row_sum[i] * inv;
+    }
+}
+
 kernel void rmsnorm_f32(
     device const float *x [[buffer(0)]],
     device const float *w [[buffer(1)]],
@@ -476,4 +521,85 @@ kernel void attention_f32(
             orow[i] += w * vrow[i];
         }
     }
+}
+
+// Stage 6 helpers for Metal-resident tiny-block schedule.
+
+struct PermuteParams {
+    uint tokens;
+    uint n_heads;
+    uint head_dim;
+};
+
+// in [tokens, n_heads, d] → out [n_heads, tokens, d]
+kernel void permute_tokens_heads_f32(
+    device const float *in [[buffer(0)]],
+    device float *out [[buffer(1)]],
+    constant PermuteParams &p [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint n = p.tokens * p.n_heads * p.head_dim;
+    if (gid >= n) {
+        return;
+    }
+    uint d = p.head_dim;
+    uint elem = gid;
+    uint t = elem / (p.n_heads * d);
+    uint rem = elem % (p.n_heads * d);
+    uint h = rem / d;
+    uint i = rem % d;
+    out[(h * p.tokens + t) * d + i] = in[(t * p.n_heads + h) * d + i];
+}
+
+// in [n_heads, tokens, d] → out [tokens, n_heads, d]
+kernel void permute_heads_tokens_f32(
+    device const float *in [[buffer(0)]],
+    device float *out [[buffer(1)]],
+    constant PermuteParams &p [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint n = p.tokens * p.n_heads * p.head_dim;
+    if (gid >= n) {
+        return;
+    }
+    uint d = p.head_dim;
+    uint elem = gid;
+    uint h = elem / (p.tokens * d);
+    uint rem = elem % (p.tokens * d);
+    uint t = rem / d;
+    uint i = rem % d;
+    out[(t * p.n_heads + h) * d + i] = in[(h * p.tokens + t) * d + i];
+}
+
+struct KvAppendParams {
+    uint n_kv;
+    uint t;
+    uint head_dim;
+    uint max_seq;
+    uint used;
+};
+
+// k_new/v_new are [n_kv, t, d]; caches are [n_kv, max_seq, d].
+kernel void kv_append_f32(
+    device const float *k_new [[buffer(0)]],
+    device const float *v_new [[buffer(1)]],
+    device float *k_cache [[buffer(2)]],
+    device float *v_cache [[buffer(3)]],
+    constant KvAppendParams &p [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint n = p.n_kv * p.t * p.head_dim;
+    if (gid >= n) {
+        return;
+    }
+    uint d = p.head_dim;
+    uint elem = gid;
+    uint h = elem / (p.t * d);
+    uint rem = elem % (p.t * d);
+    uint i_t = rem / d;
+    uint i = rem % d;
+    uint src = ((h * p.t) + i_t) * d + i;
+    uint dst = ((h * p.max_seq) + (p.used + i_t)) * d + i;
+    k_cache[dst] = k_new[src];
+    v_cache[dst] = v_new[src];
 }

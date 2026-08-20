@@ -184,11 +184,13 @@ fn printCaps(writer: *std.Io.Writer, forced: ?[]const u8) !void {
             const auto64: []const u8 = if (feat.simdgroup_matrix_available) "matmul_f32_simdgroup" else "matmul_f32";
             const auto256: []const u8 = if (feat.simdgroup_matrix_available) "matmul_f32_simdgroup" else "matmul_f32";
             try writer.print("  matmul auto-path (64^3 / 256^3): {s} / {s}  (x4 measured slower at 256^3; force with ZYNFER_MATMUL_PATH=simdgroup_x4)\n", .{ auto64, auto256 });
-            try writer.print("  packed q8 GEMM/GEMV: explicit API (fair prepacked benches; not auto over f32)\n", .{});
+            try writer.print("  packed q8 GEMM/GEMV: explicit API; persistent via Q8DeviceWeights (fair benches; not auto over f32)\n", .{});
             try writer.print("  Accelerate CPU: vDSP matmul M*N*K>={d}; matvec M*K>={d}\n", .{
                 zynfer.cpu.accelerate.matmul_min_flops,
                 zynfer.cpu.accelerate.matvec_min_flops,
             });
+            try writer.print("  Stage 6 tiny-block path={s}: one CB/wait + resident KV + add_rmsnorm\n", .{zynfer.apple.block.path_staged});
+            try writer.print("  A/B: ZYNFER_APPLE_BLOCK=baseline → path={s} (per-op waits)\n", .{zynfer.apple.block.path_baseline});
         },
         else => {},
     }
@@ -233,7 +235,7 @@ fn runOpsBench(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, force
     }
     defer if (gpu_ptr) |g| g.deinit();
 
-    var rows: [16]BenchRow = undefined;
+    var rows: [18]BenchRow = undefined;
     rows[0] = try benchNamed(gpa, io, writer, gpu_ptr, "add_f32_4096", benchAdd, warmup, iters, "add_f32");
     rows[1] = try benchNamed(gpa, io, writer, gpu_ptr, "silu_mul_f32_4096", benchSiluMul, warmup, iters, "silu_mul_f32");
     rows[2] = try benchNamed(gpa, io, writer, gpu_ptr, "matvec_f32_256x256", benchMatvec, warmup, iters, "matvec_f32");
@@ -247,9 +249,11 @@ fn runOpsBench(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, force
     rows[10] = try benchNamed(gpa, io, writer, null, "matmul_accelerate_64x64x64", benchMatmulAccelerate64, warmup, iters, "accelerate_vDSP_mmul");
     rows[11] = try benchNamed(gpa, io, writer, null, "matvec_accelerate_256x256", benchMatvecAccelerate256, warmup, iters, "accelerate_vDSP_matvec");
     rows[12] = try benchFairQ8Matvec(gpa, io, writer, gpu_ptr, warmup, iters);
-    rows[13] = try benchFairQ8Matmul(gpa, io, writer, gpu_ptr, warmup, iters);
-    rows[14] = try benchNamed(gpa, io, writer, gpu_ptr, "matvec_f32_256x256_ref", benchMatvec, warmup, iters, "matvec_f32");
-    rows[15] = try benchNamed(gpa, io, writer, gpu_ptr, "matmul_f32_128x128x128_ref", benchMatmul128, warmup, iters, "matmul_auto");
+    rows[13] = try benchPersistentQ8Matvec(gpa, io, writer, gpu_ptr, warmup, iters);
+    rows[14] = try benchFairQ8Matmul(gpa, io, writer, gpu_ptr, warmup, iters);
+    rows[15] = try benchPersistentQ8Matmul(gpa, io, writer, gpu_ptr, warmup, iters);
+    rows[16] = try benchNamed(gpa, io, writer, gpu_ptr, "matvec_f32_256x256_ref", benchMatvec, warmup, iters, "matvec_f32");
+    rows[17] = try benchNamed(gpa, io, writer, gpu_ptr, "matmul_f32_128x128x128_ref", benchMatmul128, warmup, iters, "matmul_auto");
 
     try writer.print("\njson\n", .{});
     try writer.print("{{\"backend\":\"{s}\",\"zig\":\"{s}\",\"warmup\":{d},\"iters\":{d}", .{
@@ -613,6 +617,130 @@ fn benchFairQ8Matmul(
     return .{ .name = name, .path = path, .cpu_ns = cpu_ns / iters, .apple_ns = apple_ns };
 }
 
+/// Persistent Metal int8 weights: upload once, time only activation traffic + kernel.
+fn benchPersistentQ8Matvec(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    writer: *std.Io.Writer,
+    gpu: ?*zynfer.apple.gpu.Gpu,
+    warmup: usize,
+    iters: usize,
+) !BenchRow {
+    const name = "matvec_q8_f32_256x256_persistent";
+    const path = "matvec_q8_f32_persistent_per_row";
+    const m: usize = 256;
+    const k: usize = 256;
+    var w = try zynfer.Tensor.alloc(gpa, .f32, &.{ m, k });
+    defer w.deinit();
+    var x = try zynfer.Tensor.alloc(gpa, .f32, &.{k});
+    defer x.deinit();
+    var y = try zynfer.Tensor.alloc(gpa, .f32, &.{m});
+    defer y.deinit();
+    try w.fillF32(0.01);
+    try x.fillF32(0.02);
+    const q = try gpa.alloc(i8, m * k);
+    defer gpa.free(q);
+    const scale = try gpa.alloc(f32, m);
+    defer gpa.free(scale);
+    try zynfer.cpu.ops.packRowQ8(try w.f32s(), m, k, q, scale);
+
+    var i: usize = 0;
+    while (i < warmup) : (i += 1) {
+        try zynfer.cpu.ops.matvecQ8(try y.f32s(), q, scale, try x.f32s(), m, k, .per_row);
+    }
+    const t0 = std.Io.Clock.awake.now(io);
+    i = 0;
+    while (i < iters) : (i += 1) {
+        try zynfer.cpu.ops.matvecQ8(try y.f32s(), q, scale, try x.f32s(), m, k, .per_row);
+    }
+    const t1 = std.Io.Clock.awake.now(io);
+    const cpu_ns: u64 = @intCast(@max(@as(i96, 0), t1.nanoseconds - t0.nanoseconds));
+    try writer.print("{s} path={s} cpu_ns={d} iters={d} (pack excluded)\n", .{ name, path, cpu_ns / iters, iters });
+
+    var apple_ns: ?u64 = null;
+    if (gpu) |g| {
+        var persisted = try zynfer.apple.ops.Q8DeviceWeights.upload(g, q, scale, m, k, .per_row);
+        defer persisted.deinit();
+        i = 0;
+        while (i < warmup) : (i += 1) {
+            try zynfer.apple.ops.matvecQ8Persistent(g, y, persisted, x);
+        }
+        const a0 = std.Io.Clock.awake.now(io);
+        i = 0;
+        while (i < iters) : (i += 1) {
+            try zynfer.apple.ops.matvecQ8Persistent(g, y, persisted, x);
+        }
+        const a1 = std.Io.Clock.awake.now(io);
+        apple_ns = @as(u64, @intCast(@max(@as(i96, 0), a1.nanoseconds - a0.nanoseconds))) / iters;
+        try writer.print("{s} path={s} apple_metal_ns={d} iters={d} (weights resident)\n", .{ name, path, apple_ns.?, iters });
+    } else {
+        try writer.print("{s} path={s} apple_metal_ns=N/A\n", .{ name, path });
+    }
+    return .{ .name = name, .path = path, .cpu_ns = cpu_ns / iters, .apple_ns = apple_ns };
+}
+
+fn benchPersistentQ8Matmul(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    writer: *std.Io.Writer,
+    gpu: ?*zynfer.apple.gpu.Gpu,
+    warmup: usize,
+    iters: usize,
+) !BenchRow {
+    const name = "matmul_q8_f32_128x128x128_persistent";
+    const path = "matmul_q8_f32_persistent_per_row";
+    const m: usize = 128;
+    const k: usize = 128;
+    const n: usize = 128;
+    var w = try zynfer.Tensor.alloc(gpa, .f32, &.{ m, k });
+    defer w.deinit();
+    var b = try zynfer.Tensor.alloc(gpa, .f32, &.{ k, n });
+    defer b.deinit();
+    var c = try zynfer.Tensor.alloc(gpa, .f32, &.{ m, n });
+    defer c.deinit();
+    try w.fillF32(0.01);
+    try b.fillF32(0.02);
+    const q = try gpa.alloc(i8, m * k);
+    defer gpa.free(q);
+    const scale = try gpa.alloc(f32, m);
+    defer gpa.free(scale);
+    try zynfer.cpu.ops.packRowQ8(try w.f32s(), m, k, q, scale);
+
+    var i: usize = 0;
+    while (i < warmup) : (i += 1) {
+        try zynfer.cpu.ops.matmulQ8(try c.f32s(), q, scale, try b.f32s(), m, n, k, .per_row);
+    }
+    const t0 = std.Io.Clock.awake.now(io);
+    i = 0;
+    while (i < iters) : (i += 1) {
+        try zynfer.cpu.ops.matmulQ8(try c.f32s(), q, scale, try b.f32s(), m, n, k, .per_row);
+    }
+    const t1 = std.Io.Clock.awake.now(io);
+    const cpu_ns: u64 = @intCast(@max(@as(i96, 0), t1.nanoseconds - t0.nanoseconds));
+    try writer.print("{s} path={s} cpu_ns={d} iters={d} (pack excluded)\n", .{ name, path, cpu_ns / iters, iters });
+
+    var apple_ns: ?u64 = null;
+    if (gpu) |g| {
+        var persisted = try zynfer.apple.ops.Q8DeviceWeights.upload(g, q, scale, m, k, .per_row);
+        defer persisted.deinit();
+        i = 0;
+        while (i < warmup) : (i += 1) {
+            try zynfer.apple.ops.matmulQ8Persistent(g, c, persisted, b);
+        }
+        const a0 = std.Io.Clock.awake.now(io);
+        i = 0;
+        while (i < iters) : (i += 1) {
+            try zynfer.apple.ops.matmulQ8Persistent(g, c, persisted, b);
+        }
+        const a1 = std.Io.Clock.awake.now(io);
+        apple_ns = @as(u64, @intCast(@max(@as(i96, 0), a1.nanoseconds - a0.nanoseconds))) / iters;
+        try writer.print("{s} path={s} apple_metal_ns={d} iters={d} (weights resident)\n", .{ name, path, apple_ns.?, iters });
+    } else {
+        try writer.print("{s} path={s} apple_metal_ns=N/A\n", .{ name, path });
+    }
+    return .{ .name = name, .path = path, .cpu_ns = cpu_ns / iters, .apple_ns = apple_ns };
+}
+
 fn runBlockBench(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, forced: ?[]const u8) !void {
     const kind = try resolveKind(forced);
     const spec = zynfer.tiny_block.fixture_spec;
@@ -631,7 +759,9 @@ fn runBlockBench(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, for
         spec.head_dim,
     });
     try writer.print("prefill_tokens={d} decode_steps={d} max_seq={d}\n", .{ prefill_tokens, decode_steps, spec.max_seq });
-    try writer.print("note: Apple times include per-op shared-buffer fill + encode_and_wait.\n", .{});
+    try writer.print("note: Apple Stage 6 default path={s} (one CB/wait + resident KV + add_rmsnorm).\n", .{zynfer.apple.block.path_staged});
+    try writer.print("      ZYNFER_APPLE_BLOCK=baseline → path={s} (per-op waits) for A/B.\n", .{zynfer.apple.block.path_baseline});
+    try writer.print("      JSON fields: apple_block_path / apple_block_waits / apple_block_encodes.\n", .{});
     try writer.print("      This is not Qwen3 and not a production decode path.\n\n", .{});
 
     var metal_init_ns: ?u64 = null;
@@ -690,12 +820,15 @@ fn runBlockBench(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, for
         cpu_times.decode_ns_per_token,
     });
     if (apple_times) |t| {
-        try writer.print(",\"apple_prefill_ns\":{d},\"apple_decode_ns_per_token\":{d}}}\n", .{
+        try writer.print(",\"apple_prefill_ns\":{d},\"apple_decode_ns_per_token\":{d},\"apple_block_path\":\"{s}\",\"apple_block_waits\":{d},\"apple_block_encodes\":{d}}}\n", .{
             t.prefill_ns,
             t.decode_ns_per_token,
+            zynfer.apple.block.last_block_path,
+            zynfer.apple.block.last_block_waits,
+            zynfer.apple.block.last_block_encodes,
         });
     } else {
-        try writer.print(",\"apple_prefill_ns\":null,\"apple_decode_ns_per_token\":null}}\n", .{});
+        try writer.print(",\"apple_prefill_ns\":null,\"apple_decode_ns_per_token\":null,\"apple_block_path\":null}}\n", .{});
     }
 }
 
@@ -760,6 +893,7 @@ fn runBlockOnce(
         var sess = try zynfer.apple.block.Session.init(gpa, g, spec);
         defer sess.deinit();
         try sess.inner.weights.fillFixture();
+        sess.markWeightsDirty();
         const t0 = std.Io.Clock.awake.now(io);
         try sess.prefill(x_prefill, y_prefill);
         const t1 = std.Io.Clock.awake.now(io);
