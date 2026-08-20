@@ -35,7 +35,7 @@ jobs:
       - name: Run coverage
         run: bash scripts/ci/coverage.sh
       - name: Upload HTML report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-html
           path: zig-out/coverage
