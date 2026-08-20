@@ -189,7 +189,8 @@ fn printCaps(writer: *std.Io.Writer, forced: ?[]const u8) !void {
                 zynfer.cpu.accelerate.matmul_min_flops,
                 zynfer.cpu.accelerate.matvec_min_flops,
             });
-            try writer.print("  Stage 6 tiny-block: one CB/wait + resident KV + add_rmsnorm (ZYNFER_APPLE_BLOCK=baseline for per-op)\n", .{});
+            try writer.print("  Stage 6 tiny-block path={s}: one CB/wait + resident KV + add_rmsnorm\n", .{zynfer.apple.block.path_staged});
+            try writer.print("  A/B: ZYNFER_APPLE_BLOCK=baseline → path={s} (per-op waits)\n", .{zynfer.apple.block.path_baseline});
         },
         else => {},
     }
@@ -758,7 +759,9 @@ fn runBlockBench(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, for
         spec.head_dim,
     });
     try writer.print("prefill_tokens={d} decode_steps={d} max_seq={d}\n", .{ prefill_tokens, decode_steps, spec.max_seq });
-    try writer.print("note: Apple Stage 6 default = one CB/wait + resident KV (ZYNFER_APPLE_BLOCK=baseline for per-op).\n", .{});
+    try writer.print("note: Apple Stage 6 default path={s} (one CB/wait + resident KV + add_rmsnorm).\n", .{zynfer.apple.block.path_staged});
+    try writer.print("      ZYNFER_APPLE_BLOCK=baseline → path={s} (per-op waits) for A/B.\n", .{zynfer.apple.block.path_baseline});
+    try writer.print("      JSON fields: apple_block_path / apple_block_waits / apple_block_encodes.\n", .{});
     try writer.print("      This is not Qwen3 and not a production decode path.\n\n", .{});
 
     var metal_init_ns: ?u64 = null;

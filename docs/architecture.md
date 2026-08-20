@@ -44,9 +44,10 @@ They are not the same enum.
 
 The smallest end-to-end fixture is one tiny transformer block with an
 explicit host KV cache. Prefill and decode are separate entry points.
-Apple Stages 0–6 are closed for that fixture. Qwen weights, tokenizer,
-sampling, and speculative extra fusions are deferred (see
-`docs/apple-backend.md`).
+Apple Stages 0–6 are closed for that fixture. Deferred leftovers are
+mapped to Apple-7/8 and curriculum Stages 10–12 / 16 (see
+`docs/apple-backend.md`)—Qwen weights, tokenizer, sampling, SME/ANE,
+further fusions, ICB/replay, and vocabulary TTFT are not silent drops.
 
 ## Apple memory and synchronization
 

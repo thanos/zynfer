@@ -16,11 +16,20 @@ const apple_ops = @import("ops.zig");
 const Gpu = gpu_mod.Gpu;
 const Buffer = gpu_mod.Buffer;
 
+/// Stable labels reported by `block-bench` / `last_block_path`.
+pub const path_baseline = "baseline_per_op";
+pub const path_staged = "batched_resident_kv_fused";
+
 pub var last_block_path: []const u8 = "unset";
 pub var last_block_encodes: u32 = 0;
 pub var last_block_waits: u32 = 0;
 
+/// Test override for path selection. `null` honors `ZYNFER_APPLE_BLOCK`.
+/// `true` → Stage 4/5 per-op; `false` → Stage 6 one-CB/wait path.
+pub var force_baseline_path: ?bool = null;
+
 fn useBaselinePath() bool {
+    if (force_baseline_path) |forced| return forced;
     if (comptime !gpu_mod.have_apple) return true;
     const raw = std.c.getenv("ZYNFER_APPLE_BLOCK") orelse return false;
     const v = std.mem.span(raw);
@@ -261,7 +270,7 @@ pub const Session = struct {
 
     fn forward(self: *Session, x: Tensor, out: Tensor) !void {
         if (useBaselinePath()) {
-            last_block_path = "baseline_per_op";
+            last_block_path = path_baseline;
             last_block_waits = 15;
             last_block_encodes = 15;
             try tiny.forward(Adapter{ .gpu = self.gpu }, &self.inner, x, self.inner.cache.used, out);
@@ -329,7 +338,7 @@ pub const Session = struct {
 
         try self.gpu.batchCommit();
 
-        last_block_path = "batched_resident_kv_fused";
+        last_block_path = path_staged;
         last_block_encodes = self.gpu.last_batch_encodes;
         last_block_waits = 1;
 
@@ -337,6 +346,92 @@ pub const Session = struct {
         self.inner.cache.used = pos0 + t;
     }
 };
+
+test "Metal Stage 6 path matches baseline path and CPU" {
+    if (gpu_mod.skipAppleGpuTests()) return error.SkipZigTest;
+    defer force_baseline_path = null;
+
+    var gpu = try Gpu.init();
+    defer gpu.deinit();
+    const gpa = std.testing.allocator;
+    const spec = tiny.fixture_spec;
+
+    var cpu_sess = try tiny.Session.init(gpa, spec);
+    defer cpu_sess.deinit();
+    try cpu_sess.weights.fillFixture();
+
+    force_baseline_path = false;
+    var staged_sess = try Session.init(gpa, &gpu, spec);
+    defer staged_sess.deinit();
+    try staged_sess.inner.weights.copyFrom(cpu_sess.weights);
+    staged_sess.markWeightsDirty();
+
+    force_baseline_path = true;
+    var baseline_sess = try Session.init(gpa, &gpu, spec);
+    defer baseline_sess.deinit();
+    try baseline_sess.inner.weights.copyFrom(cpu_sess.weights);
+    baseline_sess.markWeightsDirty();
+
+    const tokens: usize = 4;
+    var x = try Tensor.alloc(gpa, .f32, &.{ tokens, spec.hidden });
+    defer x.deinit();
+    try tiny.iotaFill(x, 0.1, 0.05);
+
+    var cpu_out = try Tensor.alloc(gpa, .f32, &.{ tokens, spec.hidden });
+    defer cpu_out.deinit();
+    var staged_out = try Tensor.alloc(gpa, .f32, &.{ tokens, spec.hidden });
+    defer staged_out.deinit();
+    var baseline_out = try Tensor.alloc(gpa, .f32, &.{ tokens, spec.hidden });
+    defer baseline_out.deinit();
+
+    try cpu_sess.prefill(x, cpu_out);
+
+    force_baseline_path = false;
+    try staged_sess.prefill(x, staged_out);
+    try std.testing.expectEqualStrings(path_staged, last_block_path);
+    try std.testing.expectEqual(@as(u32, 1), last_block_waits);
+    try std.testing.expect(last_block_encodes >= 15);
+
+    force_baseline_path = true;
+    try baseline_sess.prefill(x, baseline_out);
+    try std.testing.expectEqualStrings(path_baseline, last_block_path);
+    try std.testing.expectEqual(@as(u32, 15), last_block_waits);
+
+    try compare.expectClose(try cpu_out.f32s(), try staged_out.f32s(), 3e-4, 3e-4);
+    try compare.expectClose(try cpu_out.f32s(), try baseline_out.f32s(), 3e-4, 3e-4);
+    try compare.expectClose(try staged_out.f32s(), try baseline_out.f32s(), 3e-4, 3e-4);
+
+    cpu_sess.reset();
+    staged_sess.reset();
+    baseline_sess.reset();
+
+    var step_in = try Tensor.alloc(gpa, .f32, &.{ 1, spec.hidden });
+    defer step_in.deinit();
+    var cpu_step = try Tensor.alloc(gpa, .f32, &.{ 1, spec.hidden });
+    defer cpu_step.deinit();
+    var staged_step = try Tensor.alloc(gpa, .f32, &.{ 1, spec.hidden });
+    defer staged_step.deinit();
+    var baseline_step = try Tensor.alloc(gpa, .f32, &.{ 1, spec.hidden });
+    defer baseline_step.deinit();
+    const xs = try x.f32s();
+    var i: usize = 0;
+    while (i < tokens) : (i += 1) {
+        @memcpy(try step_in.f32s(), xs[i * spec.hidden ..][0..spec.hidden]);
+        try cpu_sess.decode(step_in, cpu_step);
+
+        force_baseline_path = false;
+        try staged_sess.decode(step_in, staged_step);
+        try std.testing.expectEqualStrings(path_staged, last_block_path);
+
+        force_baseline_path = true;
+        try baseline_sess.decode(step_in, baseline_step);
+        try std.testing.expectEqualStrings(path_baseline, last_block_path);
+
+        try compare.expectClose(try cpu_step.f32s(), try staged_step.f32s(), 3e-4, 3e-4);
+        try compare.expectClose(try cpu_step.f32s(), try baseline_step.f32s(), 3e-4, 3e-4);
+        try compare.expectClose(try staged_step.f32s(), try baseline_step.f32s(), 3e-4, 3e-4);
+    }
+}
 
 test "Metal tiny block matches CPU prefill and decode" {
     if (gpu_mod.skipAppleGpuTests()) return error.SkipZigTest;

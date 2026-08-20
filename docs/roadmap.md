@@ -13,7 +13,8 @@ when correctness is unresolved.
 | Apple-4 | Prefill/decode + KV cache | **done for tiny-block fixture** (closeout polish: long-context + no-growth tests, Instruments recipe, deferred list) |
 | Apple-5 | simdgroup_matrix / quantized GEMV / Accelerate | **done** (size-gated; see `bench/results/apple-stage5-dev-laptop.md`) |
 | Apple-6 | Fusion / fewer waits / Metal-resident KV | **done** (one CB/wait + resident KV; see `bench/results/apple-stage6-dev-laptop.md`) |
-| Apple-7 | SME / Core ML experiments | deferred |
+| Apple-7 | SME / Core ML experiments | deferred (carries Stage 6 SME/ANE leftover) |
+| Apple-8 | Hardening + Stage 6 leftovers | not started (ICB/replay, further fusions, kv_len, fp16, signposts/metrics; fused vs baseline A/B **done**) |
 | 1 | Zig meets HIP (alloc, copy, streams) | not started |
 | 2 | First AMD kernel (vector add) | not started |
 | 3 | Tensor representation and memory planning | partial (host tensors exist; no GPU planner) |
@@ -23,13 +24,13 @@ when correctness is unresolved.
 | 7 | RoPE | CPU + Metal f32; not HIP |
 | 8 | Attention from scratch | CPU + Metal f32 (`kv_len` ≤ 64 on Metal) |
 | 9 | One complete transformer block | **done as tiny fixture**; not a Qwen block |
-| 10 | Checkpoint inspection and artifact compiler | not started |
-| 11 | Full Qwen3-0.6B forward pass | not started |
-| 12 | Tokenizer and sampling | not started |
+| 10 | Checkpoint inspection and artifact compiler | not started (absorbs Qwen loader deferred from Apple-6) |
+| 11 | Full Qwen3-0.6B forward pass | not started (absorbs golden logits deferred from Apple-6) |
+| 12 | Tokenizer and sampling | not started (absorbs TTFT/tok/s deferred from Apple-6) |
 | 13 | KV cache | **host layout + Metal-resident for tiny block** |
 | 14 | Prefill vs decode | **done for tiny block** |
 | 15 | Profiling the whole token | not started |
-| 16 | Kernel fusion | Stage 6 CB batching + existing `silu_mul`; extra fusions deferred |
+| 16 | Kernel fusion | Apple-6 CB batching + `silu_mul`/`add_rmsnorm` done for tiny-block; Qwen-scale / further fusions / ICB → Apple-8 + this stage |
 | 17 | HIP graphs | not started |
 | 18 | Quantization | not started |
 | 19 | AMD-specific kernel tuning | not started |
@@ -60,9 +61,11 @@ R9700. The development laptop additionally has a CPU oracle, naive
 Apple Metal ops, and a tiny transformer-block prefill/decode fixture.
 Apple Stages 0–6 are closed for the tiny fixture: measured matrix paths
 (Stage 5) and one-CB/wait + Metal-resident KV (Stage 6). Do not treat
-Qwen loading or further speculative fusions as unfinished Stage 6 work.
+Qwen loading or further speculative fusions as unfinished Stage 6 work—
+they are mapped to Apple-7/8 and curriculum Stages 10–12 / 16 (see
+`docs/apple-backend.md` deferred table).
 
 Do not start a full Qwen forward pass until a checkpoint loader exists.
 
-See `docs/apple-backend.md` for the deferred table and the Instruments
-recipe for wait dominance.
+See `docs/apple-backend.md` for the deferred→stage map and the
+Instruments recipe for wait dominance.

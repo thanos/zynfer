@@ -273,18 +273,49 @@ Stage 6 A/B: `bench/results/apple-stage6-dev-laptop.md`.
 `zig build run -- caps` prints the disabled-path list. Forced
 `--backend apple` on a non-macOS build exits 2.
 
-## Deferred work (after Stage 6 leftovers)
+## Deferred work (mapped to future stages)
 
-Stage-6-adjacent items that were still open are now implemented:
-persistent int8 Metal weights (`Q8DeviceWeights`) and fused
-`add_rmsnorm_f32` on the tiny-block path.
+Stage 6 is **closed for the tiny-block fixture**. Nothing below is
+silent debt—each item has an owner stage. Keep this table in sync when
+Apple Stage 7/8 or curriculum Stages 10–12 / 16 land.
 
-| Deferred item | Status |
+### Done in Stage 6 (do not reopen)
+
+| Item | Evidence |
 | --- | --- |
-| **Persistent int8 weight buffers** | **done** — `Q8DeviceWeights` + `matvecQ8Persistent` / `matmulQ8Persistent` |
-| **Extra fused kernels** | **done** — `add_rmsnorm_f32` (attn residual + MLP RMSNorm); existing `silu_mul` |
-| **Qwen loader / tokenizer / sampling / golden logits** | still deferred — checkpoint stages |
-| **SME / ANE** | still deferred — Apple-7 |
+| One CB / one wait + persistent weights/scratch/KV | `apple.block`; ~8× vs baseline |
+| Metal-resident KV + GPU permutes | `kv_append_f32`, permute kernels |
+| `add_rmsnorm_f32` + existing `silu_mul` | tiny-block fused path |
+| Persistent int8 for ops | `Q8DeviceWeights` / `*Q8Persistent` |
+
+### Still open — Apple Stage 7
+
+| Item | Notes |
+| --- | --- |
+| **SME / SME2** | Only if public/supported and measured |
+| **Core ML / ANE** | Only with placement evidence; clean fallbacks |
+
+### Still open — Apple Stage 8
+
+| Item | Notes |
+| --- | --- |
+| **Fused vs `baseline` numerical A/B test** | **done** — `Metal Stage 6 path matches baseline path and CPU` |
+| **Reusable execution encoding** (ICB / encode-once) | Buffers reused; CB still re-encoded each forward |
+| **Further MSL fusions** | Only if Instruments still shows wins after one-CB/wait |
+| **Int8 weights in tiny-block Session** | Ops path only today |
+| **Metal attention `kv_len` > 64** | Hard cap; fixture `max_seq` 32 |
+| **fp16 / bf16 Metal kernels** | Dtype tags only |
+| **Signposts / peak RSS / energy-per-token** | Not claimed |
+| **Benchmark matrix TTFT/tok/s fill-in** | After Stages 10–12 produce tokens |
+
+### Still open — curriculum (not Apple-6)
+
+| Item | Lands in |
+| --- | --- |
+| **Qwen loader / artifact** | Stage 10 |
+| **Full Qwen forward + golden logits** | Stage 11 |
+| **Tokenizer / sampling** (real TTFT) | Stage 12 |
+| **Qwen-scale / HIP fusion ledger** | Stage 16 |
 
 Stage 5 matrix paths: `bench/results/apple-stage5-dev-laptop.md`.
 

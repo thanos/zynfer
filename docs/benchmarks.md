@@ -56,6 +56,7 @@ Committed templates:
 - `bench/results/apple-ops-dev-laptop.md`
 - `bench/results/apple-block-dev-laptop.md`
 - `bench/results/apple-stage5-dev-laptop.md`
+- `bench/results/apple-stage6-dev-laptop.md`
 
 Local captures that should not be committed:
 
@@ -63,10 +64,11 @@ Local captures that should not be committed:
 
 ## Inference metrics (tiny-block fixture only)
 
-Vocabulary TTFT still N/A — no tokenizer (deferred past Apple-4). The
-tiny block reports wall time for a synthetic residual stream. For what
-is still deferred after Stage 6 (Qwen loader, extra fusions),
-see `docs/apple-backend.md`.
+Vocabulary TTFT still N/A — no tokenizer (curriculum Stage 12; was an
+Apple Stage 6 gate item deferred for lack of a loaded model). The tiny
+block reports wall time for a synthetic residual stream. Remaining
+post–Stage 6 work is mapped in `docs/apple-backend.md` (Apple-7/8,
+Stages 10–12 / 16)—do not treat it as dropped Stage 6 scope.
 
 | Metric | Status |
 | --- | --- |
@@ -96,9 +98,9 @@ stages, not this baseline.
 | CPU reference | Zig scalar f32 | tiny-block f32 | prefill 8 / decode 8 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | `block-bench`; ns not tok/s |
 | CPU optimized | Accelerate vDSP | f32 | matmul ≥64³ / matvec ≥256² | N/A | N/A | N/A | N/A | N/A | N/A | N/A | size-gated; stage5 result |
 | Metal baseline | naive MSL f32 | none | op microbench | N/A | N/A | N/A | N/A | N/A | N/A | N/A | implemented; see apple-ops result |
-| Metal baseline | naive MSL f32 | tiny-block f32 | prefill 8 / decode 8 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | `ZYNFER_APPLE_BLOCK=baseline` |
+| Metal baseline | naive MSL f32 | tiny-block f32 | prefill 8 / decode 8 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | path=`baseline_per_op` (`ZYNFER_APPLE_BLOCK=baseline`) |
 | Metal optimized | simdgroup / x4 | f32 | matmul 64³ / 256³ | N/A | N/A | N/A | N/A | N/A | N/A | N/A | auto ≥64³; x4 force-only |
 | Metal int8 GEMV/GEMM | matvec/matmul_q8_f32 | int8×f32 scale | 256² / 128³ prepacked | N/A | N/A | N/A | N/A | N/A | N/A | N/A | explicit API; not auto over f32 |
-| Metal fused | Stage 6 batch + resident KV | tiny-block f32 | prefill 8 / decode 8 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | ~8× vs baseline; stage6 result |
+| Metal fused | Stage 6 `batched_resident_kv_fused` | tiny-block f32 | prefill 8 / decode 8 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | ~8× vs `baseline_per_op`; stage6 result |
 | Core ML/ANE hybrid | — | — | — | N/A | N/A | N/A | N/A | N/A | N/A | N/A | not built |
 | HIP | RDNA 4 | — | device enum | N/A | N/A | N/A | N/A | N/A | N/A | N/A | Stage 0 probe only |
