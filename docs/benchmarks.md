@@ -57,6 +57,7 @@ Committed templates:
 - `bench/results/apple-block-dev-laptop.md`
 - `bench/results/apple-stage5-dev-laptop.md`
 - `bench/results/apple-stage6-dev-laptop.md`
+- `bench/results/apple-stage7-dev-laptop.md`
 
 Local captures that should not be committed:
 
@@ -102,5 +103,6 @@ stages, not this baseline.
 | Metal optimized | simdgroup / x4 | f32 | matmul 64³ / 256³ | N/A | N/A | N/A | N/A | N/A | N/A | N/A | auto ≥64³; x4 force-only |
 | Metal int8 GEMV/GEMM | matvec/matmul_q8_f32 | int8×f32 scale | 256² / 128³ prepacked | N/A | N/A | N/A | N/A | N/A | N/A | N/A | explicit API; not auto over f32 |
 | Metal fused | Stage 6 `batched_resident_kv_fused` | tiny-block f32 | prefill 8 / decode 8 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | ~8× vs `baseline_per_op`; stage6 result |
-| Core ML/ANE hybrid | — | — | — | N/A | N/A | N/A | N/A | N/A | N/A | N/A | not built |
+| Core ML/ANE hybrid | Core ML probe | — | — | N/A | N/A | N/A | N/A | N/A | N/A | N/A | Stage 7: framework ok; path **rejected** |
+| CPU optimized | SME/SME2 | — | — | N/A | N/A | N/A | N/A | N/A | N/A | N/A | Stage 7: FEAT_SME probed; kernels **rejected** |
 | HIP | RDNA 4 | — | device enum | N/A | N/A | N/A | N/A | N/A | N/A | N/A | Stage 0 probe only |

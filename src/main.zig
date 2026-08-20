@@ -9,6 +9,7 @@ const usage =
     \\  zynfer env          Development-environment report
     \\  zynfer gpu          HIP device enumeration (AMD host)
     \\  zynfer caps         Backend/device capabilities and fallbacks
+    \\  zynfer stage7       SME / Core ML Stage 7 probe + retain/reject ledger
     \\  zynfer backends     List selectable backends
     \\  zynfer ops-bench    CPU vs Apple op microbenchmarks
     \\  zynfer block-bench  Tiny-block prefill/decode timings
@@ -19,6 +20,10 @@ const usage =
     \\  zynfer caps --backend cpu
     \\  zynfer caps --backend apple
     \\  ZYNFER_BACKEND=cpu zynfer caps
+    \\
+    \\Stage 7 experimental forces (must fail loud; paths are not retained):
+    \\  ZYNFER_FORCE_SME=1 zynfer stage7
+    \\  ZYNFER_FORCE_COREML=1 zynfer stage7
     \\
 ;
 
@@ -65,12 +70,17 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    // Stage 7: forced experimental paths must fail clearly, never silently.
+    rejectForcedExperimentalPaths();
+
     if (std.mem.eql(u8, command, "env")) {
         try printEnv(host, writer);
     } else if (std.mem.eql(u8, command, "gpu")) {
         try printGpu(writer);
     } else if (std.mem.eql(u8, command, "caps")) {
         try printCaps(writer, forced_backend);
+    } else if (std.mem.eql(u8, command, "stage7")) {
+        try printStage7(writer);
     } else if (std.mem.eql(u8, command, "backends")) {
         try printBackends(writer);
     } else if (std.mem.eql(u8, command, "ops-bench")) {
@@ -136,6 +146,60 @@ fn resolveKind(forced: ?[]const u8) !zynfer.BackendKind {
     return zynfer.backend.defaultKind();
 }
 
+fn rejectForcedExperimentalPaths() void {
+    if (zynfer.cpu.sme.forceRequested()) {
+        std.debug.print(
+            "ZYNFER_FORCE_SME requested but SME kernels are not retained (Stage 7: no Zig/Clang SME path).\n",
+            .{},
+        );
+        std.process.exit(2);
+    }
+    if (zynfer.apple.coreml.forceRequested()) {
+        std.debug.print(
+            "ZYNFER_FORCE_COREML requested but Core ML/ANE inference is not retained (Stage 7: no measured subgraph).\n",
+            .{},
+        );
+        std.process.exit(2);
+    }
+}
+
+fn printStage7(writer: *std.Io.Writer) !void {
+    try writer.print("zynfer Stage 7 — SME / Core ML experiments\n", .{});
+    try writer.print("==========================================\n\n", .{});
+
+    const sme_p = zynfer.cpu.sme.probe();
+    try writer.print("SME / SME2\n", .{});
+    try writer.print("  FEAT_SME (sysctl):  {s}\n", .{yn(sme_p.feat_sme)});
+    try writer.print("  FEAT_SME2 (sysctl): {s}\n", .{yn(sme_p.feat_sme2)});
+    try writer.print("  Zig target sme:    {s}\n", .{yn(sme_p.target_sme)});
+    try writer.print("  path retained:     {s}\n", .{yn(sme_p.path_retained)});
+    try writer.print("  detail: {s}\n\n", .{sme_p.detail});
+
+    const cm_p = zynfer.apple.coreml.probe();
+    try writer.print("Core ML / ANE\n", .{});
+    try writer.print("  framework linked:           {s}\n", .{yn(cm_p.framework_linked)});
+    try writer.print("  MLModelConfiguration ok:    {s}\n", .{yn(cm_p.configuration_ok)});
+    try writer.print("  computeUnits All ok:        {s}\n", .{yn(cm_p.compute_units_all_ok)});
+    try writer.print("  computeUnits CPU+ANE ok:    {s}\n", .{yn(cm_p.compute_units_cpu_and_ane_ok)});
+    try writer.print("  ANE execution verified:     {s}\n", .{yn(cm_p.ane_execution_verified)});
+    try writer.print("  path retained:              {s}\n", .{yn(cm_p.path_retained)});
+    try writer.print("  detail: {s}\n\n", .{cm_p.detail});
+
+    try writer.print("Accelerate (public CPU matrix path; AMX may be internal only)\n", .{});
+    try writer.print("  have_accelerate: {s}\n", .{yn(zynfer.cpu.accelerate.have_accelerate)});
+    try writer.print("  matmul gate M*N*K>={d}; matvec M*K>={d}\n\n", .{
+        zynfer.cpu.accelerate.matmul_min_flops,
+        zynfer.cpu.accelerate.matvec_min_flops,
+    });
+
+    try writer.print("Stage 7 decisions\n", .{});
+    try writer.print("  SME kernels:     REJECT — detection only; no brittle assembly\n", .{});
+    try writer.print("  Core ML/ANE ops: REJECT — framework probe only; no end-to-end subgraph\n", .{});
+    try writer.print("  Accelerate:      RETAIN — measured Stage 5 size-gated vDSP path\n", .{});
+    try writer.print("  Metal Stage 6:   RETAIN — default tiny-block schedule\n", .{});
+    try writer.print("\nSee bench/results/apple-stage7-dev-laptop.md\n", .{});
+}
+
 fn printCaps(writer: *std.Io.Writer, forced: ?[]const u8) !void {
     const kind = try resolveKind(forced);
     try writer.print("zynfer capabilities\n", .{});
@@ -163,8 +227,16 @@ fn printCaps(writer: *std.Io.Writer, forced: ?[]const u8) !void {
     });
     try writer.print("simdgroup_matrix hardware: {s}\n", .{yn(caps.simdgroup_matrix)});
     try writer.print("Accelerate path: {s}\n", .{yn(caps.accelerate)});
-    try writer.print("Core ML path: {s}\n", .{yn(caps.core_ml)});
+    try writer.print("SME inference path: {s}\n", .{yn(caps.sme)});
+    try writer.print("Core ML inference path: {s}\n", .{yn(caps.core_ml)});
     try writer.print("HIP linked: {s}\n", .{yn(caps.hip or zynfer.hip.have_hip)});
+
+    const sme_p = zynfer.cpu.sme.probe();
+    const cm_p = zynfer.apple.coreml.probe();
+    try writer.print("\nStage 7 probes (hardware/framework ≠ retained path)\n", .{});
+    try writer.print("  SME hardware FEAT_SME/SME2: {s}/{s}\n", .{ yn(sme_p.feat_sme), yn(sme_p.feat_sme2) });
+    try writer.print("  Core ML framework linked:   {s}\n", .{yn(cm_p.framework_linked)});
+    try writer.print("  ANE execution verified:     {s}\n", .{yn(cm_p.ane_execution_verified)});
 
     switch (caps.arch) {
         .apple_m => |feat| {
@@ -185,12 +257,13 @@ fn printCaps(writer: *std.Io.Writer, forced: ?[]const u8) !void {
             const auto256: []const u8 = if (feat.simdgroup_matrix_available) "matmul_f32_simdgroup" else "matmul_f32";
             try writer.print("  matmul auto-path (64^3 / 256^3): {s} / {s}  (x4 measured slower at 256^3; force with ZYNFER_MATMUL_PATH=simdgroup_x4)\n", .{ auto64, auto256 });
             try writer.print("  packed q8 GEMM/GEMV: explicit API; persistent via Q8DeviceWeights (fair benches; not auto over f32)\n", .{});
-            try writer.print("  Accelerate CPU: vDSP matmul M*N*K>={d}; matvec M*K>={d}\n", .{
+            try writer.print("  Accelerate CPU: vDSP matmul M*N*K>={d}; matvec M*K>={d} (do not claim AMX)\n", .{
                 zynfer.cpu.accelerate.matmul_min_flops,
                 zynfer.cpu.accelerate.matvec_min_flops,
             });
             try writer.print("  Stage 6 tiny-block path={s}: one CB/wait + resident KV + add_rmsnorm\n", .{zynfer.apple.block.path_staged});
             try writer.print("  A/B: ZYNFER_APPLE_BLOCK=baseline → path={s} (per-op waits)\n", .{zynfer.apple.block.path_baseline});
+            try writer.print("  Stage 7: SME/Core ML inference paths rejected; see `zynfer stage7`\n", .{});
         },
         else => {},
     }

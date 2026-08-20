@@ -15,11 +15,15 @@ Metal bridge. It is not the AMD production target.
   shared buffers, Metal-resident KV (`kv_append_f32` + GPU permutes),
   fused `add_rmsnorm_f32`, persistent int8 weights (`Q8DeviceWeights`).
   A/B with `ZYNFER_APPLE_BLOCK=baseline` (per-op waits).
+- Stage 7: SME/SME2 **hardware probe** + Core ML **framework probe**;
+  both inference paths **rejected** (see `zynfer stage7` /
+  `bench/results/apple-stage7-dev-laptop.md`). Accelerate retained;
+  do not claim AMX.
 - Tiny transformer block: RMSNorm → QKV → RoPE → KV append →
   attention → O + residual → SwiGLU residual
 - Separate `prefill` and `decode` entry points; decode does not allocate
   host tensors
-- Capability dump: `zig build run -- caps`
+- Capability dump: `zig build run -- caps` / `zynfer stage7`
 - Op microbenchmarks: `zig build ops-bench`
 - Block timings: `zig build block-bench`
 
@@ -265,13 +269,14 @@ Stage 6 A/B: `bench/results/apple-stage6-dev-laptop.md`.
 | Metal `simdgroup_matrix` matmul | Apple7+; auto when M·N·K≥64³; `_x4` force-only (slower at 256³) |
 | Metal int8 GEMV/GEMM (`matvec_q8_f32` / `matmul_q8_f32`) | explicit API; fair (prepacked) benches; not auto over f32 |
 | Metal fused / batched tiny-block | Stage 6 one CB/wait + resident KV; ~8× vs per-op baseline |
-| SME / SME2 | not implemented |
-| Core ML / ANE | not implemented |
+| SME / SME2 | hardware probed (`FEAT_SME`); kernels **rejected** (Stage 7) |
+| Core ML / ANE | framework probed; inference path **rejected** (no verified subgraph) |
 | fp16 / bf16 Metal | dtype exists; kernels are f32 only |
 | HIP transformer ops | not implemented (probe only) |
 
-`zig build run -- caps` prints the disabled-path list. Forced
-`--backend apple` on a non-macOS build exits 2.
+`zig build run -- caps` and `zynfer stage7` print the Stage 7 ledger.
+Forced `--backend apple` on a non-macOS build exits 2.
+`ZYNFER_FORCE_SME=1` / `ZYNFER_FORCE_COREML=1` exit 2 (paths not retained).
 
 ## Deferred work (mapped to future stages)
 
@@ -292,8 +297,8 @@ Apple Stage 7/8 or curriculum Stages 10–12 / 16 land.
 
 | Item | Notes |
 | --- | --- |
-| **SME / SME2** | Only if public/supported and measured |
-| **Core ML / ANE** | Only with placement evidence; clean fallbacks |
+| **SME / SME2** | **done (rejected)** — `cpu.sme` detects FEAT_SME/SME2; kernels not retained (`bench/results/apple-stage7-dev-laptop.md`) |
+| **Core ML / ANE** | **done (rejected)** — framework probe only; no verified ANE subgraph |
 
 ### Still open — Apple Stage 8
 

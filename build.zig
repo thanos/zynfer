@@ -34,6 +34,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    zynfer_mod.link_libc = true;
     zynfer_mod.addOptions("build_options", options);
     configureHip(b, zynfer_mod, have_hip, hip_path);
     configureApple(b, zynfer_mod, have_apple);
@@ -49,6 +50,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    exe.root_module.link_libc = true;
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -74,6 +76,14 @@ pub fn build(b: *std.Build) void {
     caps_cmd.addArg("caps");
     const caps_step = b.step("caps", "Print backend capabilities and fallbacks");
     caps_step.dependOn(&caps_cmd.step);
+
+    const stage7_cmd = b.addRunArtifact(exe);
+    stage7_cmd.step.dependOn(b.getInstallStep());
+    stage7_cmd.addArg("stage7");
+    stage7_cmd.expectStdOutMatch("Stage 7 decisions");
+    stage7_cmd.expectExitCode(0);
+    const stage7_step = b.step("stage7", "SME / Core ML Stage 7 probe and retain/reject ledger");
+    stage7_step.dependOn(&stage7_cmd.step);
 
     const ops_bench_cmd = b.addRunArtifact(exe);
     ops_bench_cmd.step.dependOn(b.getInstallStep());
@@ -103,6 +113,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    unit_tests.root_module.link_libc = true;
     unit_tests.root_module.addOptions("build_options", options);
     configureHip(b, unit_tests.root_module, have_hip, hip_path);
     configureApple(b, unit_tests.root_module, have_apple);
@@ -196,6 +207,24 @@ pub fn build(b: *std.Build) void {
     block_cpu.expectStdOutMatch("tiny-block");
     block_cpu.expectExitCode(0);
 
+    const stage7_ok = b.addRunArtifact(exe);
+    stage7_ok.addArg("stage7");
+    stage7_ok.expectStdOutMatch("Stage 7 decisions");
+    stage7_ok.expectStdOutMatch("REJECT");
+    stage7_ok.expectExitCode(0);
+
+    const force_sme = b.addRunArtifact(exe);
+    force_sme.setEnvironmentVariable("ZYNFER_FORCE_SME", "1");
+    force_sme.addArg("stage7");
+    force_sme.expectStdErrMatch("ZYNFER_FORCE_SME");
+    force_sme.expectExitCode(2);
+
+    const force_coreml = b.addRunArtifact(exe);
+    force_coreml.setEnvironmentVariable("ZYNFER_FORCE_COREML", "1");
+    force_coreml.addArg("caps");
+    force_coreml.expectStdErrMatch("ZYNFER_FORCE_COREML");
+    force_coreml.expectExitCode(2);
+
     const integration_step = b.step("integration", "Run CLI integration tests");
     integration_step.dependOn(&run_integration.step);
     integration_step.dependOn(&help_run.step);
@@ -203,6 +232,9 @@ pub fn build(b: *std.Build) void {
     integration_step.dependOn(&caps_cpu.step);
     integration_step.dependOn(&bad_backend.step);
     integration_step.dependOn(&block_cpu.step);
+    integration_step.dependOn(&stage7_ok.step);
+    integration_step.dependOn(&force_sme.step);
+    integration_step.dependOn(&force_coreml.step);
 
     const docs_lib = b.addLibrary(.{
         .name = "zynfer",
@@ -242,8 +274,14 @@ fn configureApple(b: *std.Build, mod: *std.Build.Module, have_apple: bool) void 
     mod.linkFramework("Foundation", .{});
     mod.linkFramework("Metal", .{});
     mod.linkFramework("Accelerate", .{});
+    mod.linkFramework("CoreML", .{});
     mod.addCSourceFile(.{
         .file = b.path("src/backends/apple/bridge.m"),
+        .flags = &.{"-fobjc-arc"},
+        .language = .objective_c,
+    });
+    mod.addCSourceFile(.{
+        .file = b.path("src/backends/apple/coreml_bridge.m"),
         .flags = &.{"-fobjc-arc"},
         .language = .objective_c,
     });

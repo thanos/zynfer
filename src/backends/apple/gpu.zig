@@ -181,11 +181,16 @@ pub const Gpu = struct {
         self.features.gpu_family_apple9 = raw.gpu_family_apple9 != 0;
         self.features.simdgroup_matrix_available = raw.simdgroup_matrix_available != 0;
         self.features.accelerate_available = true; // linked on Apple builds; path is size-gated
-        self.features.core_ml_available = false;
-        self.features.sme_available = false;
+        const sme_p = @import("../cpu/sme.zig").probe();
+        self.features.sme_available = sme_p.feat_sme;
+        self.features.sme2_available = sme_p.feat_sme2;
+        const cm_p = @import("coreml.zig").probe();
+        self.features.core_ml_available = cm_p.framework_linked;
     }
 
     pub fn capabilities(self: *const Gpu) backend_mod.Capabilities {
+        const sme_p = @import("../cpu/sme.zig").probe();
+        const cm_p = @import("coreml.zig").probe();
         var caps = backend_mod.Capabilities{
             .backend = .apple,
             .arch = .{ .apple_m = self.features },
@@ -195,10 +200,14 @@ pub const Gpu = struct {
             .bf16 = false,
             .simdgroup_matrix = self.features.simdgroup_matrix_available,
             .accelerate = self.features.accelerate_available,
+            .core_ml = cm_p.path_retained,
+            .sme = sme_p.path_retained,
         };
         caps.addDisabled("fp16/bf16 Metal kernels not implemented");
-        caps.addDisabled("SME/SME2 not implemented with the supported Zig/Clang toolchain");
-        caps.addDisabled("Core ML/ANE not implemented (experimental, gated off)");
+        caps.addDisabled(sme_p.detail);
+        caps.addDisabled(cm_p.detail);
+        caps.addDisabled("Core ML/ANE inference path not retained (Stage 7: no measured end-to-end subgraph)");
+        caps.addDisabled("AMX is not a public contract; CPU matrix wins attribute to Accelerate only");
         caps.addDisabled("No Qwen loader/tokenizer/sampling; tiny-block only");
         caps.addDisabled("Metal attention_f32 caps kv_len at 64 (thread-local scores); larger returns Unsupported");
         caps.addDisabled("Per-op apple.ops path still waits each kernel; Stage 6 batch+resident KV is the tiny-block schedule");

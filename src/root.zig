@@ -18,12 +18,14 @@ pub const tiny_block = @import("model/tiny_block.zig");
 pub const cpu = struct {
     pub const ops = @import("backends/cpu/ops.zig");
     pub const accelerate = @import("backends/cpu/accelerate.zig");
+    pub const sme = @import("backends/cpu/sme.zig");
 };
 
 pub const apple = struct {
     pub const gpu = @import("backends/apple/gpu.zig");
     pub const ops = @import("backends/apple/ops.zig");
     pub const block = @import("backends/apple/block.zig");
+    pub const coreml = @import("backends/apple/coreml.zig");
 };
 
 pub const Device = device.Device;
@@ -44,7 +46,9 @@ test {
     _ = tiny_block;
     _ = cpu.ops;
     _ = cpu.accelerate;
+    _ = cpu.sme;
     _ = apple.gpu;
     _ = apple.ops;
     _ = apple.block;
+    _ = apple.coreml;
 }
