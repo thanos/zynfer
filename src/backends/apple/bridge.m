@@ -12,6 +12,8 @@ struct ZynferMtlDevice {
     __strong NSMutableDictionary<NSString *, id<MTLComputePipelineState>> *pipelines;
     __strong NSString *last_error;
     char last_error_utf8[2048];
+    __strong id<MTLCommandBuffer> batch_cb;
+    __strong id<MTLComputeCommandEncoder> batch_enc;
 };
 
 struct ZynferMtlBuffer {
@@ -50,6 +52,8 @@ int zynfer_mtl_device_create(ZynferMtlDevice **out) {
     dev->pipelines = [NSMutableDictionary dictionary];
     dev->last_error = nil;
     dev->last_error_utf8[0] = 0;
+    dev->batch_cb = nil;
+    dev->batch_enc = nil;
     *out = dev;
     return ZYNFER_MTL_OK;
 }
@@ -58,6 +62,11 @@ void zynfer_mtl_device_destroy(ZynferMtlDevice *dev) {
     if (dev == NULL) {
         return;
     }
+    if (dev->batch_enc != nil) {
+        [dev->batch_enc endEncoding];
+        dev->batch_enc = nil;
+    }
+    dev->batch_cb = nil;
     dev->pipelines = nil;
     dev->library = nil;
     dev->queue = nil;
@@ -244,4 +253,160 @@ int zynfer_mtl_encode_and_wait(
         return ZYNFER_MTL_ENCODE;
     }
     return ZYNFER_MTL_OK;
+}
+
+int zynfer_mtl_batch_begin(ZynferMtlDevice *dev) {
+    if (dev == NULL) {
+        return ZYNFER_MTL_INVALID;
+    }
+    if (dev->batch_cb != nil || dev->batch_enc != nil) {
+        set_error(dev, @"batch already open");
+        return ZYNFER_MTL_INVALID;
+    }
+    id<MTLCommandBuffer> cb = [dev->queue commandBuffer];
+    if (cb == nil) {
+        set_error(dev, @"command buffer create failed");
+        return ZYNFER_MTL_ENCODE;
+    }
+    cb.label = @"zynfer_batch";
+    /* Encoder is created per dispatch in batch_encode. */
+    dev->batch_cb = cb;
+    dev->batch_enc = nil;
+    return ZYNFER_MTL_OK;
+}
+
+static int encode_on_encoder(
+    ZynferMtlDevice *dev,
+    id<MTLComputeCommandEncoder> enc,
+    const char *kernel,
+    uint32_t grid_x,
+    uint32_t grid_y,
+    uint32_t grid_z,
+    uint32_t tg_x,
+    uint32_t tg_y,
+    uint32_t tg_z,
+    ZynferMtlBuffer **bufs,
+    uint32_t nbufs,
+    const void *params,
+    uint32_t params_len,
+    uint32_t threadgroup_mem_bytes,
+    int dispatch_threadgroups)
+{
+    if (kernel == NULL || grid_x == 0 || tg_x == 0) {
+        return ZYNFER_MTL_INVALID;
+    }
+    id<MTLComputePipelineState> pso = pipeline_for(dev, kernel);
+    if (pso == nil) {
+        return ZYNFER_MTL_PIPELINE;
+    }
+    [enc setComputePipelineState:pso];
+    for (uint32_t i = 0; i < nbufs; i++) {
+        if (bufs[i] == NULL || bufs[i]->buffer == nil) {
+            return ZYNFER_MTL_INVALID;
+        }
+        [enc setBuffer:bufs[i]->buffer offset:0 atIndex:i];
+    }
+    if (params != NULL && params_len > 0) {
+        [enc setBytes:params length:params_len atIndex:nbufs];
+    }
+    if (threadgroup_mem_bytes > 0) {
+        [enc setThreadgroupMemoryLength:threadgroup_mem_bytes atIndex:0];
+    }
+    MTLSize grid = MTLSizeMake(grid_x, grid_y == 0 ? 1 : grid_y, grid_z == 0 ? 1 : grid_z);
+    MTLSize tg = MTLSizeMake(tg_x, tg_y == 0 ? 1 : tg_y, tg_z == 0 ? 1 : tg_z);
+    if (dispatch_threadgroups) {
+        [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
+    } else {
+        [enc dispatchThreads:grid threadsPerThreadgroup:tg];
+    }
+    /* Later dispatches in this encoder may read buffers written here. */
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+    return ZYNFER_MTL_OK;
+}
+
+int zynfer_mtl_batch_encode(
+    ZynferMtlDevice *dev,
+    const char *kernel,
+    uint32_t grid_x,
+    uint32_t grid_y,
+    uint32_t grid_z,
+    uint32_t tg_x,
+    uint32_t tg_y,
+    uint32_t tg_z,
+    ZynferMtlBuffer **bufs,
+    uint32_t nbufs,
+    const void *params,
+    uint32_t params_len,
+    uint32_t threadgroup_mem_bytes,
+    int dispatch_threadgroups)
+{
+    if (dev == NULL || dev->batch_cb == nil) {
+        return ZYNFER_MTL_INVALID;
+    }
+    /* One encoder per dispatch so producer→consumer buffer hazards are
+     * ordered without relying on memoryBarrierWithScope alone. Still one
+     * command buffer and one wait at commit. */
+    if (dev->batch_enc != nil) {
+        [dev->batch_enc endEncoding];
+        dev->batch_enc = nil;
+    }
+    id<MTLComputeCommandEncoder> enc = [dev->batch_cb computeCommandEncoder];
+    if (enc == nil) {
+        set_error(dev, @"encoder create failed");
+        return ZYNFER_MTL_ENCODE;
+    }
+    enc.label = [NSString stringWithUTF8String:kernel];
+    const int st = encode_on_encoder(
+        dev,
+        enc,
+        kernel,
+        grid_x,
+        grid_y,
+        grid_z,
+        tg_x,
+        tg_y,
+        tg_z,
+        bufs,
+        nbufs,
+        params,
+        params_len,
+        threadgroup_mem_bytes,
+        dispatch_threadgroups);
+    if (st != ZYNFER_MTL_OK) {
+        [enc endEncoding];
+        return st;
+    }
+    [enc endEncoding];
+    return ZYNFER_MTL_OK;
+}
+
+int zynfer_mtl_batch_commit_and_wait(ZynferMtlDevice *dev) {
+    if (dev == NULL || dev->batch_cb == nil) {
+        return ZYNFER_MTL_INVALID;
+    }
+    if (dev->batch_enc != nil) {
+        [dev->batch_enc endEncoding];
+        dev->batch_enc = nil;
+    }
+    id<MTLCommandBuffer> cb = dev->batch_cb;
+    [cb commit];
+    [cb waitUntilCompleted];
+    const int ok = (cb.error == nil) ? ZYNFER_MTL_OK : ZYNFER_MTL_ENCODE;
+    if (ok != ZYNFER_MTL_OK) {
+        set_error(dev, cb.error.localizedDescription);
+    }
+    dev->batch_cb = nil;
+    return ok;
+}
+
+void zynfer_mtl_batch_abort(ZynferMtlDevice *dev) {
+    if (dev == NULL) {
+        return;
+    }
+    if (dev->batch_enc != nil) {
+        [dev->batch_enc endEncoding];
+        dev->batch_enc = nil;
+    }
+    /* Drop the command buffer without committing. */
+    dev->batch_cb = nil;
 }

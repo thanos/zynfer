@@ -11,7 +11,11 @@ Metal bridge. It is not the AMD production target.
 - Stage 5: capability-gated `matmul_f32_simdgroup` / `matmul_f32_simdgroup_x4`
   (Apple7+, size-gated), `matvec_q8_f32` / `matmul_q8_f32` (per-row or
   per-tensor scale), Accelerate `vDSP_mmul` for large CPU matmul and matvec
-- Tiny transformer block: RMSNorm → QKV → RoPE → host KV append →
+- Stage 6: tiny-block **one command buffer / one wait**, persistent
+  shared buffers, Metal-resident KV (`kv_append_f32` + GPU permutes),
+  fused `add_rmsnorm_f32`, persistent int8 weights (`Q8DeviceWeights`).
+  A/B with `ZYNFER_APPLE_BLOCK=baseline` (per-op waits).
+- Tiny transformer block: RMSNorm → QKV → RoPE → KV append →
   attention → O + residual → SwiGLU residual
 - Separate `prefill` and `decode` entry points; decode does not allocate
   host tensors
@@ -58,53 +62,36 @@ xcrun -sdk macosx metal -c src/backends/apple/kernels.metal -o /tmp/zynfer_kerne
 ## Profiling
 
 Labels are set on command buffers and encoders (kernel name). The
-baseline submits one command buffer per op and waits.
+**ops** path submits one command buffer per op and waits. The **tiny-block
+Stage 6** path batches ~20 encodes into one CB and waits once.
 
-### Recipe: capture wait dominance on `block-bench`
+### Recipe: capture Stage 6 vs baseline on `block-bench`
 
 Run on a Mac with the Metal Toolchain installed:
 
 ```bash
 zig build -Doptimize=ReleaseSafe
-# Terminal A — keep the binary warm once so shader compile is not in the
-# profile window if you prefer a steady-state capture:
 ./zig-out/bin/zynfer block-bench --backend apple
+ZYNFER_APPLE_BLOCK=baseline ./zig-out/bin/zynfer block-bench --backend apple
 ```
 
 1. Open **Instruments** → **Metal System Trace** (or **Game Performance**
    with Metal).
-2. Choose the `zynfer` process (or launch
-   `./zig-out/bin/zynfer block-bench --backend apple` from Instruments).
+2. Choose the `zynfer` process (or launch from Instruments).
 3. Record one `block-bench` run (~seconds). Stop.
 4. In the timeline, select GPU / command-buffer lanes. Expect:
-   - many short compute dispatches named after kernels
-     (`rmsnorm_f32`, `matmul_f32`, `attention_f32`, …);
-   - a **gap after every dispatch** while the CPU sits in
-     `waitUntilCompleted` inside `zynfer_mtl_encode_and_wait`;
-   - **no overlapping** kernels on the same queue for one decode step.
-5. Optionally attach **Time Profiler** in the same template and confirm
-   CPU time in buffer create/`memcpy`/encode/`waitUntilCompleted` rather
-   than in a long GPU kernel.
-
-Expected reading (Stage 4 baseline, not a bug):
+   - **Stage 6:** one command buffer per forward, many short dispatches,
+     then a **single** `waitUntilCompleted`;
+   - **baseline:** a gap after every dispatch in
+     `zynfer_mtl_encode_and_wait`.
 
 | Signal | Meaning |
 | --- | --- |
-| Serial gaps between kernels | Per-op `waitUntilCompleted` |
-| Many tiny dispatches per decode token | ~14 ops × one command buffer each |
-| Short GPU kernel durations vs long wall time | Launch/sync bound, not FLOP bound |
-| Command-buffer labels = kernel names | Bridge labels are working |
+| One wait gap per forward (Stage 6) | CB batching working |
+| Serial gaps between every kernel (baseline) | Per-op `waitUntilCompleted` |
+| Short GPU kernels vs long wall time (baseline) | Launch/sync bound |
 
-Do not treat a capture of this baseline as proof that Metal cannot be
-fast. It proves the **current schedule** is wait-bound. Removing waits
-and buffer churn is Stage 6 work; see deferred list below.
-
-Xcode **GPU capture** / Metal debugger is useful for a single
-`matmul_f32` / `attention_f32` duration vs memory traffic once the
-schedule is less sync-bound.
-
-Signposts are not wired yet. Cheap compile-time instrumentation can be
-added around `zynfer_mtl_encode_and_wait` without changing the op API.
+Measured A/B: `bench/results/apple-stage6-dev-laptop.md` (~8× decode).
 
 ### Case study (baseline, not an optimization)
 
@@ -113,22 +100,18 @@ added around `zynfer_mtl_encode_and_wait` without changing the op API.
 - **Change:** compile the library once per `ops-bench` process; time
   init separately as `metal_device_create_plus_shader_compile_ns`.
 - **Correctness:** `zig build test` still compares every Metal op to CPU.
-- **Decision:** keep one-shot compile; still wait after every kernel.
-  Removing the wait is deferred until a fused/overlapped decode path
-  exists to measure overlap against.
+- **Decision:** keep one-shot compile for ops microbenches.
 
-### Case study (wait dominance on tiny-block decode)
+### Case study (Stage 6: one wait + resident KV)
 
-- **Hypothesis:** Metal `block-bench` is slower than CPU because each
-  tiny-block op pays encode + shared-buffer alloc + `waitUntilCompleted`,
-  not because M1 Max loses on `1×8` matmul FLOPs.
-- **Evidence:** Debug and ReleaseSafe `block-bench` numbers in
-  `bench/results/apple-block-dev-laptop.md`; CPU drops to ~2 µs/token in
-  ReleaseSafe while Metal stays ~4 ms/token; Instruments recipe above
-  shows serial gaps. Written breakdown:
-  [Why Metal is slower on the tiny block](#why-metal-is-slower-on-the-tiny-block).
-- **Decision:** keep the correctness baseline. Optimize only after
-  persistent buffers / fewer waits are measured on a representative loop.
+- **Hypothesis:** Metal `block-bench` was slower than CPU mainly because
+  each tiny-block op paid encode + alloc + `waitUntilCompleted`.
+- **Change:** persistent weights/scratch/KV buffers; GPU permute +
+  `kv_append_f32`; `batchBegin`/`batchCommit` → one wait per forward.
+- **Evidence:** ReleaseSafe A/B in
+  `bench/results/apple-stage6-dev-laptop.md` (~8.3× decode ns/token).
+- **Decision:** Stage 6 is the default tiny-block path; keep
+  `ZYNFER_APPLE_BLOCK=baseline` for regression A/B.
 
 ## Prefill vs decode (tiny block)
 
@@ -255,19 +238,21 @@ host memory between kernels.
 on tiny tensors**, not “M1 Max matmul vs scalar CPU.” Stage 4 proves
 correctness and schedule; it does not claim GPU throughput.
 
-### What would change the picture (Stage 5–6)
+### What changed the picture (Stage 5–6)
 
-These are deferred until profiled against a real decode loop:
+Delivered on the tiny-block fixture:
 
-- **Persistent device buffers** — weights, scratch, and KV; no per-op alloc
-- **One command buffer per decode step** (or fused kernels) — one wait, not fourteen
-- **Metal-resident KV** — append on GPU; attention reads cache in place
-- **Realistic shapes** — enough FLOPs to amortize launch cost
-- **Optional `simdgroup_matrix`** where measurements show a win
+- **Persistent device buffers** — weights, scratch, and KV (Stage 6)
+- **One command buffer per forward** — one wait, not ~15 (Stage 6)
+- **Metal-resident KV** — `kv_append_f32`; attention reads cache in place
+- **Optional `simdgroup_matrix`** — size-gated (Stage 5)
 
-Do not treat a large Metal speedup from any one of these in isolation as
-end-to-end decode improvement until `block-bench` (or a Qwen fixture)
-confirms it.
+Still needed for a real decode story:
+
+- **Realistic shapes** — enough FLOPs that Metal beats scalar CPU
+- **Qwen-scale weights / logits** — checkpoint loader and golden tests
+
+Stage 6 A/B: `bench/results/apple-stage6-dev-laptop.md`.
 
 ## Fallback matrix
 
@@ -279,6 +264,7 @@ confirms it.
 | Metal naive f32 | implemented; differentially tested |
 | Metal `simdgroup_matrix` matmul | Apple7+; auto when M·N·K≥64³; `_x4` force-only (slower at 256³) |
 | Metal int8 GEMV/GEMM (`matvec_q8_f32` / `matmul_q8_f32`) | explicit API; fair (prepacked) benches; not auto over f32 |
+| Metal fused / batched tiny-block | Stage 6 one CB/wait + resident KV; ~8× vs per-op baseline |
 | SME / SME2 | not implemented |
 | Core ML / ANE | not implemented |
 | fp16 / bf16 Metal | dtype exists; kernels are f32 only |
@@ -287,24 +273,24 @@ confirms it.
 `zig build run -- caps` prints the disabled-path list. Forced
 `--backend apple` on a non-macOS build exits 2.
 
-## Deferred work (after Stage 5)
+## Deferred work (after Stage 6 leftovers)
 
-Apple Stages 0–5 are **done for the tiny-block fixture and measured
-matrix paths**. Remaining items need Stage 6+, a real model, or both.
+Stage-6-adjacent items that were still open are now implemented:
+persistent int8 Metal weights (`Q8DeviceWeights`) and fused
+`add_rmsnorm_f32` on the tiny-block path.
 
-| Deferred item | Why deferred | Belongs in |
-| --- | --- | --- |
-| **Metal-resident KV cache** | Host layout + lifetime exist; attention still uploads full K/V each call. | Apple-6 |
-| **Remove per-op `waitUntilCompleted` and per-op shared-buffer alloc** | Still one command buffer + wait per kernel. | Apple-6 |
-| **Persistent int8 weight buffers** | `matvec_q8_f32` exists; pack+upload each call does not beat f32. | Apple-6 / quant load |
-| **Qwen loader / tokenizer / sampling / golden logits** | No checkpoint or vocab in tree. | Checkpoint stages |
-| **Fused kernels** | Fuse only after Instruments on a representative schedule. | Apple-6 |
-| **SME / ANE** | Optional; retain only if a named workload improves. | Apple-7 |
+| Deferred item | Status |
+| --- | --- |
+| **Persistent int8 weight buffers** | **done** — `Q8DeviceWeights` + `matvecQ8Persistent` / `matmulQ8Persistent` |
+| **Extra fused kernels** | **done** — `add_rmsnorm_f32` (attn residual + MLP RMSNorm); existing `silu_mul` |
+| **Qwen loader / tokenizer / sampling / golden logits** | still deferred — checkpoint stages |
+| **SME / ANE** | still deferred — Apple-7 |
 
-Stage 5 measurements and selection table:
-`bench/results/apple-stage5-dev-laptop.md`.
+Stage 5 matrix paths: `bench/results/apple-stage5-dev-laptop.md`.
 
-Wait-bound tiny-block baseline:
+Stage 6 block A/B: `bench/results/apple-stage6-dev-laptop.md`.
+
+Historical wait-bound writeup (pre-Stage 6):
 [Why Metal is slower…](#why-metal-is-slower-on-the-tiny-block).
 
 ### Still true
@@ -312,6 +298,7 @@ Wait-bound tiny-block baseline:
 - Tiny block is a synthetic residual stream, not Qwen3-0.6B.
 - Metal attention hard-caps `kv_len` at 64; fixture `max_seq` is 32.
 - Peak RSS / energy/token are not claimed.
+- Stage 6 Metal is still slower than scalar CPU on this tiny shape.
 
 ## Measured on this development laptop (2026-08-19)
 

@@ -298,7 +298,59 @@ const MatmulQ8Params = extern struct {
     scale_mode: u32,
 };
 
-/// y = (int8_weights * scale) @ x. Scale len is m (per_row) or 1 (per_tensor).
+/// C = dequant(W_q) @ B. Prefer this over f32 matmul when weights are already int8
+/// and M·N·K is large enough that dequant-on-the-fly still wins on memory traffic
+/// in a fair (pre-packed) bench — see `q8_matmul_min_flops`.
+pub const q8_matmul_min_flops: usize = 128 * 128 * 128;
+
+pub fn preferPackedQ8Matmul(m: usize, n: usize, k: usize) bool {
+    return m * n * k >= q8_matmul_min_flops;
+}
+
+/// Persistent Metal int8 weights: upload once, reuse across matvec/matmul calls.
+pub const Q8DeviceWeights = struct {
+    q: Buffer,
+    /// Always length `m` (per-tensor scale is broadcast at upload).
+    scale: Buffer,
+    m: usize,
+    k: usize,
+    mode: cpu.Q8ScaleMode,
+
+    pub fn upload(
+        gpu: *Gpu,
+        w_q8: []const i8,
+        scale: []const f32,
+        m: usize,
+        k: usize,
+        mode: cpu.Q8ScaleMode,
+    ) Error!Q8DeviceWeights {
+        if (w_q8.len != m * k) return error.ShapeMismatch;
+        switch (mode) {
+            .per_row => if (scale.len != m) return error.ShapeMismatch,
+            .per_tensor => if (scale.len != 1) return error.ShapeMismatch,
+        }
+        var q = try gpu.allocShared(w_q8.len);
+        errdefer q.deinit();
+        @memcpy(q.bytes[0..w_q8.len], @as([*]const u8, @ptrCast(w_q8.ptr))[0..w_q8.len]);
+
+        var scale_buf = try gpu.allocShared(m * @sizeOf(f32));
+        errdefer scale_buf.deinit();
+        const ss = scale_buf.f32s();
+        if (mode == .per_tensor) {
+            @memset(ss[0..m], scale[0]);
+        } else {
+            @memcpy(ss[0..m], scale);
+        }
+        return .{ .q = q, .scale = scale_buf, .m = m, .k = k, .mode = mode };
+    }
+
+    pub fn deinit(self: *Q8DeviceWeights) void {
+        self.q.deinit();
+        self.scale.deinit();
+        self.* = undefined;
+    }
+};
+
 pub fn matvecQ8(
     gpu: *Gpu,
     y: Tensor,
@@ -307,48 +359,26 @@ pub fn matvecQ8(
     x: Tensor,
     mode: cpu.Q8ScaleMode,
 ) Error!void {
+    var packed_w = try Q8DeviceWeights.upload(gpu, w_q8, scale, y.shape[0], x.shape[0], mode);
+    defer packed_w.deinit();
+    try matvecQ8Persistent(gpu, y, packed_w, x);
+}
+
+/// GEMV with weights already resident on the GPU (no weight re-upload).
+pub fn matvecQ8Persistent(gpu: *Gpu, y: Tensor, w: Q8DeviceWeights, x: Tensor) Error!void {
     if (y.rank != 1 or x.rank != 1) return error.InvalidShape;
     const m = y.shape[0];
     const k = x.shape[0];
-    if (w_q8.len != m * k) return error.ShapeMismatch;
-    switch (mode) {
-        .per_row => if (scale.len != m) return error.ShapeMismatch,
-        .per_tensor => if (scale.len != 1) return error.ShapeMismatch,
-    }
+    if (w.m != m or w.k != k) return error.ShapeMismatch;
 
-    last_q8_path = if (mode == .per_row) "matvec_q8_f32_per_row" else "matvec_q8_f32_per_tensor";
-
-    var wb = try gpu.allocShared(w_q8.len);
-    defer wb.deinit();
-    @memcpy(wb.bytes[0..w_q8.len], @as([*]const u8, @ptrCast(w_q8.ptr))[0..w_q8.len]);
-
-    // Per-row kernel always indexes scale[gid]; broadcast tensor scale into m slots.
-    var scale_buf = try gpu.allocShared(m * @sizeOf(f32));
-    defer scale_buf.deinit();
-    const ss = scale_buf.f32s();
-    if (mode == .per_tensor) {
-        @memset(ss[0..m], scale[0]);
-    } else {
-        @memcpy(ss[0..m], scale);
-    }
+    last_q8_path = if (w.mode == .per_row) "matvec_q8_f32_persistent_per_row" else "matvec_q8_f32_persistent_per_tensor";
 
     var xb = try upload(gpu, x);
     defer xb.deinit();
     var yb = try gpu.allocShared(y.data.len);
     defer yb.deinit();
-    const params = MatmulParams{ .m = @intCast(m), .n = 1, .k = @intCast(k) };
-    const tg = gpu.threadgroup1d();
-    try launchBufs(gpu, "matvec_q8_f32", @intCast(m), 1, 1, tg, 1, 1, &.{ wb, scale_buf, xb, yb }, std.mem.asBytes(&params));
+    try encodeMatvecQ8(gpu, yb, w.q, w.scale, xb, @intCast(m), @intCast(k));
     try download(yb, y);
-}
-
-/// C = dequant(W_q) @ B. Prefer this over f32 matmul when weights are already int8
-/// and M·N·K is large enough that dequant-on-the-fly still wins on memory traffic
-/// in a fair (pre-packed) bench — see `q8_matmul_min_flops`.
-pub const q8_matmul_min_flops: usize = 128 * 128 * 128;
-
-pub fn preferPackedQ8Matmul(m: usize, n: usize, k: usize) bool {
-    return m * n * k >= q8_matmul_min_flops;
 }
 
 pub fn matmulQ8(
@@ -363,34 +393,27 @@ pub fn matmulQ8(
     const m = c.shape[0];
     const n = c.shape[1];
     const k = b.shape[0];
-    if (b.shape[1] != n or w_q8.len != m * k) return error.ShapeMismatch;
-    switch (mode) {
-        .per_row => if (scale.len != m) return error.ShapeMismatch,
-        .per_tensor => if (scale.len != 1) return error.ShapeMismatch,
-    }
+    if (b.shape[1] != n) return error.ShapeMismatch;
+    var packed_w = try Q8DeviceWeights.upload(gpu, w_q8, scale, m, k, mode);
+    defer packed_w.deinit();
+    try matmulQ8Persistent(gpu, c, packed_w, b);
+}
 
-    last_q8_path = if (mode == .per_row) "matmul_q8_f32_per_row" else "matmul_q8_f32_per_tensor";
+pub fn matmulQ8Persistent(gpu: *Gpu, c: Tensor, w: Q8DeviceWeights, b: Tensor) Error!void {
+    if (c.rank != 2 or b.rank != 2) return error.InvalidShape;
+    const m = c.shape[0];
+    const n = c.shape[1];
+    const k = b.shape[0];
+    if (b.shape[1] != n or w.m != m or w.k != k) return error.ShapeMismatch;
 
-    var wb = try gpu.allocShared(w_q8.len);
-    defer wb.deinit();
-    @memcpy(wb.bytes[0..w_q8.len], @as([*]const u8, @ptrCast(w_q8.ptr))[0..w_q8.len]);
-
-    var sb = try gpu.allocShared(scale.len * @sizeOf(f32));
-    defer sb.deinit();
-    @memcpy(sb.f32s()[0..scale.len], scale);
+    last_q8_path = if (w.mode == .per_row) "matmul_q8_f32_persistent_per_row" else "matmul_q8_f32_persistent_per_tensor";
 
     var bb = try upload(gpu, b);
     defer bb.deinit();
     var cb = try gpu.allocShared(c.data.len);
     defer cb.deinit();
-    const params = MatmulQ8Params{
-        .m = @intCast(m),
-        .n = @intCast(n),
-        .k = @intCast(k),
-        .scale_mode = if (mode == .per_tensor) 1 else 0,
-    };
-    const tg: u32 = 16;
-    try launchBufs(gpu, "matmul_q8_f32", @intCast(n), @intCast(m), 1, tg, tg, 1, &.{ wb, sb, bb, cb }, std.mem.asBytes(&params));
+    // Persistent path always stores per-row (broadcast) scales of length m.
+    try encodeMatmulQ8(gpu, cb, w.q, w.scale, bb, @intCast(m), @intCast(n), @intCast(k), .per_row);
     try download(cb, c);
 }
 
@@ -486,6 +509,173 @@ pub fn attention(
     try download(ob, out);
 }
 
+/// Stage 6: encode onto the current Gpu batch (or one-shot wait if no batch).
+/// These take resident buffers — no host upload/download.
+pub fn encodeAdd(gpu: *Gpu, dst: Buffer, a: Buffer, b: Buffer, n: u32) Error!void {
+    try launch1d(gpu, "add_f32", n, &.{ a, b, dst });
+}
+
+pub fn encodeSiluMul(gpu: *Gpu, dst: Buffer, gate: Buffer, up: Buffer, n: u32) Error!void {
+    try launch1d(gpu, "silu_mul_f32", n, &.{ gate, up, dst });
+}
+
+pub fn encodeRmsNorm(gpu: *Gpu, dst: Buffer, x: Buffer, weight: Buffer, rows: u32, cols: u32, eps: f32) Error!void {
+    const params = RmsNormParams{ .rows = rows, .cols = cols, .eps = eps };
+    const tg = gpu.threadgroup1d();
+    try launchBufs(gpu, "rmsnorm_f32", tg, rows, 1, tg, 1, 1, &.{ x, weight, dst }, std.mem.asBytes(&params));
+}
+
+/// sum_out = x + residual; norm_out = rmsnorm(sum_out, w).
+pub fn encodeAddRmsNorm(
+    gpu: *Gpu,
+    sum_out: Buffer,
+    norm_out: Buffer,
+    x: Buffer,
+    residual: Buffer,
+    weight: Buffer,
+    rows: u32,
+    cols: u32,
+    eps: f32,
+) Error!void {
+    const params = RmsNormParams{ .rows = rows, .cols = cols, .eps = eps };
+    const tg = gpu.threadgroup1d();
+    try launchBufs(
+        gpu,
+        "add_rmsnorm_f32",
+        tg,
+        rows,
+        1,
+        tg,
+        1,
+        1,
+        &.{ x, residual, weight, sum_out, norm_out },
+        std.mem.asBytes(&params),
+    );
+}
+
+pub fn encodeMatvecQ8(gpu: *Gpu, y: Buffer, w_q: Buffer, scale: Buffer, x: Buffer, m: u32, k: u32) Error!void {
+    const params = MatmulParams{ .m = m, .n = 1, .k = k };
+    const tg = gpu.threadgroup1d();
+    try launchBufs(gpu, "matvec_q8_f32", m, 1, 1, tg, 1, 1, &.{ w_q, scale, x, y }, std.mem.asBytes(&params));
+}
+
+pub fn encodeMatmulQ8(
+    gpu: *Gpu,
+    c_buf: Buffer,
+    w_q: Buffer,
+    scale: Buffer,
+    b: Buffer,
+    m: u32,
+    n: u32,
+    k: u32,
+    mode: cpu.Q8ScaleMode,
+) Error!void {
+    const params = MatmulQ8Params{
+        .m = m,
+        .n = n,
+        .k = k,
+        .scale_mode = if (mode == .per_tensor) 1 else 0,
+    };
+    const tg: u32 = 16;
+    try launchBufs(gpu, "matmul_q8_f32", n, m, 1, tg, tg, 1, &.{ w_q, scale, b, c_buf }, std.mem.asBytes(&params));
+}
+
+pub fn encodeMatmulNaive(gpu: *Gpu, c_buf: Buffer, a: Buffer, b: Buffer, m: u32, n: u32, k: u32) Error!void {
+    const params = MatmulParams{ .m = m, .n = n, .k = k };
+    const tg: u32 = 16;
+    try launchBufs(gpu, "matmul_f32", n, m, 1, tg, tg, 1, &.{ a, b, c_buf }, std.mem.asBytes(&params));
+}
+
+pub fn encodeRope(gpu: *Gpu, x: Buffer, tokens: u32, n_heads: u32, head_dim: u32, pos0: u32, theta: f32) Error!void {
+    const params = RopeParams{
+        .tokens = tokens,
+        .n_heads = n_heads,
+        .head_dim = head_dim,
+        .pos0 = pos0,
+        .theta = theta,
+    };
+    const pairs = tokens * n_heads * (head_dim / 2);
+    const tg = gpu.threadgroup1d();
+    try launchBufs(gpu, "rope_f32", pairs, 1, 1, tg, 1, 1, &.{x}, std.mem.asBytes(&params));
+}
+
+pub fn encodeAttention(
+    gpu: *Gpu,
+    out: Buffer,
+    q: Buffer,
+    k: Buffer,
+    v: Buffer,
+    n_q: u32,
+    n_kv: u32,
+    q_len: u32,
+    kv_len: u32,
+    kv_stride: u32,
+    head_dim: u32,
+) Error!void {
+    if (kv_len > max_attention_kv) return error.Unsupported;
+    const params = AttentionParams{
+        .n_q = n_q,
+        .n_kv = n_kv,
+        .q_len = q_len,
+        .kv_len = kv_len,
+        .kv_stride = kv_stride,
+        .head_dim = head_dim,
+    };
+    try launchBufs(gpu, "attention_f32", q_len, n_q, 1, 1, 1, 1, &.{ q, k, v, out }, std.mem.asBytes(&params));
+}
+
+const PermuteParams = extern struct {
+    tokens: u32,
+    n_heads: u32,
+    head_dim: u32,
+};
+
+pub fn encodePermuteTokensHeads(gpu: *Gpu, out: Buffer, in_buf: Buffer, tokens: u32, n_heads: u32, head_dim: u32) Error!void {
+    const params = PermuteParams{ .tokens = tokens, .n_heads = n_heads, .head_dim = head_dim };
+    const n = tokens * n_heads * head_dim;
+    const tg = gpu.threadgroup1d();
+    try launchBufs(gpu, "permute_tokens_heads_f32", n, 1, 1, tg, 1, 1, &.{ in_buf, out }, std.mem.asBytes(&params));
+}
+
+pub fn encodePermuteHeadsTokens(gpu: *Gpu, out: Buffer, in_buf: Buffer, tokens: u32, n_heads: u32, head_dim: u32) Error!void {
+    const params = PermuteParams{ .tokens = tokens, .n_heads = n_heads, .head_dim = head_dim };
+    const n = tokens * n_heads * head_dim;
+    const tg = gpu.threadgroup1d();
+    try launchBufs(gpu, "permute_heads_tokens_f32", n, 1, 1, tg, 1, 1, &.{ in_buf, out }, std.mem.asBytes(&params));
+}
+
+const KvAppendParams = extern struct {
+    n_kv: u32,
+    t: u32,
+    head_dim: u32,
+    max_seq: u32,
+    used: u32,
+};
+
+pub fn encodeKvAppend(
+    gpu: *Gpu,
+    k_new: Buffer,
+    v_new: Buffer,
+    k_cache: Buffer,
+    v_cache: Buffer,
+    n_kv: u32,
+    t: u32,
+    head_dim: u32,
+    max_seq: u32,
+    used: u32,
+) Error!void {
+    const params = KvAppendParams{
+        .n_kv = n_kv,
+        .t = t,
+        .head_dim = head_dim,
+        .max_seq = max_seq,
+        .used = used,
+    };
+    const n = n_kv * t * head_dim;
+    const tg = gpu.threadgroup1d();
+    try launchBufs(gpu, "kv_append_f32", n, 1, 1, tg, 1, 1, &.{ k_new, v_new, k_cache, v_cache }, std.mem.asBytes(&params));
+}
+
 pub fn swigluResidual(
     gpu: *Gpu,
     out: Tensor,
@@ -563,6 +753,32 @@ test "Metal ops match CPU reference" {
     try rmsNorm(&gpu, gn, x, w, 1e-6);
     try compare.expectClose(try yn.f32s(), try gn.f32s(), 1e-4, 1e-4);
 
+    {
+        var residual = try Tensor.alloc(gpa, .f32, &.{ 2, 8 });
+        defer residual.deinit();
+        try fillIota(residual);
+        var sum_cpu = try Tensor.alloc(gpa, .f32, &.{ 2, 8 });
+        defer sum_cpu.deinit();
+        var norm_cpu = try Tensor.alloc(gpa, .f32, &.{ 2, 8 });
+        defer norm_cpu.deinit();
+        try cpu.add(sum_cpu, x, residual);
+        try cpu.rmsNorm(norm_cpu, sum_cpu, w, 1e-6);
+
+        var sum_gpu = try gpu.allocShared(2 * 8 * 4);
+        defer sum_gpu.deinit();
+        var norm_gpu = try gpu.allocShared(2 * 8 * 4);
+        defer norm_gpu.deinit();
+        var xb = try upload(&gpu, x);
+        defer xb.deinit();
+        var rb = try upload(&gpu, residual);
+        defer rb.deinit();
+        var wb = try upload(&gpu, w);
+        defer wb.deinit();
+        try encodeAddRmsNorm(&gpu, sum_gpu, norm_gpu, xb, rb, wb, 2, 8, 1e-6);
+        try compare.expectClose(try sum_cpu.f32s(), sum_gpu.f32s()[0..16], 1e-4, 1e-4);
+        try compare.expectClose(try norm_cpu.f32s(), norm_gpu.f32s()[0..16], 1e-4, 1e-4);
+    }
+
     try cpu.softmax(yn, x);
     try softmax(&gpu, gn, x);
     try compare.expectClose(try yn.f32s(), try gn.f32s(), 1e-4, 1e-4);
@@ -629,6 +845,16 @@ test "Metal ops match CPU reference" {
         try cpu.matvecQ8(try y_cpu.f32s(), q, scale, try xq.f32s(), mq, kq, .per_row);
         try matvecQ8(&gpu, y_gpu, q, scale, xq, .per_row);
         try compare.expectClose(try y_cpu.f32s(), try y_gpu.f32s(), 2e-4, 2e-4);
+
+        var persisted = try Q8DeviceWeights.upload(&gpu, q, scale, mq, kq, .per_row);
+        defer persisted.deinit();
+        var y_persist = try Tensor.alloc(gpa, .f32, &.{mq});
+        defer y_persist.deinit();
+        try matvecQ8Persistent(&gpu, y_persist, persisted, xq);
+        try compare.expectClose(try y_cpu.f32s(), try y_persist.f32s(), 2e-4, 2e-4);
+        // Second call must not need a re-upload of weights.
+        try matvecQ8Persistent(&gpu, y_persist, persisted, xq);
+        try compare.expectClose(try y_cpu.f32s(), try y_persist.f32s(), 2e-4, 2e-4);
     }
 
     if (gpu.features.simdgroup_matrix_available) {
