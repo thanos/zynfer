@@ -74,12 +74,13 @@ pip install -U "huggingface_hub[cli]"
 hf download Qwen/Qwen3-0.6B --local-dir models/Qwen3-0.6B
 python3 tools/checkpoint/safetensors_to_zynfer.py \
   --config models/Qwen3-0.6B/config.json \
-  --weights models/Qwen3-0.6B/model.safetensors \
+  --weights models/Qwen3-0.6B \
   --out models/qwen3-0.6b.zynfer
 ./zig-out/bin/zynfer inspect models/qwen3-0.6b.zynfer
 ```
 
-(The converter handles BF16 via raw Safetensors bytes; NumPy is not required.)
+(`--weights` may be a file or directory of shards. Converter handles BF16
+via raw bytes; load uses mmap when available.)
 
 ## Further experiments
 

@@ -3,16 +3,23 @@
 
 Development-time only. The Zig runtime never imports this module.
 
-Requires: Python 3.10+ only for the converter core. Parses Safetensors
-headers and copies raw tensor bytes (including BF16) without NumPy.
-Optional: `safetensors` is unused; install nothing beyond stdlib for convert.
+Requires: Python 3.10+ only (stdlib). Parses Safetensors headers and copies
+raw tensor bytes (including BF16) without NumPy.
+
+Supports:
+  * single `model.safetensors`
+  * a directory of shards (`*.safetensors`), optionally via
+    `model.safetensors.index.json` weight_map
+  * multiple `--weights` paths
+
+Tensor ids are assigned 1..N in sorted tensor-name order (stable hot-path ids).
 
 Example:
   # Prefer `hf` — `huggingface-cli` is deprecated.
   hf download Qwen/Qwen3-0.6B --local-dir models/Qwen3-0.6B
   python3 tools/checkpoint/safetensors_to_zynfer.py \\
     --config models/Qwen3-0.6B/config.json \\
-    --weights models/Qwen3-0.6B/model.safetensors \\
+    --weights models/Qwen3-0.6B \\
     --out models/qwen3-0.6b.zynfer
 """
 
@@ -73,12 +80,8 @@ def write_meta(cfg: dict) -> bytes:
     )
 
 
-def load_safetensors(path: Path) -> list[tuple[str, int, list[int], bytes]]:
-    """Return (name, dtype_tag, shape, payload_bytes).
-
-    Reads the Safetensors file layout directly so BF16 works without NumPy
-    or ml_dtypes (Qwen3 ships BF16; `safe_open(..., framework=\"np\")` fails).
-    """
+def load_safetensors_file(path: Path) -> list[tuple[str, int, list[int], bytes]]:
+    """Return (name, dtype_tag, shape, payload_bytes) for one file."""
     data = path.read_bytes()
     if len(data) < 8:
         raise SystemExit(f"truncated safetensors file: {path}")
@@ -97,26 +100,75 @@ def load_safetensors(path: Path) -> list[tuple[str, int, list[int], bytes]]:
             raise SystemExit(f"unsupported safetensors dtype {dtype!r} for {name}")
         tag, width = DTYPE_MAP[dtype]
         shape = [int(x) for x in info["shape"]]
-        start, stop = info["data_offsets"]
-        start = int(start)
-        stop = int(stop)
+        start, stop = (int(x) for x in info["data_offsets"])
         abs_start = header_end + start
         abs_stop = header_end + stop
         if abs_stop > len(data) or abs_start < header_end:
-            raise SystemExit(f"bad data_offsets for {name}")
+            raise SystemExit(f"bad data_offsets for {name} in {path}")
         raw = data[abs_start:abs_stop]
         expect = width
         for d in shape:
             expect *= d
         if len(raw) != expect:
             raise SystemExit(
-                f"size mismatch for {name}: got {len(raw)} want {expect} "
-                f"(dtype={dtype} shape={shape})"
+                f"size mismatch for {name} in {path}: got {len(raw)} want {expect}"
             )
         out.append((name, tag, shape, raw))
+    return out
 
-    # Stable order for deterministic artifacts.
-    out.sort(key=lambda t: t[0])
+
+def resolve_weight_paths(weights: list[Path]) -> list[Path]:
+    """Expand files and directories into an ordered list of .safetensors shards."""
+    files: list[Path] = []
+    for w in weights:
+        if w.is_file():
+            if w.suffix != ".safetensors":
+                raise SystemExit(f"expected .safetensors file, got {w}")
+            files.append(w)
+            continue
+        if not w.is_dir():
+            raise SystemExit(f"weights path not found: {w}")
+
+        index = w / "model.safetensors.index.json"
+        if index.is_file():
+            weight_map = json.loads(index.read_text()).get("weight_map", {})
+            shard_names = sorted(set(weight_map.values()))
+            if not shard_names:
+                raise SystemExit(f"empty weight_map in {index}")
+            for name in shard_names:
+                p = w / name
+                if not p.is_file():
+                    raise SystemExit(f"shard listed in index missing: {p}")
+                files.append(p)
+            continue
+
+        shards = sorted(w.glob("*.safetensors"))
+        if not shards:
+            raise SystemExit(f"no .safetensors files in {w}")
+        files.extend(shards)
+
+    # De-dupe while preserving order.
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for f in files:
+        rp = f.resolve()
+        if rp in seen:
+            continue
+        seen.add(rp)
+        unique.append(f)
+    return unique
+
+
+def load_safetensors(weights: list[Path]) -> list[tuple[str, int, list[int], bytes]]:
+    paths = resolve_weight_paths(weights)
+    print(f"loading {len(paths)} safetensors file(s)", file=sys.stderr)
+    merged: dict[str, tuple[str, int, list[int], bytes]] = {}
+    for path in paths:
+        for name, tag, shape, raw in load_safetensors_file(path):
+            if name in merged:
+                raise SystemExit(f"duplicate tensor {name!r} across shards (also in {path})")
+            merged[name] = (name, tag, shape, raw)
+    out = sorted(merged.values(), key=lambda t: t[0])
     return out
 
 
@@ -140,11 +192,12 @@ def build_artifact(meta: bytes, tensors: list[tuple[str, int, list[int], bytes]]
         payload.extend(raw)
         cursor = off + len(raw)
         shape_pad = shape + [0] * (8 - len(shape))
+        tensor_id = i + 1  # stable 1..N by sorted name
         entries.extend(
             struct.pack(
                 "<64sIBB2x8IQQ",
                 pad_name(name),
-                i + 1,
+                tensor_id,
                 tag,
                 len(shape),
                 *shape_pad,
@@ -153,30 +206,21 @@ def build_artifact(meta: bytes, tensors: list[tuple[str, int, list[int], bytes]]
             )
         )
 
-    header = struct.pack(
-        "<4sHBBIIIIIIIxxxxQQ32x",
-        MAGIC,
-        VERSION,
-        ENDIAN,
-        0,
+    hdr = bytearray(HEADER_SIZE)
+    struct.pack_into("<4sHBB", hdr, 0, MAGIC, VERSION, ENDIAN, 0)
+    struct.pack_into(
+        "<IIIIII",
+        hdr,
+        8,
         HEADER_SIZE,
         meta_offset,
         META_SIZE,
         dir_offset,
         dir_bytes,
         len(tensors),
-        0,
-        payload_offset,
-        len(payload),
     )
-    # struct above may not match Zig padding — build header explicitly
-    hdr = bytearray(HEADER_SIZE)
-    struct.pack_into("<4sHBB", hdr, 0, MAGIC, VERSION, ENDIAN, 0)
-    struct.pack_into("<IIIIII", hdr, 8, HEADER_SIZE, meta_offset, META_SIZE, dir_offset, dir_bytes, len(tensors))
     struct.pack_into("<I", hdr, 32, 0)  # reserved0
-    # 4 bytes pad then payload_offset at 40
     struct.pack_into("<QQ", hdr, 40, payload_offset, len(payload))
-    # sha256 at 56
 
     body = bytearray()
     body.extend(hdr)
@@ -186,7 +230,6 @@ def build_artifact(meta: bytes, tensors: list[tuple[str, int, list[int], bytes]]
         body.extend(b"\x00" * (payload_offset - len(body)))
     body.extend(payload)
 
-    # SHA-256 with checksum field zeroed (already zero)
     digest = hashlib.sha256(body).digest()
     body[56:88] = digest
     return bytes(body)
@@ -195,7 +238,13 @@ def build_artifact(meta: bytes, tensors: list[tuple[str, int, list[int], bytes]]
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", type=Path, required=True, help="HF config.json")
-    ap.add_argument("--weights", type=Path, required=True, help="model.safetensors")
+    ap.add_argument(
+        "--weights",
+        type=Path,
+        nargs="+",
+        required=True,
+        help="model.safetensors file(s) and/or a checkpoint directory (shards + optional index.json)",
+    )
     ap.add_argument("--out", type=Path, required=True, help="output .zynfer path")
     args = ap.parse_args()
 
@@ -205,7 +254,10 @@ def main() -> None:
     blob = build_artifact(meta, tensors)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_bytes(blob)
-    print(f"wrote {args.out} ({len(blob)} bytes, {len(tensors)} tensors)", file=sys.stderr)
+    print(
+        f"wrote {args.out} ({len(blob)} bytes, {len(tensors)} tensors, ids 1..{len(tensors)})",
+        file=sys.stderr,
+    )
 
 
 if __name__ == "__main__":

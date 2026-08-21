@@ -275,9 +275,10 @@ fn printStage10(writer: *std.Io.Writer) !void {
     try writer.print("  format:           magic ZYNF v{d}, little-endian, 64-byte payload align\n", .{zynfer.artifact.format_version});
     try writer.print("  meta:             Qwen3-0.6B dims (HF config) in binary Meta\n", .{});
     try writer.print("  integrity:        SHA-256 over file with checksum field zeroed\n", .{});
+    try writer.print("  load:             mmap (posix) with heap fallback; hot path findById\n", .{});
     try writer.print("  Zig API:          artifact.build / validate / Artifact.load*\n", .{});
     try writer.print("  CLI:              inspect PATH; artifact-compile --out PATH\n", .{});
-    try writer.print("  converter:        tools/checkpoint/safetensors_to_zynfer.py\n\n", .{});
+    try writer.print("  converter:        tools/checkpoint/safetensors_to_zynfer.py (single or shards)\n\n", .{});
     try writer.print("Not in Stage 10\n", .{});
     try writer.print("  full Qwen weight conversion in CI (needs HF download)\n", .{});
     try writer.print("  forward pass / logits — Stage 11\n", .{});
@@ -302,6 +303,7 @@ fn runInspect(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, 
     try writer.print("sha256:          {s}\n", .{hex});
     try writer.print("bytes:           {d}\n", .{art.bytes.len});
     try writer.print("payload_bytes:   {d}\n", .{art.header.payload_bytes});
+    try writer.print("storage:         {s}\n", .{if (art.mapped != null) "mmap" else "heap"});
     try writer.print("\nmodel_id:        {s}\n", .{art.meta.modelIdSlice()});
     try writer.print("vocab_size:      {d}\n", .{art.meta.vocab_size});
     try writer.print("hidden_size:     {d}\n", .{art.meta.hidden_size});
