@@ -54,11 +54,12 @@ zynfer stage10
 
 ### Optional: real Qwen3-0.6B weights
 
-`models/` is gitignored. Use the Hugging Face `hf` CLI (not the deprecated
-`huggingface-cli`):
+`models/` is gitignored. Full prerequisites and troubleshooting:
+`tools/checkpoint/README.md`. Use the Hugging Face `hf` CLI (not the
+deprecated `huggingface-cli`):
 
 ```bash
-pip install -U "huggingface_hub[cli]" safetensors numpy
+pip install -U "huggingface_hub[cli]"
 
 hf download Qwen/Qwen3-0.6B --local-dir models/Qwen3-0.6B
 
@@ -67,12 +68,11 @@ python3 tools/checkpoint/safetensors_to_zynfer.py \
   --weights models/Qwen3-0.6B/model.safetensors \
   --out models/qwen3-0.6b.zynfer
 
+zig build -Dhip=off
 ./zig-out/bin/zynfer inspect models/qwen3-0.6b.zynfer
 ```
 
-If the hub ships sharded `*.safetensors` files, point `--weights` at the
-primary shard the converter supports, or merge first — Stage 10’s Zig
-fixture path does not need a download.
+The converter copies raw Safetensors bytes (including BF16) without NumPy.
 
 ## Stage boundary
 

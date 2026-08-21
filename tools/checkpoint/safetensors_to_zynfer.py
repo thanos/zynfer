@@ -3,8 +3,9 @@
 
 Development-time only. The Zig runtime never imports this module.
 
-Requires: Python 3.10+, numpy. Safetensors via `safetensors` package
-(or a raw header parse for single-file checkpoints).
+Requires: Python 3.10+ only for the converter core. Parses Safetensors
+headers and copies raw tensor bytes (including BF16) without NumPy.
+Optional: `safetensors` is unused; install nothing beyond stdlib for convert.
 
 Example:
   # Prefer `hf` — `huggingface-cli` is deprecated.
@@ -73,39 +74,49 @@ def write_meta(cfg: dict) -> bytes:
 
 
 def load_safetensors(path: Path) -> list[tuple[str, int, list[int], bytes]]:
-    """Return (name, dtype_tag, shape, payload_bytes)."""
-    try:
-        from safetensors import safe_open
-    except ImportError as e:
-        raise SystemExit(
-            "install safetensors (pip install safetensors numpy) to convert HF weights"
-        ) from e
+    """Return (name, dtype_tag, shape, payload_bytes).
+
+    Reads the Safetensors file layout directly so BF16 works without NumPy
+    or ml_dtypes (Qwen3 ships BF16; `safe_open(..., framework=\"np\")` fails).
+    """
+    data = path.read_bytes()
+    if len(data) < 8:
+        raise SystemExit(f"truncated safetensors file: {path}")
+    header_len = struct.unpack_from("<Q", data, 0)[0]
+    header_end = 8 + header_len
+    if header_end > len(data):
+        raise SystemExit(f"truncated safetensors header: {path}")
+    header = json.loads(data[8:header_end].decode("utf-8"))
 
     out: list[tuple[str, int, list[int], bytes]] = []
-    with safe_open(str(path), framework="np") as f:
-        for name in f.keys():
-            arr = f.get_tensor(name)
-            # Map numpy dtype → tag
-            import numpy as np
+    for name, info in header.items():
+        if name == "__metadata__":
+            continue
+        dtype = info["dtype"]
+        if dtype not in DTYPE_MAP:
+            raise SystemExit(f"unsupported safetensors dtype {dtype!r} for {name}")
+        tag, width = DTYPE_MAP[dtype]
+        shape = [int(x) for x in info["shape"]]
+        start, stop = info["data_offsets"]
+        start = int(start)
+        stop = int(stop)
+        abs_start = header_end + start
+        abs_stop = header_end + stop
+        if abs_stop > len(data) or abs_start < header_end:
+            raise SystemExit(f"bad data_offsets for {name}")
+        raw = data[abs_start:abs_stop]
+        expect = width
+        for d in shape:
+            expect *= d
+        if len(raw) != expect:
+            raise SystemExit(
+                f"size mismatch for {name}: got {len(raw)} want {expect} "
+                f"(dtype={dtype} shape={shape})"
+            )
+        out.append((name, tag, shape, raw))
 
-            if arr.dtype == np.float32:
-                tag, width = 0, 4
-            elif arr.dtype == np.float16:
-                tag, width = 1, 2
-            else:
-                # bfloat16 may appear as void or ml_dtypes — store raw bytes with BF16 tag if 2-byte
-                if arr.dtype.itemsize == 2:
-                    tag, width = 2, 2
-                else:
-                    raise SystemExit(f"unsupported dtype for {name}: {arr.dtype}")
-            shape = [int(x) for x in arr.shape]
-            raw = arr.tobytes(order="C")
-            expect = width
-            for d in shape:
-                expect *= d
-            if len(raw) != expect:
-                raise SystemExit(f"size mismatch for {name}")
-            out.append((name, tag, shape, raw))
+    # Stable order for deterministic artifacts.
+    out.sort(key=lambda t: t[0])
     return out
 
 

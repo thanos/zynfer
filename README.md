@@ -1072,6 +1072,7 @@ zig build stage10          # .zynfer artifact Stage 10 ledger
 #     --weights models/Qwen3-0.6B/model.safetensors \
 #     --out models/qwen3-0.6b.zynfer
 #   ./zig-out/bin/zynfer inspect models/qwen3-0.6b.zynfer
+#   (converter is BF16-safe; no NumPy required)
 zig build ops-bench        # CPU vs Apple Metal op timings
 zig build block-bench      # tiny-block prefill/decode (path labels in JSON)
 # A/B Stage 6 vs per-op:

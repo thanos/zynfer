@@ -14,12 +14,11 @@ zig build stage10
 
 ### Optional: Hugging Face Qwen3-0.6B → `.zynfer`
 
-Not required for Stage 10 CI. `models/` is gitignored. Use `hf` (the
-`huggingface-cli` entry point is deprecated):
+Not required for Stage 10 CI. Full checklist (Python, `hf`, disk/RAM,
+BF16 notes): **`tools/checkpoint/README.md`**.
 
 ```bash
-pip install -U "huggingface_hub[cli]" safetensors numpy
-
+pip install -U "huggingface_hub[cli]"
 hf download Qwen/Qwen3-0.6B --local-dir models/Qwen3-0.6B
 
 python3 tools/checkpoint/safetensors_to_zynfer.py \
@@ -27,8 +26,10 @@ python3 tools/checkpoint/safetensors_to_zynfer.py \
   --weights models/Qwen3-0.6B/model.safetensors \
   --out models/qwen3-0.6b.zynfer
 
+zig build -Dhip=off
 ./zig-out/bin/zynfer inspect models/qwen3-0.6b.zynfer
 ```
 
-See `docs/artifact-format.md`, `docs/tutorials/10-checkpoint-and-artifact.md`,
-and `bench/results/stage10-dev-laptop.md`.
+Do not use `huggingface-cli` (deprecated). Converter is BF16-safe (raw
+bytes; no NumPy). See `docs/artifact-format.md` and
+`bench/results/stage10-dev-laptop.md`.

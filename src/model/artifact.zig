@@ -320,8 +320,27 @@ pub const Artifact = struct {
     }
 
     pub fn loadFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Artifact {
-        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(512 * 1024 * 1024));
+        var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+        defer file.close(io);
+        const st = try file.stat(io);
+        const size: usize = std.math.cast(usize, st.size) orelse return error.Overflow;
+        // Full Qwen3-0.6B BF16 artifact is ~1.5 GiB; Stage 11 may mmap later.
+        if (size > 4 * 1024 * 1024 * 1024) return error.Overflow;
+
+        const bytes = try allocator.alloc(u8, size);
         errdefer allocator.free(bytes);
+
+        var off: u64 = 0;
+        while (off < size) {
+            const chunk = try file.readPositionalAll(io, bytes[@intCast(off)..], off);
+            if (chunk == 0) break;
+            off += chunk;
+        }
+        if (off != size) {
+            allocator.free(bytes);
+            return error.Truncated;
+        }
+
         return loadOwned(allocator, bytes) catch |err| {
             allocator.free(bytes);
             return err;
