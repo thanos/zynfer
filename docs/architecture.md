@@ -6,7 +6,8 @@ Metal path on macOS, and an AMD HIP probe that will later own RDNA 4
 kernels. Model math must not import Metal or HIP types.
 
 ```text
-Model architecture (fixture: tiny block; not loaded: Qwen3-0.6B)
+Model architecture (fixture: tiny block; Stage 10: `.zynfer` + Qwen3-0.6B meta;
+forward not loaded yet)
         |
         v
 Backend-neutral tensors, KV cache, block schedule
@@ -29,12 +30,14 @@ They are not the same enum.
 
 | Layer | Owner | Language | Notes |
 | --- | --- | --- | --- |
-| CLI | `src/main.zig` | Zig | `env`, `gpu`, `caps`, `backends`, `ops-bench`, `block-bench`, `bench` |
+| CLI | `src/main.zig` | Zig | `env`, `gpu`, `caps`, `inspect`, `artifact-compile`, benches, stage ledgers |
 | Env report | `src/env_report.zig` | Zig | Host/toolchain; HIP optional; Apple compile flag |
 | Backend identity | `src/runtime/backend.zig` | Zig | Kind vs architecture; fallback reasons |
 | Tensors | `src/runtime/tensor.zig` | Zig | Rank ≤ 4, contiguous, overflow-safe byte sizes |
 | KV cache | `src/runtime/kv_cache.zig` | Zig | Host `[n_kv, max_seq, head_dim]`; append/used |
 | Tiny block | `src/model/tiny_block.zig` | Zig | Prefill/decode schedule; no Metal/HIP imports |
+| Artifact | `src/model/artifact.zig` | Zig | `.zynfer` v1 build/validate/load (Stage 10) |
+| Qwen3 dims | `src/model/qwen3.zig` | Zig | HF architecture constants; forward is Stage 11 |
 | CPU oracle | `src/backends/cpu/ops.zig` | Zig | Scalar f32; correctness reference |
 | Apple bridge | `src/backends/apple/bridge.m` | ObjC/ARC | Device, shared buffers, compile, wait |
 | Apple kernels | `src/backends/apple/kernels.metal` | MSL | Naive f32 + simdgroup(+x4) + q8 + Stage 6 permute/kv_append |

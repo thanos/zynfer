@@ -14,6 +14,8 @@ pub const backend = @import("runtime/backend.zig");
 pub const compare = @import("runtime/compare.zig");
 pub const kv_cache = @import("runtime/kv_cache.zig");
 pub const tiny_block = @import("model/tiny_block.zig");
+pub const qwen3 = @import("model/qwen3.zig");
+pub const artifact = @import("model/artifact.zig");
 
 pub const cpu = struct {
     pub const ops = @import("backends/cpu/ops.zig");
@@ -44,6 +46,8 @@ test {
     _ = compare;
     _ = kv_cache;
     _ = tiny_block;
+    _ = qwen3;
+    _ = artifact;
     _ = cpu.ops;
     _ = cpu.accelerate;
     _ = cpu.sme;

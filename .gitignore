@@ -30,3 +30,4 @@ trace/
 bench/results/local/
 /baoulo/
 .tool-versions
+/models/

@@ -325,7 +325,7 @@ Stage 8 ledger: `bench/results/apple-stage8-dev-laptop.md`.
 
 | Item | Lands in |
 | --- | --- |
-| **Qwen loader / artifact** | Stage 10 |
+| **Qwen loader / artifact** | **done (Stage 10)** — `.zynfer` v1; full weights via optional Python converter |
 | **Full Qwen forward + golden logits** | Stage 11 |
 | **Tokenizer / sampling** (real TTFT) | Stage 12 |
 | **Qwen-scale / HIP fusion ledger** | Stage 16 |

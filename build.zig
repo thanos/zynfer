@@ -93,6 +93,14 @@ pub fn build(b: *std.Build) void {
     const stage8_step = b.step("stage8", "Apple Stage 8 hardening ledger");
     stage8_step.dependOn(&stage8_cmd.step);
 
+    const stage10_cmd = b.addRunArtifact(exe);
+    stage10_cmd.step.dependOn(b.getInstallStep());
+    stage10_cmd.addArg("stage10");
+    stage10_cmd.expectStdOutMatch("Stage 10");
+    stage10_cmd.expectExitCode(0);
+    const stage10_step = b.step("stage10", "Checkpoint / .zynfer artifact Stage 10 ledger");
+    stage10_step.dependOn(&stage10_cmd.step);
+
     const ops_bench_cmd = b.addRunArtifact(exe);
     ops_bench_cmd.step.dependOn(b.getInstallStep());
     ops_bench_cmd.addArg("ops-bench");
