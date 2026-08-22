@@ -86,7 +86,7 @@ via raw bytes; load uses mmap when available.)
 
 | Item | Stage |
 | --- | --- |
-| Full Qwen forward + golden logits | **11** — [`docs/stages/11-qwen-forward.md`](../stages/11-qwen-forward.md) |
+| Full Qwen forward + golden logits | **11** — [`docs/stages/11-qwen-forward.md`](../stages/11-qwen-forward.md), tutorial: [`11-qwen-forward-and-golden.md`](11-qwen-forward-and-golden.md) |
 | Tokenizer / sampling / TTFT | **12** |
 | HF download in CI | **Never** — local convert only |
 
@@ -94,3 +94,4 @@ via raw bytes; load uses mmap when available.)
 
 - Add named `tensor_id` constants in `qwen3.zig` for Stage 11 weight binding.
 - Compare fixture vs full Qwen artifact load time (`storage: mmap` vs `heap`).
+- Follow [`11-qwen-forward-and-golden.md`](11-qwen-forward-and-golden.md) for golden validation.

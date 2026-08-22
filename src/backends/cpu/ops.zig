@@ -393,6 +393,23 @@ pub fn headsTokensToTokensHeads(out: Tensor, in: Tensor) OpsError!void {
     }
 }
 
+/// Gather token rows from an embedding table `[vocab, hidden]` into `[tokens, hidden]`.
+pub fn embeddingGather(dst: Tensor, table: Tensor, token_ids: []const u32) OpsError!void {
+    if (table.rank != 2 or dst.rank != 2) return error.InvalidShape;
+    const vocab = table.shape[0];
+    const hidden = table.shape[1];
+    const tokens = token_ids.len;
+    if (dst.shape[0] != tokens or dst.shape[1] != hidden) return error.ShapeMismatch;
+    const tab = try table.f32s();
+    const out = try dst.f32s();
+    for (token_ids, 0..) |tid, t| {
+        if (tid >= vocab) return error.InvalidShape;
+        const src = @as(usize, tid) * hidden;
+        const row = out[t * hidden ..][0..hidden];
+        @memcpy(row, tab[src..][0..hidden]);
+    }
+}
+
 /// Residual SwiGLU used as a tiny end-to-end fixture:
 ///   n = rmsnorm(x, wn)
 ///   h = silu(n @ wg) * (n @ wu)
