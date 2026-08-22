@@ -82,6 +82,25 @@ pub const Tensor = struct {
         return t;
     }
 
+    /// View the last row of a 2-D tensor `[rows, cols]` as `[1, cols]`.
+    pub fn viewLastRow(self: Tensor) TensorError!Tensor {
+        if (self.rank != 2) return error.InvalidShape;
+        const rows = self.shape[0];
+        const cols = self.shape[1];
+        if (rows == 0) return error.InvalidShape;
+        const row_elems = cols;
+        const row_bytes = byteSize(self.dtype, row_elems) catch return error.Overflow;
+        const offset = (rows - 1) * row_bytes;
+        if (offset + row_bytes > self.data.len) return error.InvalidShape;
+        var t = self;
+        t.owns = false;
+        t.rank = 2;
+        t.shape = .{ 1, cols, 0, 0 };
+        t.data = self.data[offset..][0..row_bytes];
+        fillContiguousStrides(&t);
+        return t;
+    }
+
     pub fn numel(self: Tensor) error{Overflow}!usize {
         var n: usize = 1;
         var i: u8 = 0;
@@ -166,4 +185,20 @@ test "viewAs packed prefix does not own storage" {
     try std.testing.expect(!v.owns);
     try std.testing.expectEqual(@as(usize, 2), try v.numel());
     try std.testing.expectEqual(@as(f32, 3), (try v.f32s())[0]);
+}
+
+test "viewLastRow selects final row not prefix" {
+    var t = try Tensor.alloc(std.testing.allocator, .f32, &.{ 3, 2 });
+    defer t.deinit();
+    const xs = try t.f32s();
+    xs[0] = 1;
+    xs[1] = 2;
+    xs[2] = 3;
+    xs[3] = 4;
+    xs[4] = 5;
+    xs[5] = 6;
+    const last = try t.viewLastRow();
+    const ys = try last.f32s();
+    try std.testing.expectEqual(@as(f32, 5), ys[0]);
+    try std.testing.expectEqual(@as(f32, 6), ys[1]);
 }

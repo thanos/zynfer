@@ -25,7 +25,7 @@ when correctness is unresolved.
 | 8 | Attention from scratch | CPU + Metal f32 (`kv_len` ≤ 256 on Metal) |
 | 9 | One complete transformer block | **done as tiny fixture**; not a Qwen block |
 | 10 | Checkpoint inspection and artifact compiler | **done** (`.zynfer` v1 + inspect/load; see `bench/results/stage10-dev-laptop.md`) |
-| 11 | Full Qwen3-0.6B forward pass | not started (absorbs golden logits deferred from Apple-6) |
+| 11 | Full Qwen3-0.6B forward pass | **done** — CPU forward + golden logits ([`docs/stages/11-qwen-forward.md`](stages/11-qwen-forward.md)) |
 | 12 | Tokenizer and sampling | not started (absorbs TTFT/tok/s deferred from Apple-6) |
 | 13 | KV cache | **host layout + Metal-resident for tiny block** |
 | 14 | Prefill vs decode | **done for tiny block** |
@@ -82,7 +82,7 @@ Apple Stages 0–8 are **closed**. Remaining work is curriculum Stages
 | Order | Stage | Goal |
 | --- | --- | --- |
 | 1 | **10** | **done** — checkpoint inspect + `.zynfer` artifact compiler / loader |
-| 2 | **11** | Full Qwen3-0.6B forward + golden logits (CPU first) — [`docs/stages/11-qwen-forward.md`](stages/11-qwen-forward.md) |
+| 2 | **11** | **done** — Qwen3 forward + golden logits (CPU; mini CI fixture) — [`docs/stages/11-qwen-forward.md`](stages/11-qwen-forward.md) |
 | 3 | **12** | Tokenizer + sampling → real TTFT / tok/s / ITL |
 
 Stage 11 owns **forward + golden logits** only. Tokenizer, sampling, and

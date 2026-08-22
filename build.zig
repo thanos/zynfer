@@ -101,6 +101,14 @@ pub fn build(b: *std.Build) void {
     const stage10_step = b.step("stage10", "Checkpoint / .zynfer artifact Stage 10 ledger");
     stage10_step.dependOn(&stage10_cmd.step);
 
+    const stage11_cmd = b.addRunArtifact(exe);
+    stage11_cmd.step.dependOn(b.getInstallStep());
+    stage11_cmd.addArg("stage11");
+    stage11_cmd.expectStdOutMatch("Stage 11");
+    stage11_cmd.expectExitCode(0);
+    const stage11_step = b.step("stage11", "Qwen forward + golden logits Stage 11 ledger");
+    stage11_step.dependOn(&stage11_cmd.step);
+
     const ops_bench_cmd = b.addRunArtifact(exe);
     ops_bench_cmd.step.dependOn(b.getInstallStep());
     ops_bench_cmd.addArg("ops-bench");
@@ -258,6 +266,31 @@ pub fn build(b: *std.Build) void {
     stage8_ok.expectStdOutMatch("REJECT");
     stage8_ok.expectExitCode(0);
     integration_step.dependOn(&stage8_ok.step);
+
+    const stage11_ok = b.addRunArtifact(exe);
+    stage11_ok.addArg("stage11");
+    stage11_ok.expectStdOutMatch("Stage 11");
+    stage11_ok.expectExitCode(0);
+    integration_step.dependOn(&stage11_ok.step);
+
+    const forward_mini_compile = b.addRunArtifact(exe);
+    forward_mini_compile.step.dependOn(b.getInstallStep());
+    forward_mini_compile.addArg("artifact-compile");
+    forward_mini_compile.addArg("--mini");
+    forward_mini_compile.addArg("--out");
+    forward_mini_compile.addArg("zig-out/stage11-mini.zynfer");
+    forward_mini_compile.expectExitCode(0);
+
+    const forward_mini = b.addRunArtifact(exe);
+    forward_mini.step.dependOn(b.getInstallStep());
+    forward_mini.addArg("forward-golden");
+    forward_mini.addArg("zig-out/stage11-mini.zynfer");
+    forward_mini.addArg("--tokens");
+    forward_mini.addArg("2,3");
+    forward_mini.expectStdOutMatch("forward-golden");
+    forward_mini.expectExitCode(0);
+    forward_mini.step.dependOn(&forward_mini_compile.step);
+    integration_step.dependOn(&forward_mini.step);
 
     const docs_lib = b.addLibrary(.{
         .name = "zynfer",

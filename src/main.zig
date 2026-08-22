@@ -12,8 +12,10 @@ const usage =
     \\  zynfer stage7       SME / Core ML Stage 7 probe + retain/reject ledger
     \\  zynfer stage8       Hardening leftovers + retain/reject ledger
     \\  zynfer stage10      Checkpoint / .zynfer artifact Stage 10 ledger
+    \\  zynfer stage11      Qwen forward + golden logits Stage 11 ledger
     \\  zynfer inspect PATH Validate and print a .zynfer artifact
-    \\  zynfer artifact-compile [--out PATH]  Write Stage 10 fixture .zynfer
+    \\  zynfer artifact-compile [--out PATH] [--mini]  Write fixture .zynfer
+    \\  zynfer forward-golden ARTIFACT [--tokens IDS] [--golden PATH] [--dump DIR]
     \\  zynfer backends     List selectable backends
     \\  zynfer ops-bench    CPU vs Apple op microbenchmarks
     \\  zynfer block-bench  Tiny-block prefill/decode timings
@@ -46,6 +48,10 @@ pub fn main(init: std.process.Init) !void {
     var have_command = false;
     var forced_backend: ?[]const u8 = null;
     var out_path: ?[]const u8 = null;
+    var tokens_arg: ?[]const u8 = null;
+    var golden_path: ?[]const u8 = null;
+    var dump_dir: ?[]const u8 = null;
+    var artifact_mini = false;
     var positionals: [8][]const u8 = undefined;
     var n_pos: usize = 0;
     while (args_it.next()) |arg| {
@@ -63,6 +69,29 @@ pub fn main(init: std.process.Init) !void {
             };
         } else if (std.mem.startsWith(u8, arg, "--out=")) {
             out_path = arg["--out=".len..];
+        } else if (std.mem.eql(u8, arg, "--mini")) {
+            artifact_mini = true;
+        } else if (std.mem.eql(u8, arg, "--tokens")) {
+            tokens_arg = args_it.next() orelse {
+                std.debug.print("missing value for --tokens\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.startsWith(u8, arg, "--tokens=")) {
+            tokens_arg = arg["--tokens=".len..];
+        } else if (std.mem.eql(u8, arg, "--golden")) {
+            golden_path = args_it.next() orelse {
+                std.debug.print("missing value for --golden\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.startsWith(u8, arg, "--golden=")) {
+            golden_path = arg["--golden=".len..];
+        } else if (std.mem.eql(u8, arg, "--dump")) {
+            dump_dir = args_it.next() orelse {
+                std.debug.print("missing value for --dump\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.startsWith(u8, arg, "--dump=")) {
+            dump_dir = arg["--dump=".len..];
         } else if (!have_command and !std.mem.startsWith(u8, arg, "-")) {
             command = arg;
             have_command = true;
@@ -109,6 +138,8 @@ pub fn main(init: std.process.Init) !void {
         try printStage8(writer);
     } else if (std.mem.eql(u8, command, "stage10")) {
         try printStage10(writer);
+    } else if (std.mem.eql(u8, command, "stage11")) {
+        try printStage11(writer);
     } else if (std.mem.eql(u8, command, "inspect")) {
         if (n_pos < 1) {
             std.debug.print("usage: zynfer inspect PATH.zynfer\n", .{});
@@ -116,8 +147,14 @@ pub fn main(init: std.process.Init) !void {
         }
         try runInspect(allocator, io, writer, positionals[0]);
     } else if (std.mem.eql(u8, command, "artifact-compile")) {
-        const path = out_path orelse (if (n_pos >= 1) positionals[0] else "stage10-fixture.zynfer");
-        try runArtifactCompile(allocator, io, writer, path);
+        const path = out_path orelse (if (n_pos >= 1) positionals[0] else if (artifact_mini) "stage11-mini.zynfer" else "stage10-fixture.zynfer");
+        try runArtifactCompile(allocator, io, writer, path, artifact_mini);
+    } else if (std.mem.eql(u8, command, "forward-golden")) {
+        if (n_pos < 1) {
+            std.debug.print("usage: zynfer forward-golden ARTIFACT.zynfer [--tokens 1,2,3] [--golden PATH] [--dump DIR]\n", .{});
+            std.process.exit(2);
+        }
+        try runForwardGolden(allocator, io, writer, positionals[0], tokens_arg, golden_path, dump_dir);
     } else if (std.mem.eql(u8, command, "backends")) {
         try printBackends(writer);
     } else if (std.mem.eql(u8, command, "ops-bench")) {
@@ -287,6 +324,25 @@ fn printStage10(writer: *std.Io.Writer) !void {
     try writer.print("See docs/artifact-format.md and bench/results/stage10-dev-laptop.md\n", .{});
 }
 
+fn printStage11(writer: *std.Io.Writer) !void {
+    try writer.print("zynfer Stage 11 — Qwen3 forward + golden logits (CPU)\n", .{});
+    try writer.print("====================================================\n\n", .{});
+    try writer.print("Done\n", .{});
+    try writer.print("  forward:          embed → {d} blocks → norm → lm_head\n", .{zynfer.qwen3.qwen3_0_6b.num_layers});
+    try writer.print("  Qwen3 extras:     QK-norm, GQA, SwiGLU, RoPE (theta=1e6)\n", .{});
+    try writer.print("  weights:          BF16→F32 at load; HF linear transpose\n", .{});
+    try writer.print("  CLI:              forward-golden ARTIFACT [--tokens IDS] [--golden PATH] [--dump DIR]\n", .{});
+    try writer.print("  golden (local):   python3 tools/fixtures/gen_golden_logits.py → --golden ref_logits.f32\n", .{});
+    try writer.print("  debug:            --dump DIR + tools/fixtures/ref_forward_numpy.py\n", .{});
+    try writer.print("  CI fixture:       artifact-compile --mini → stage11-mini.zynfer\n", .{});
+    try writer.print("  tests:            mini artifact forward + determinism\n\n", .{});
+    try writer.print("Not in Stage 11\n", .{});
+    try writer.print("  tokenizer / sampling / TTFT — Stage 12\n", .{});
+    try writer.print("  Metal Qwen path — after CPU golden matches\n", .{});
+    try writer.print("  HF download in CI — never\n\n", .{});
+    try writer.print("See docs/stages/11-qwen-forward.md\n", .{});
+}
+
 fn runInspect(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, path: []const u8) !void {
     var art = zynfer.artifact.Artifact.loadFile(allocator, io, path) catch |err| {
         std.debug.print("inspect failed ({s}): {s}\n", .{ path, @errorName(err) });
@@ -333,8 +389,11 @@ fn runInspect(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, 
     }
 }
 
-fn runArtifactCompile(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, path: []const u8) !void {
-    const bytes = try zynfer.artifact.buildStage10Fixture(allocator);
+fn runArtifactCompile(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, path: []const u8, mini: bool) !void {
+    const bytes = if (mini)
+        try zynfer.qwen_forward.buildMiniArtifact(allocator)
+    else
+        try zynfer.artifact.buildStage10Fixture(allocator);
     defer allocator.free(bytes);
 
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
@@ -348,6 +407,128 @@ fn runArtifactCompile(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.
         hex,
         v.header.tensor_count,
     });
+}
+
+fn runForwardGolden(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    writer: *std.Io.Writer,
+    artifact_path: []const u8,
+    tokens_arg: ?[]const u8,
+    golden_path: ?[]const u8,
+    dump_dir: ?[]const u8,
+) !void {
+    var art = zynfer.artifact.Artifact.loadFile(allocator, io, artifact_path) catch |err| {
+        std.debug.print("forward-golden: load failed ({s}): {s}\n", .{ artifact_path, @errorName(err) });
+        std.process.exit(2);
+    };
+    defer art.deinit();
+
+    const arch = try art.meta.toArch();
+    var token_list: std.ArrayList(u32) = .empty;
+    defer token_list.deinit(allocator);
+
+    if (tokens_arg) |ts| {
+        try parseTokenIds(allocator, &token_list, ts);
+    } else {
+        try token_list.append(allocator, arch.bos_token_id);
+        try token_list.append(allocator, 2);
+        try token_list.append(allocator, 3);
+    }
+
+    var sess = try zynfer.qwen_forward.Session.init(allocator, &art, arch, token_list.items.len);
+    defer sess.deinit();
+
+    const logits = try allocator.alloc(f32, arch.vocab_size);
+    defer allocator.free(logits);
+
+    const DumpCtx = struct {
+        dir: []const u8,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+    };
+
+    var dump_ctx: DumpCtx = undefined;
+    const dump_hook: ?zynfer.qwen_forward.DumpHook = if (dump_dir) |dir| blk: {
+        dump_ctx = .{ .dir = dir, .io = io, .allocator = allocator };
+        break :blk dumpWriteF32;
+    } else null;
+
+    try sess.prefillLastLogitsDump(
+        token_list.items,
+        logits,
+        dump_hook,
+        if (dump_hook != null) @ptrCast(&dump_ctx) else null,
+    );
+
+    if (golden_path) |gpath| {
+        const golden_bytes = std.Io.Dir.cwd().readFileAlloc(io, gpath, allocator, .limited(512 * 1024 * 1024)) catch |err| {
+            if (err == error.FileNotFound) {
+                std.debug.print(
+                    "forward-golden: golden file not found ({s})\n",
+                    .{gpath},
+                );
+                std.debug.print(
+                    "  generate with: python3 tools/fixtures/gen_golden_logits.py --tokens=151643,2,3 --out {s}\n",
+                    .{gpath},
+                );
+                std.debug.print(
+                    "  (use the same --tokens as zynfer forward-golden)\n",
+                    .{},
+                );
+            } else {
+                std.debug.print("forward-golden: golden read failed ({s}): {s}\n", .{ gpath, @errorName(err) });
+            }
+            std.process.exit(2);
+        };
+        defer allocator.free(golden_bytes);
+        if (golden_bytes.len != logits.len * 4) {
+            std.debug.print("forward-golden: golden size mismatch (expected {d} bytes)\n", .{logits.len * 4});
+            std.process.exit(2);
+        }
+        const expected = @as([*]align(4) const f32, @ptrCast(@alignCast(golden_bytes.ptr)))[0..logits.len];
+        try zynfer.compare.expectClose(expected, logits, 1e-3, 1e-2);
+        try writer.print("golden OK ({s}, vocab={d})\n", .{ gpath, arch.vocab_size });
+    }
+
+    var top: [8]zynfer.qwen_forward.TopK = undefined;
+    zynfer.qwen_forward.topK(logits, 8, &top);
+
+    try writer.print("forward-golden: {s}\n", .{artifact_path});
+    try writer.print("tokens: {d}\n", .{token_list.items.len});
+    try writer.print("top logits (last token):\n", .{});
+    for (top) |entry| {
+        if (entry.logit == -std.math.inf(f32)) break;
+        try writer.print("  id={d} logit={d:.6}\n", .{ entry.id, entry.logit });
+    }
+    try writer.print("\n", .{});
+}
+
+fn dumpWriteF32(ctx: ?*anyopaque, name: []const u8, data: []const f32) void {
+    const c: *struct {
+        dir: []const u8,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+    } = @ptrCast(@alignCast(ctx.?));
+    var path_buf: [512]u8 = undefined;
+    const rel = std.fmt.bufPrint(&path_buf, "{s}/{s}.f32", .{ c.dir, name }) catch return;
+    const bytes = std.mem.sliceAsBytes(data);
+    std.Io.Dir.cwd().writeFile(c.io, .{ .sub_path = rel, .data = bytes }) catch {
+        std.debug.print("forward-golden: dump write failed ({s})\n", .{rel});
+        return;
+    };
+    std.debug.print("dump: {s} ({d} f32)\n", .{ rel, data.len });
+}
+
+fn parseTokenIds(allocator: std.mem.Allocator, out: *std.ArrayList(u32), text: []const u8) !void {
+    var parts = std.mem.splitScalar(u8, text, ',');
+    while (parts.next()) |part| {
+        const trimmed = std.mem.trim(u8, part, &.{ ' ', '\t' });
+        if (trimmed.len == 0) continue;
+        const id = try std.fmt.parseInt(u32, trimmed, 10);
+        try out.append(allocator, id);
+    }
+    if (out.items.len == 0) return error.InvalidShape;
 }
 
 fn printCaps(writer: *std.Io.Writer, forced: ?[]const u8) !void {

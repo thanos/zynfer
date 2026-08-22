@@ -20,7 +20,11 @@ The project is also educational. Every major subsystem is developed in stages, b
 
 **v0.1.0 — Apple Metal tiny-block backend (Stages 0–8).**
 **Stage 10 — `.zynfer` artifact inspect/load is done** (see `docs/stages/10-checkpoint-artifact.md`).
-**Stage 11 — Qwen forward + golden logits is next** (see `docs/stages/11-qwen-forward.md`).
+**Stage 11 — Qwen forward + golden logits is done (CPU)** — full 28-layer
+prefill, last-token logits vs PyTorch golden on local weights; mini fixture in
+CI. Workflow: [`docs/stages/11-qwen-forward.md`](docs/stages/11-qwen-forward.md),
+fixtures: [`tools/fixtures/README.md`](tools/fixtures/README.md).
+**Stage 12 — tokenizer + sampling is next.**
 
 The Zig repository, HIP device enumeration (when ROCm is present),
 environment report, CPU f32 reference ops, Metal kernels, a tiny
@@ -32,8 +36,8 @@ inference paths. Stage 8 hardens the path (`kv_len`≤256, signposts,
 peak RSS, stress + dual-`Gpu` concurrency) and rejects ICB/fp16/extra
 tiny-block fusions with documented reasons.
 
-**Not done yet:** full Qwen3-0.6B forward (Stage 11), tokenizer /
-sampling / vocabulary TTFT (Stage 12). Stage 10 provides the loader only.
+**Not done yet:** tokenizer / sampling / vocabulary TTFT (Stage 12).
+Stage 10–11 provide loader + CPU forward; text generation comes in Stage 12.
 HF weight download is **not** run in CI — local/`tools/checkpoint/` only.
 
 On a Mac, `zig build test` differential-checks Metal against CPU, including
