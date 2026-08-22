@@ -5,6 +5,7 @@
 //! in `tools/checkpoint/` (Python) for development-time conversion.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const dtype_mod = @import("../runtime/dtype.zig");
 const qwen3 = @import("qwen3.zig");
 
@@ -27,6 +28,7 @@ pub const Error = error{
     BadAlignment,
     ChecksumMismatch,
     DuplicateTensor,
+    DuplicateTensorId,
     TensorNotFound,
     ShapeMismatch,
     Overflow,
@@ -34,6 +36,7 @@ pub const Error = error{
     InvalidDtype,
     InvalidRank,
     OutOfMemory,
+    MemoryMappingNotSupported,
 };
 
 pub const Header = extern struct {
@@ -129,7 +132,8 @@ pub const Meta = extern struct {
 
 pub const TensorEntry = extern struct {
     name: [64]u8,
-    /// Stable numeric id for hot path (0 = unset / name-only).
+    /// Stable numeric id for the hot path (non-zero; converter uses 1..N
+    /// in sorted name order). Prefer `Artifact.findById` over name lookup.
     tensor_id: u32,
     dtype: u8,
     rank: u8,
@@ -229,7 +233,7 @@ pub fn build(allocator: std.mem.Allocator, meta: Meta, tensors: []const TensorSp
         const aligned_off = alignUp(payload_cursor, payload_align);
         var ent = std.mem.zeroes(TensorEntry);
         try writeName(&ent.name, t.name);
-        ent.tensor_id = t.tensor_id;
+        ent.tensor_id = if (t.tensor_id != 0) t.tensor_id else @as(u32, @intCast(i + 1));
         ent.dtype = dtypeToTag(t.dtype);
         ent.rank = @intCast(rank);
         ent.shape = shape_buf;
@@ -240,13 +244,16 @@ pub fn build(allocator: std.mem.Allocator, meta: Meta, tensors: []const TensorSp
         total_payload = payload_cursor;
     }
 
-    // Duplicate name check.
+    // Duplicate name / id checks.
     var i: usize = 0;
     while (i < entries.len) : (i += 1) {
         var j: usize = i + 1;
         while (j < entries.len) : (j += 1) {
             if (std.mem.eql(u8, entries[i].nameSlice(), entries[j].nameSlice())) {
                 return error.DuplicateTensor;
+            }
+            if (entries[i].tensor_id == entries[j].tensor_id) {
+                return error.DuplicateTensorId;
             }
         }
     }
@@ -287,18 +294,50 @@ pub fn build(allocator: std.mem.Allocator, meta: Meta, tensors: []const TensorSp
     return out;
 }
 
-/// Loaded artifact owning the file bytes.
+/// Loaded artifact. Prefer `findById` / `tensorBytesById` on the hot path;
+/// name lookup is for inspect/debug.
 pub const Artifact = struct {
-    bytes: []u8,
+    /// File image: heap-owned or mmap view.
+    bytes: []const u8,
     allocator: std.mem.Allocator,
     header: Header,
     meta: Meta,
     entries: []TensorEntry,
+    /// `id_to_index[tensor_id] = entry index`, or `invalid_index` if unused.
+    id_to_index: []u32,
+    /// When set, `bytes` is an mmap; deinit munmaps. Otherwise heap-owned if `heap_owned`.
+    mapped: ?[]align(std.heap.page_size_min) const u8 = null,
+    heap_owned: bool = false,
+
+    pub const invalid_index: u32 = std.math.maxInt(u32);
 
     pub fn deinit(self: *Artifact) void {
-        self.allocator.free(self.bytes);
+        if (self.mapped) |m| {
+            std.posix.munmap(@constCast(m));
+        } else if (self.heap_owned) {
+            self.allocator.free(@constCast(self.bytes));
+        }
         self.allocator.free(self.entries);
+        self.allocator.free(self.id_to_index);
         self.* = undefined;
+    }
+
+    fn buildIdIndex(allocator: std.mem.Allocator, entries: []const TensorEntry) Error![]u32 {
+        var max_id: u32 = 0;
+        for (entries) |e| {
+            if (e.tensor_id == 0) return error.InvalidName;
+            max_id = @max(max_id, e.tensor_id);
+        }
+        const table = try allocator.alloc(u32, max_id + 1);
+        @memset(table, invalid_index);
+        for (entries, 0..) |e, i| {
+            if (table[e.tensor_id] != invalid_index) {
+                allocator.free(table);
+                return error.DuplicateTensorId;
+            }
+            table[e.tensor_id] = @intCast(i);
+        }
+        return table;
     }
 
     pub fn loadOwned(allocator: std.mem.Allocator, bytes: []u8) Error!Artifact {
@@ -310,55 +349,133 @@ pub const Artifact = struct {
             const src = std.mem.bytesAsSlice(TensorEntry, dir);
             @memcpy(entries, src);
         }
+        const id_to_index = try buildIdIndex(allocator, entries);
         return .{
             .bytes = bytes,
             .allocator = allocator,
             .header = validated.header,
             .meta = validated.meta,
             .entries = entries,
+            .id_to_index = id_to_index,
+            .mapped = null,
+            .heap_owned = true,
         };
     }
 
+    fn loadFromBytesView(
+        allocator: std.mem.Allocator,
+        bytes: []const u8,
+        mapped: ?[]align(std.heap.page_size_min) const u8,
+        heap_owned: bool,
+    ) Error!Artifact {
+        const validated = try validate(bytes);
+        const entries = try allocator.alloc(TensorEntry, validated.header.tensor_count);
+        errdefer allocator.free(entries);
+        if (validated.header.tensor_count > 0) {
+            const dir = bytes[validated.header.dir_offset..][0..validated.header.dir_bytes];
+            const src = std.mem.bytesAsSlice(TensorEntry, dir);
+            @memcpy(entries, src);
+        }
+        const id_to_index = try buildIdIndex(allocator, entries);
+        return .{
+            .bytes = bytes,
+            .allocator = allocator,
+            .header = validated.header,
+            .meta = validated.meta,
+            .entries = entries,
+            .id_to_index = id_to_index,
+            .mapped = mapped,
+            .heap_owned = heap_owned,
+        };
+    }
+
+    /// Prefer mmap (read-only, private). Falls back to a heap copy when mmap is
+    /// unavailable. Validates SHA-256 on the mapped/read bytes.
     pub fn loadFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Artifact {
         var file = try std.Io.Dir.cwd().openFile(io, path, .{});
         defer file.close(io);
         const st = try file.stat(io);
         const size: usize = std.math.cast(usize, st.size) orelse return error.Overflow;
-        // Full Qwen3-0.6B BF16 artifact is ~1.5 GiB; Stage 11 may mmap later.
         if (size > 4 * 1024 * 1024 * 1024) return error.Overflow;
+        if (size == 0) return error.Truncated;
+
+        if (canMmap()) blk: {
+            const page = std.heap.pageSize();
+            const map_len = std.mem.alignForward(usize, size, page);
+            const mapped_full = std.posix.mmap(
+                null,
+                map_len,
+                .{ .READ = true },
+                .{ .TYPE = .PRIVATE },
+                file.handle,
+                0,
+            ) catch break :blk;
+            const view = mapped_full[0..size];
+            return loadFromBytesView(allocator, view, mapped_full, false) catch |err| {
+                std.posix.munmap(mapped_full);
+                return err;
+            };
+        }
 
         const bytes = try allocator.alloc(u8, size);
         errdefer allocator.free(bytes);
-
         var off: u64 = 0;
         while (off < size) {
             const chunk = try file.readPositionalAll(io, bytes[@intCast(off)..], off);
             if (chunk == 0) break;
             off += chunk;
         }
-        if (off != size) {
-            allocator.free(bytes);
-            return error.Truncated;
-        }
-
-        return loadOwned(allocator, bytes) catch |err| {
+        if (off != size) return error.Truncated;
+        return loadFromBytesView(allocator, bytes, null, true) catch |err| {
             allocator.free(bytes);
             return err;
         };
     }
 
-    pub fn tensorBytes(self: *const Artifact, name: []const u8) Error![]const u8 {
-        const ent = try self.find(name);
+    pub fn canMmap() bool {
+        return switch (builtin.os.tag) {
+            .linux, .macos, .ios, .freebsd, .openbsd, .netbsd, .dragonfly => true,
+            else => false,
+        };
+    }
+
+    fn bytesFor(self: *const Artifact, ent: *const TensorEntry) Error![]const u8 {
         const abs = self.header.payload_offset + ent.offset;
         if (abs + ent.nbytes > self.bytes.len) return error.Truncated;
         return self.bytes[abs..][0..ent.nbytes];
     }
 
-    pub fn find(self: *const Artifact, name: []const u8) Error!*const TensorEntry {
+    /// Hot-path lookup by stable numeric id.
+    pub fn findById(self: *const Artifact, tensor_id: u32) Error!*const TensorEntry {
+        if (tensor_id >= self.id_to_index.len) return error.TensorNotFound;
+        const idx = self.id_to_index[tensor_id];
+        if (idx == invalid_index) return error.TensorNotFound;
+        return &self.entries[idx];
+    }
+
+    pub fn tensorBytesById(self: *const Artifact, tensor_id: u32) Error![]const u8 {
+        return self.bytesFor(try self.findById(tensor_id));
+    }
+
+    /// Debug / inspect: lookup by Safetensors-style name.
+    pub fn findByName(self: *const Artifact, name: []const u8) Error!*const TensorEntry {
         for (self.entries) |*e| {
             if (std.mem.eql(u8, e.nameSlice(), name)) return e;
         }
         return error.TensorNotFound;
+    }
+
+    pub fn tensorBytesByName(self: *const Artifact, name: []const u8) Error![]const u8 {
+        return self.bytesFor(try self.findByName(name));
+    }
+
+    /// Deprecated alias — prefer `findByName` for clarity; hot path uses `findById`.
+    pub fn find(self: *const Artifact, name: []const u8) Error!*const TensorEntry {
+        return self.findByName(name);
+    }
+
+    pub fn tensorBytes(self: *const Artifact, name: []const u8) Error![]const u8 {
+        return self.tensorBytesByName(name);
     }
 };
 
@@ -399,8 +516,15 @@ pub fn validate(bytes: []const u8) Error!Validated {
             if (e.rank == 0 or e.rank > max_rank) return error.InvalidRank;
             _ = try e.dtypeTag();
             if (e.nameSlice().len == 0) return error.InvalidName;
+            if (e.tensor_id == 0) return error.InvalidName;
             if (e.offset + e.nbytes > header.payload_bytes) return error.Truncated;
             if (e.offset % payload_align != 0) return error.BadAlignment;
+        }
+        // Duplicate ids among directory entries.
+        for (entries, 0..) |a, ai| {
+            for (entries[ai + 1 ..]) |b| {
+                if (a.tensor_id == b.tensor_id) return error.DuplicateTensorId;
+            }
         }
     }
 
@@ -455,15 +579,20 @@ test "artifact round-trip validates and loads tensors" {
     var art = try Artifact.loadOwned(gpa, owned);
     defer art.deinit();
 
-    const emb = try art.tensorBytes("fixture.embed");
+    const emb = try art.tensorBytesById(1);
     try std.testing.expectEqual(@as(usize, 32), emb.len);
     const as_f32 = std.mem.bytesAsSlice(f32, emb);
     try std.testing.expectEqual(@as(f32, 0.1), as_f32[0]);
     try std.testing.expectEqual(@as(f32, 0.8), as_f32[7]);
 
-    const head = try art.find("fixture.lm_head");
-    try std.testing.expectEqual(@as(u32, 2), head.tensor_id);
-    try std.testing.expectError(error.TensorNotFound, art.find("missing"));
+    const head = try art.findById(2);
+    try std.testing.expectEqualStrings("fixture.lm_head", head.nameSlice());
+    try std.testing.expectError(error.TensorNotFound, art.findById(99));
+    try std.testing.expectError(error.TensorNotFound, art.findByName("missing"));
+
+    // Name lookup remains for inspect/debug.
+    const emb_by_name = try art.tensorBytesByName("fixture.embed");
+    try std.testing.expectEqual(emb.ptr, emb_by_name.ptr);
 }
 
 test "corrupt checksum is rejected" {
@@ -485,4 +614,22 @@ test "bad magic is rejected" {
     mut[0] = 'X';
     // Fix checksum so we hit magic first... magic is checked before checksum.
     try std.testing.expectError(error.InvalidMagic, validate(mut));
+}
+
+test "loadFile mmap round-trip" {
+    if (comptime !Artifact.canMmap()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const bytes = try buildStage10Fixture(gpa);
+    defer gpa.free(bytes);
+
+    const path = "zig-out/stage10-mmap-test.zynfer";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
+
+    var art = try Artifact.loadFile(gpa, io, path);
+    defer art.deinit();
+    try std.testing.expect(art.mapped != null);
+    try std.testing.expect(!art.heap_owned);
+    const emb = try art.tensorBytesById(1);
+    try std.testing.expectEqual(@as(f32, 0.1), std.mem.bytesAsSlice(f32, emb)[0]);
 }

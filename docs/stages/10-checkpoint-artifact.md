@@ -23,13 +23,18 @@ hf download Qwen/Qwen3-0.6B --local-dir models/Qwen3-0.6B
 
 python3 tools/checkpoint/safetensors_to_zynfer.py \
   --config models/Qwen3-0.6B/config.json \
-  --weights models/Qwen3-0.6B/model.safetensors \
+  --weights models/Qwen3-0.6B \
   --out models/qwen3-0.6b.zynfer
 
 zig build -Dhip=off
 ./zig-out/bin/zynfer inspect models/qwen3-0.6b.zynfer
 ```
 
-Do not use `huggingface-cli` (deprecated). Converter is BF16-safe (raw
-bytes; no NumPy). See `docs/artifact-format.md` and
-`bench/results/stage10-dev-laptop.md`.
+`--weights` accepts a file, a directory (shards + optional
+`model.safetensors.index.json`), or multiple shard paths. See
+`tools/checkpoint/README.md`.
+
+Zig `Artifact.loadFile` uses **mmap** when available (`storage: mmap` in
+`inspect`). Hot path: `findById` / `tensorBytesById` (ids 1..N sorted by
+name). Names remain for inspect/debug.
+

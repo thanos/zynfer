@@ -65,15 +65,26 @@ hf download Qwen/Qwen3-0.6B --local-dir models/Qwen3-0.6B
 
 python3 tools/checkpoint/safetensors_to_zynfer.py \
   --config models/Qwen3-0.6B/config.json \
-  --weights models/Qwen3-0.6B/model.safetensors \
+  --weights models/Qwen3-0.6B \
   --out models/qwen3-0.6b.zynfer
 
 zig build -Dhip=off
 ./zig-out/bin/zynfer inspect models/qwen3-0.6b.zynfer
 ```
 
-The converter copies raw Safetensors bytes (including BF16) without NumPy.
+`--weights` may be a file, a directory (shards / `model.safetensors.index.json`),
+or multiple shard paths. The converter copies raw Safetensors bytes
+(including BF16) without NumPy.
 
-## Stage boundary
+### Tensor ids
 
-Stage 10: validate + load. Stage 11: forward using loaded tensors.
+Directory entries carry a stable `tensor_id` (`u32`, non-zero). The converter
+assigns **1..N in sorted tensor-name order**. Zig hot path should use
+`Artifact.findById` / `tensorBytesById`; `findByName` is for inspect/debug.
+
+### Loading
+
+`Artifact.loadFile` memory-maps the file (read-only, `MAP_PRIVATE`) on
+POSIX hosts and falls back to a heap copy otherwise. `inspect` prints
+`storage: mmap` or `heap`.
+

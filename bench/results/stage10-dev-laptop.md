@@ -21,8 +21,8 @@ Deterministic Zig fixture → `.zynfer` → validate + load tensors. Passes.
 - Fixture embeds Qwen3-0.6B **metadata** and two tiny f32 tensors — not
   full weights.
 - Optional full checkpoint: see **`tools/checkpoint/README.md`**
-  (`hf download` → converter → `zynfer inspect`). Converter is BF16-safe;
-  `huggingface-cli` is deprecated.
-- Python Safetensors converter is optional for local HF trees; CI does not
-  download checkpoints.
+  (`hf download` → converter → `zynfer inspect`). Converter is BF16-safe
+  and accepts single-file or sharded Safetensors; `huggingface-cli` is
+  deprecated.
+- Load path: mmap with heap fallback; hot path `findById`.
 - Next: Stage 11 full forward + golden logits.
