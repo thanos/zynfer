@@ -65,7 +65,7 @@ pub const Session = struct {
             .hidden_a = try Tensor.alloc(allocator, .f32, &.{ max_seq, hidden }),
             .hidden_b = try Tensor.alloc(allocator, .f32, &.{ max_seq, hidden }),
             .normed = try Tensor.alloc(allocator, .f32, &.{ max_seq, hidden }),
-            .logits = try Tensor.alloc(allocator, .f32, &.{ vocab }),
+            .logits = try Tensor.alloc(allocator, .f32, &.{vocab}),
             .allocator = allocator,
         };
     }
@@ -147,7 +147,7 @@ pub const Session = struct {
         const normed_row = try self.normed.viewAs(&.{ 1, hidden });
         try cpu.rmsNorm(normed_row, last_row, self.weights.final_norm, self.arch.rms_norm_eps);
 
-        const normed_only = try normed_row.viewAs(&.{ hidden });
+        const normed_only = try normed_row.viewAs(&.{hidden});
         dump(hook, hook_ctx, "normed", try normed_only.f32s());
         if (self.weights.lm_head_tied) {
             try lmHeadTied(logits_out, try normed_only.f32s(), self.weights.embed);

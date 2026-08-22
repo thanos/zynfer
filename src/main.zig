@@ -486,7 +486,7 @@ fn runForwardGolden(
             std.debug.print("forward-golden: golden size mismatch (expected {d} bytes)\n", .{logits.len * 4});
             std.process.exit(2);
         }
-        const expected = @as([*]const align(4) f32, @ptrCast(@alignCast(golden_bytes.ptr)))[0..logits.len];
+        const expected = @as([*]align(4) const f32, @ptrCast(@alignCast(golden_bytes.ptr)))[0..logits.len];
         try zynfer.compare.expectClose(expected, logits, 1e-3, 1e-2);
         try writer.print("golden OK ({s}, vocab={d})\n", .{ gpath, arch.vocab_size });
     }
