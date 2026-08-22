@@ -82,8 +82,12 @@ Apple Stages 0–8 are **closed**. Remaining work is curriculum Stages
 | Order | Stage | Goal |
 | --- | --- | --- |
 | 1 | **10** | **done** — checkpoint inspect + `.zynfer` artifact compiler / loader |
-| 2 | **11** | Full Qwen3-0.6B forward + golden logits (CPU first) |
+| 2 | **11** | Full Qwen3-0.6B forward + golden logits (CPU first) — [`docs/stages/11-qwen-forward.md`](stages/11-qwen-forward.md) |
 | 3 | **12** | Tokenizer + sampling → real TTFT / tok/s / ITL |
+
+Stage 11 owns **forward + golden logits** only. Tokenizer, sampling, and
+TTFT metrics are Stage 12. HF weight download is never CI — local convert
+only (Stage 10 converter).
 
 Until Stage 12, vocabulary TTFT/tok/s stay N/A in the benchmark matrix.
 

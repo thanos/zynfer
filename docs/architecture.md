@@ -6,8 +6,8 @@ Metal path on macOS, and an AMD HIP probe that will later own RDNA 4
 kernels. Model math must not import Metal or HIP types.
 
 ```text
-Model architecture (fixture: tiny block; Stage 10: `.zynfer` + Qwen3-0.6B meta;
-forward not loaded yet)
+Model architecture (fixture: tiny block; Stage 10: `.zynfer` load;
+forward + logits → Stage 11)
         |
         v
 Backend-neutral tensors, KV cache, block schedule
@@ -50,8 +50,8 @@ separate prefill/decode entry points. The CPU path uses an explicit host
 KV cache; the default Apple Stage 6 path keeps KV Metal-resident. Apple
 Stages 0–8 are closed for that fixture. Deferred leftovers are
 mapped to curriculum Stages 10–12 / 16 (see `docs/apple-backend.md`)—
-Qwen weights, tokenizer, sampling, further fusions at model scale, and
-vocabulary TTFT are not silent drops. SME/Core ML (Stage 7) and
+Stage 10 loader is done; forward (11), tokenizer/TTFT (12), further
+fusions at model scale (16) are not silent drops. SME/Core ML (Stage 7) and
 ICB/fp16/extra tiny-block fusions (Stage 8) were probed/rejected with
 evidence.
 

@@ -281,8 +281,9 @@ fn printStage10(writer: *std.Io.Writer) !void {
     try writer.print("  converter:        tools/checkpoint/safetensors_to_zynfer.py (single or shards)\n\n", .{});
     try writer.print("Not in Stage 10\n", .{});
     try writer.print("  full Qwen weight conversion in CI (needs HF download)\n", .{});
-    try writer.print("  forward pass / logits — Stage 11\n", .{});
-    try writer.print("  tokenizer / sampling / TTFT — Stage 12\n\n", .{});
+    try writer.print("  forward pass / logits — Stage 11 (see docs/stages/11-qwen-forward.md)\n", .{});
+    try writer.print("  tokenizer / sampling / TTFT — Stage 12\n", .{});
+    try writer.print("  HF download in CI — never; local convert only\n\n", .{});
     try writer.print("See docs/artifact-format.md and bench/results/stage10-dev-laptop.md\n", .{});
 }
 
