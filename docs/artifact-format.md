@@ -88,3 +88,13 @@ assigns **1..N in sorted tensor-name order**. Zig hot path should use
 POSIX hosts and falls back to a heap copy otherwise. `inspect` prints
 `storage: mmap` or `heap`.
 
+## Stage boundary
+
+| Stage | Delivers |
+| --- | --- |
+| **10** | `.zynfer` format, validate, load, inspect, optional local convert |
+| **11** | Full Qwen forward + golden logits ([`docs/stages/11-qwen-forward.md`](stages/11-qwen-forward.md)) |
+| **12** | Tokenizer, sampling, TTFT / tok/s |
+
+Not in CI: Hugging Face weight download (use tiny fixture or local artifacts).
+

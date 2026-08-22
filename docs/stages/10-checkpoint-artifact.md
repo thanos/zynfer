@@ -38,3 +38,11 @@ Zig `Artifact.loadFile` uses **mmap** when available (`storage: mmap` in
 `inspect`). Hot path: `findById` / `tensorBytesById` (ids 1..N sorted by
 name). Names remain for inspect/debug.
 
+## Closed — deferred to later stages
+
+| Item | Owner stage |
+| --- | --- |
+| Full Qwen3-0.6B forward + golden logits | **Stage 11** — see `docs/stages/11-qwen-forward.md` |
+| Tokenizer / sampling / vocabulary TTFT | **Stage 12** |
+| HF checkpoint download in CI | **Never Stage 10** — optional local convert only |
+

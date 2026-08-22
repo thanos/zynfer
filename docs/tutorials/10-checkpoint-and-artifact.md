@@ -82,6 +82,15 @@ python3 tools/checkpoint/safetensors_to_zynfer.py \
 (`--weights` may be a file or directory of shards. Converter handles BF16
 via raw bytes; load uses mmap when available.)
 
+## What's next (not Stage 10)
+
+| Item | Stage |
+| --- | --- |
+| Full Qwen forward + golden logits | **11** — [`docs/stages/11-qwen-forward.md`](../stages/11-qwen-forward.md) |
+| Tokenizer / sampling / TTFT | **12** |
+| HF download in CI | **Never** — local convert only |
+
 ## Further experiments
 
-Map HF tensor names → stable `tensor_id` values for Stage 11 hot path.
+- Add named `tensor_id` constants in `qwen3.zig` for Stage 11 weight binding.
+- Compare fixture vs full Qwen artifact load time (`storage: mmap` vs `heap`).
