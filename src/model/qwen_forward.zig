@@ -213,6 +213,8 @@ pub const Session = struct {
         /// Called after each new token id is appended (for streaming decode).
         on_token: ?*const fn (ctx: ?*anyopaque, token_id: u32) void = null,
         on_token_ctx: ?*anyopaque = null,
+        /// When false, each step recomputes the full prefix (Stage 13 baseline).
+        use_kv_cache: bool = true,
     };
 
     pub const GenerateStats = struct {
@@ -224,11 +226,30 @@ pub const Session = struct {
         decode_ns: u64,
         /// Number of ITL samples written to `itl_ns_out` (generated_tokens - 1 when streaming intervals).
         itl_count: usize = 0,
+        use_kv_cache: bool = true,
     };
 
     /// Prefill `prompt_ids`, then autoregressively sample up to `max_new_tokens`.
     /// Appends generated ids to `out_ids` (caller provides ArrayList).
+    ///
+    /// With `use_kv_cache=true` (default): one prefill, then incremental decode.
+    /// With `use_kv_cache=false`: each step resets and recomputes the entire
+    /// prefix (intentionally O(n²) — Stage 13 educational baseline).
     pub fn generate(
+        self: *Session,
+        io: std.Io,
+        prompt_ids: []const u32,
+        out_ids: *std.ArrayList(u32),
+        cfg: GenerateConfig,
+        rng: *std.Random.DefaultPrng,
+    ) Error!GenerateStats {
+        if (cfg.use_kv_cache) {
+            return self.generateCached(io, prompt_ids, out_ids, cfg, rng);
+        }
+        return self.generateUncached(io, prompt_ids, out_ids, cfg, rng);
+    }
+
+    fn generateCached(
         self: *Session,
         io: std.Io,
         prompt_ids: []const u32,
@@ -291,7 +312,93 @@ pub const Session = struct {
             .ttft_ns = ttft_ns,
             .decode_ns = decode_ns,
             .itl_count = itl_count,
+            .use_kv_cache = true,
         };
+    }
+
+    /// Intentionally inefficient: every step resets KV and re-runs the full prefix.
+    fn generateUncached(
+        self: *Session,
+        io: std.Io,
+        prompt_ids: []const u32,
+        out_ids: *std.ArrayList(u32),
+        cfg: GenerateConfig,
+        rng: *std.Random.DefaultPrng,
+    ) Error!GenerateStats {
+        const sample_mod = @import("../runtime/sample.zig");
+        if (prompt_ids.len == 0) return error.InvalidShape;
+
+        const logits = try self.allocator.alloc(f32, self.arch.vocab_size);
+        defer self.allocator.free(logits);
+        const probs = try self.allocator.alloc(f32, self.arch.vocab_size);
+        defer self.allocator.free(probs);
+        const idx = try self.allocator.alloc(u32, self.arch.vocab_size);
+        defer self.allocator.free(idx);
+
+        var prefix: std.ArrayList(u32) = .empty;
+        defer prefix.deinit(self.allocator);
+        try prefix.appendSlice(self.allocator, prompt_ids);
+
+        const t0 = std.Io.Clock.awake.now(io);
+        try self.prefillLastLogits(prefix.items, logits);
+        const t_prefill = std.Io.Clock.awake.now(io);
+
+        var generated: usize = 0;
+        var decode_ns: u64 = 0;
+        var ttft_ns: u64 = 0;
+        var itl_count: usize = 0;
+        var last_emit = t_prefill;
+
+        while (generated < cfg.max_new_tokens) {
+            if (prefix.items.len >= self.max_seq) break;
+
+            const next = try sample_mod.sampleWithScratch(logits, cfg.sample, probs, idx, rng);
+            try out_ids.append(self.allocator, next);
+            try prefix.append(self.allocator, next);
+            generated += 1;
+
+            const t_emit = std.Io.Clock.awake.now(io);
+            if (generated == 1) {
+                ttft_ns = nsDelta(t0, t_emit);
+            } else if (cfg.itl_ns_out) |itl| {
+                if (itl_count < itl.len) {
+                    itl[itl_count] = nsDelta(last_emit, t_emit);
+                    itl_count += 1;
+                }
+            }
+            last_emit = t_emit;
+
+            if (cfg.on_token) |cb| cb(cfg.on_token_ctx, next);
+            if (isStop(next, cfg.stop_ids)) break;
+
+            const td0 = std.Io.Clock.awake.now(io);
+            try self.prefillLastLogits(prefix.items, logits);
+            decode_ns += nsDelta(td0, std.Io.Clock.awake.now(io));
+        }
+
+        if (ttft_ns == 0) ttft_ns = nsDelta(t0, std.Io.Clock.awake.now(io));
+
+        return .{
+            .prompt_tokens = prompt_ids.len,
+            .generated_tokens = generated,
+            .prefill_ns = nsDelta(t0, t_prefill),
+            .ttft_ns = ttft_ns,
+            .decode_ns = decode_ns,
+            .itl_count = itl_count,
+            .use_kv_cache = false,
+        };
+    }
+
+    /// Total allocated KV capacity across all layers (f32 K+V).
+    pub fn kvBytesCapacity(self: *const Session) u64 {
+        if (self.blocks.len == 0) return 0;
+        return @as(u64, @intCast(self.blocks.len)) * self.blocks[0].cache.bytesCapacity();
+    }
+
+    pub fn kvBytesUsed(self: *const Session) u64 {
+        var sum: u64 = 0;
+        for (self.blocks) |b| sum += b.cache.bytesUsed();
+        return sum;
     }
 };
 
@@ -487,4 +594,45 @@ test "mini forward is non-zero" {
     var sum: f32 = 0;
     for (logits) |v| sum += @abs(v);
     try std.testing.expect(sum > 0);
+}
+
+test "Stage 13: cached generate matches uncached greedy tokens" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const bytes = try buildMiniArtifact(gpa);
+    defer gpa.free(bytes);
+    var art = try artifact.Artifact.loadOwned(gpa, try gpa.dupe(u8, bytes));
+    defer art.deinit();
+
+    const arch = qwen3.stage11_mini;
+    const prompt = [_]u32{ 2, 3 };
+    const max_new: u32 = 4;
+
+    var cached_ids: std.ArrayList(u32) = .empty;
+    defer cached_ids.deinit(gpa);
+    var uncached_ids: std.ArrayList(u32) = .empty;
+    defer uncached_ids.deinit(gpa);
+
+    var sess_c = try Session.init(gpa, &art, arch, prompt.len + max_new);
+    defer sess_c.deinit();
+    var rng_c = std.Random.DefaultPrng.init(0);
+    _ = try sess_c.generate(io, &prompt, &cached_ids, .{
+        .max_new_tokens = max_new,
+        .sample = .{ .temperature = 0 },
+        .use_kv_cache = true,
+    }, &rng_c);
+
+    var sess_u = try Session.init(gpa, &art, arch, prompt.len + max_new);
+    defer sess_u.deinit();
+    var rng_u = std.Random.DefaultPrng.init(0);
+    _ = try sess_u.generate(io, &prompt, &uncached_ids, .{
+        .max_new_tokens = max_new,
+        .sample = .{ .temperature = 0 },
+        .use_kv_cache = false,
+    }, &rng_u);
+
+    try std.testing.expectEqualSlices(u32, cached_ids.items, uncached_ids.items);
+    try std.testing.expect(cached_ids.items.len == max_new);
+    try std.testing.expect(sess_c.kvBytesUsed() > 0);
+    try std.testing.expect(sess_c.kvBytesCapacity() >= sess_c.kvBytesUsed());
 }

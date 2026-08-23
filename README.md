@@ -27,7 +27,10 @@ fixtures: [`tools/fixtures/README.md`](tools/fixtures/README.md).
 **Stage 12 — tokenizer + sampling is done (CPU)** — `zynfer run --prompt`
 with Qwen2 BPE, greedy/temp/top-k/top-p, TTFT metrics.
 See [`docs/stages/12-tokenizer-sampling.md`](docs/stages/12-tokenizer-sampling.md).
-**Stage 13+ — KV curriculum depth / AMD / serving remain.**
+**Stage 13 — KV cache is done (CPU)** — cached vs uncached generate, parity,
+`kv-bench`, memory formula.
+See [`docs/stages/13-kv-cache.md`](docs/stages/13-kv-cache.md).
+**Stage 14+ — prefill/decode metrics depth / AMD / serving remain.**
 
 The Zig repository, HIP device enumeration (when ROCm is present),
 environment report, CPU f32 reference ops, Metal kernels, a tiny
@@ -39,8 +42,8 @@ inference paths. Stage 8 hardens the path (`kv_len`≤256, signposts,
 peak RSS, stress + dual-`Gpu` concurrency) and rejects ICB/fp16/extra
 tiny-block fusions with documented reasons.
 
-**Not done yet:** tokenizer / sampling / vocabulary TTFT (Stage 12).
-Stage 10–11 provide loader + CPU forward; text generation comes in Stage 12.
+**Not done yet:** Stage 14 Qwen prefill/decode metric split, Metal Qwen path,
+AMD HIP curriculum.
 HF weight download is **not** run in CI — local/`tools/checkpoint/` only.
 
 On a Mac, `zig build test` differential-checks Metal against CPU, including
