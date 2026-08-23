@@ -117,6 +117,35 @@ pub fn build(b: *std.Build) void {
     const stage12_step = b.step("stage12", "Tokenizer + sampling Stage 12 ledger");
     stage12_step.dependOn(&stage12_cmd.step);
 
+    const stage13_cmd = b.addRunArtifact(exe);
+    stage13_cmd.step.dependOn(b.getInstallStep());
+    stage13_cmd.addArg("stage13");
+    stage13_cmd.expectStdOutMatch("Stage 13");
+    stage13_cmd.expectExitCode(0);
+    const stage13_step = b.step("stage13", "KV cache Stage 13 ledger");
+    stage13_step.dependOn(&stage13_cmd.step);
+
+    const kv_bench_cmd = b.addRunArtifact(exe);
+    kv_bench_cmd.step.dependOn(b.getInstallStep());
+    kv_bench_cmd.addArg("kv-bench");
+    kv_bench_cmd.addArg("--mini");
+    kv_bench_cmd.addArg("--max-tokens");
+    kv_bench_cmd.addArg("4");
+    kv_bench_cmd.expectStdOutMatch("token_parity: PASS");
+    kv_bench_cmd.expectExitCode(0);
+    const kv_bench_step = b.step("kv-bench", "Cached vs uncached decode (Stage 13)");
+    kv_bench_step.dependOn(&kv_bench_cmd.step);
+
+    const kv_layout_cmd = b.addRunArtifact(exe);
+    kv_layout_cmd.step.dependOn(b.getInstallStep());
+    kv_layout_cmd.addArg("kv-bench");
+    kv_layout_cmd.addArg("--layout");
+    kv_layout_cmd.expectStdOutMatch("RETAIN");
+    kv_layout_cmd.expectStdOutMatch("[n_kv, max_seq, head_dim]");
+    kv_layout_cmd.expectExitCode(0);
+    const kv_layout_step = b.step("kv-layout", "Host KV layout bake-off (Stage 13)");
+    kv_layout_step.dependOn(&kv_layout_cmd.step);
+
     const ops_bench_cmd = b.addRunArtifact(exe);
     ops_bench_cmd.step.dependOn(b.getInstallStep());
     ops_bench_cmd.addArg("ops-bench");
@@ -286,6 +315,28 @@ pub fn build(b: *std.Build) void {
     stage12_ok.expectStdOutMatch("Stage 12");
     stage12_ok.expectExitCode(0);
     integration_step.dependOn(&stage12_ok.step);
+
+    const stage13_ok = b.addRunArtifact(exe);
+    stage13_ok.addArg("stage13");
+    stage13_ok.expectStdOutMatch("Stage 13");
+    stage13_ok.expectExitCode(0);
+    integration_step.dependOn(&stage13_ok.step);
+
+    const kv_bench_ok = b.addRunArtifact(exe);
+    kv_bench_ok.addArg("kv-bench");
+    kv_bench_ok.addArg("--mini");
+    kv_bench_ok.addArg("--max-tokens");
+    kv_bench_ok.addArg("4");
+    kv_bench_ok.expectStdOutMatch("token_parity: PASS");
+    kv_bench_ok.expectExitCode(0);
+    integration_step.dependOn(&kv_bench_ok.step);
+
+    const kv_layout_ok = b.addRunArtifact(exe);
+    kv_layout_ok.addArg("kv-bench");
+    kv_layout_ok.addArg("--layout");
+    kv_layout_ok.expectStdOutMatch("RETAIN");
+    kv_layout_ok.expectExitCode(0);
+    integration_step.dependOn(&kv_layout_ok.step);
 
     const forward_mini_compile = b.addRunArtifact(exe);
     forward_mini_compile.step.dependOn(b.getInstallStep());

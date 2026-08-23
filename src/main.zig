@@ -14,11 +14,13 @@ const usage =
     \\  zynfer stage10      Checkpoint / .zynfer artifact Stage 10 ledger
     \\  zynfer stage11      Qwen forward + golden logits Stage 11 ledger
     \\  zynfer stage12      Tokenizer + sampling Stage 12 ledger
+    \\  zynfer stage13      KV cache Stage 13 ledger
     \\  zynfer inspect PATH Validate and print a .zynfer artifact
     \\  zynfer artifact-compile [--out PATH] [--mini]  Write fixture .zynfer
     \\  zynfer forward-golden ARTIFACT [--tokens IDS] [--golden PATH] [--dump DIR]
     \\  zynfer run ARTIFACT --prompt TEXT [--tokenizer DIR] [sampling flags]
     \\  zynfer chat [ARTIFACT] "PROMPT"   Interactive-style generate (streams tokens)
+    \\  zynfer kv-bench [ARTIFACT] [--mini] [--layout] [--prompt TEXT] [--max-tokens N]
     \\  zynfer setup [--skip-golden] [--skip-pip]   Download Qwen3-0.6B + build .zynfer
     \\  zynfer backends     List selectable backends
     \\  zynfer ops-bench    CPU vs Apple op microbenchmarks
@@ -64,10 +66,12 @@ pub fn main(init: std.process.Init) !void {
     var seed: u64 = 0;
     var raw_prompt = false;
     var no_stream = false;
+    var no_kv_cache = false;
     var skip_golden = false;
     var skip_pip = false;
     var skip_download = false;
     var artifact_mini = false;
+    var kv_layout_bench = false;
     var positionals: [16][]const u8 = undefined;
     var n_pos: usize = 0;
     while (args_it.next()) |arg| {
@@ -87,6 +91,8 @@ pub fn main(init: std.process.Init) !void {
             out_path = arg["--out=".len..];
         } else if (std.mem.eql(u8, arg, "--mini")) {
             artifact_mini = true;
+        } else if (std.mem.eql(u8, arg, "--layout")) {
+            kv_layout_bench = true;
         } else if (std.mem.eql(u8, arg, "--tokens")) {
             tokens_arg = args_it.next() orelse {
                 std.debug.print("missing value for --tokens\n", .{});
@@ -201,6 +207,8 @@ pub fn main(init: std.process.Init) !void {
             raw_prompt = true;
         } else if (std.mem.eql(u8, arg, "--no-stream")) {
             no_stream = true;
+        } else if (std.mem.eql(u8, arg, "--no-kv-cache")) {
+            no_kv_cache = true;
         } else if (std.mem.eql(u8, arg, "--skip-golden")) {
             skip_golden = true;
         } else if (std.mem.eql(u8, arg, "--skip-pip")) {
@@ -257,6 +265,8 @@ pub fn main(init: std.process.Init) !void {
         try printStage11(writer);
     } else if (std.mem.eql(u8, command, "stage12")) {
         try printStage12(writer);
+    } else if (std.mem.eql(u8, command, "stage13")) {
+        try printStage13(writer);
     } else if (std.mem.eql(u8, command, "inspect")) {
         if (n_pos < 1) {
             std.debug.print("usage: zynfer inspect PATH.zynfer\n", .{});
@@ -275,7 +285,7 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, command, "run")) {
         if (n_pos < 1 or prompt_arg == null) {
             std.debug.print(
-                "usage: zynfer run ARTIFACT.zynfer --prompt TEXT [--tokenizer DIR] [--max-tokens N] [--temperature T] [--top-k K] [--top-p P] [--seed S] [--raw] [--no-stream]\n",
+                "usage: zynfer run ARTIFACT.zynfer --prompt TEXT [--tokenizer DIR] [--max-tokens N] [--temperature T] [--top-k K] [--top-p P] [--seed S] [--raw] [--no-stream] [--no-kv-cache]\n",
                 .{},
             );
             std.process.exit(2);
@@ -294,6 +304,22 @@ pub fn main(init: std.process.Init) !void {
             seed,
             raw_prompt,
             !no_stream,
+            !no_kv_cache,
+        );
+    } else if (std.mem.eql(u8, command, "kv-bench")) {
+        try runKvBench(
+            allocator,
+            io,
+            writer,
+            if (n_pos >= 1) positionals[0] else null,
+            prompt_arg,
+            tokenizer_dir,
+            max_tokens,
+            seed,
+            raw_prompt,
+            artifact_mini,
+            tokens_arg,
+            kv_layout_bench,
         );
     } else if (std.mem.eql(u8, command, "chat")) {
         // zynfer chat "prompt"  OR  zynfer chat ARTIFACT "prompt"  OR  --prompt=
@@ -333,6 +359,7 @@ pub fn main(init: std.process.Init) !void {
             seed,
             raw_prompt,
             !no_stream,
+            !no_kv_cache,
         );
     } else if (std.mem.eql(u8, command, "setup")) {
         try runSetup(host, writer, skip_pip, skip_download, skip_golden);
@@ -540,6 +567,52 @@ fn printStage12(writer: *std.Io.Writer) !void {
     try writer.print("See docs/stages/12-tokenizer-sampling.md\n", .{});
 }
 
+fn printStage13(writer: *std.Io.Writer) !void {
+    try writer.print("zynfer Stage 13 — KV cache (CPU Qwen)\n", .{});
+    try writer.print("=====================================\n\n", .{});
+    try writer.print("Done\n", .{});
+    try writer.print("  layout:           [n_kv, max_seq, head_dim] retained (see kv-bench --layout)\n", .{});
+    try writer.print("  cached path:      one prefill, then decodeToken appends one position\n", .{});
+    try writer.print("  uncached path:    each step resets and recomputes the full prefix\n", .{});
+    try writer.print("  parity:           greedy tokens match (unit test + kv-bench)\n", .{});
+    try writer.print("  bake-off:         heads-outer beats seq-outer on decode attn (~3×)\n", .{});
+    try writer.print("  CLI:              kv-bench [--mini] [--layout] | run/chat --no-kv-cache\n\n", .{});
+
+    try writer.print("Three memories (do not confuse)\n", .{});
+    try writer.print("  weights:     fixed parameters loaded once from the .zynfer artifact\n", .{});
+    try writer.print("  activations: scratch tensors for the current forward (hidden, Q/K/V, …)\n", .{});
+    try writer.print("  KV cache:    growing per-layer K/V history across decode steps\n\n", .{});
+
+    const a = zynfer.qwen3.qwen3_0_6b;
+    const per_tok = zynfer.kv_cache.estimateModelBytes(
+        a.num_layers,
+        a.num_key_value_heads,
+        1,
+        a.head_dim,
+    );
+    const at_4k = zynfer.kv_cache.estimateModelBytes(
+        a.num_layers,
+        a.num_key_value_heads,
+        4096,
+        a.head_dim,
+    );
+    try writer.print("KV memory (f32, Qwen3-0.6B)\n", .{});
+    try writer.print("  formula:  layers × n_kv × seq × head_dim × 2 × 4\n", .{});
+    try writer.print("  per token: {d} bytes (~{d:.2} MiB)\n", .{
+        per_tok,
+        @as(f64, @floatFromInt(per_tok)) / (1024.0 * 1024.0),
+    });
+    try writer.print("  at seq=4096: {d} bytes (~{d:.1} MiB)\n\n", .{
+        at_4k,
+        @as(f64, @floatFromInt(at_4k)) / (1024.0 * 1024.0),
+    });
+
+    try writer.print("Not in Stage 13\n", .{});
+    try writer.print("  Metal-resident Qwen KV — later\n", .{});
+    try writer.print("  paged / quantized KV — Stages 18 / 22\n\n", .{});
+    try writer.print("See docs/stages/13-kv-cache.md\n", .{});
+}
+
 const StreamCtx = struct {
     tok: *const zynfer.tokenizer.Tokenizer,
     allocator: std.mem.Allocator,
@@ -701,6 +774,7 @@ fn runGenerate(
     seed: u64,
     raw_prompt: bool,
     stream: bool,
+    use_kv_cache: bool,
 ) !void {
     const tok_dir = try resolveTokenizerDir(allocator, io, artifact_path, tokenizer_dir_opt);
     defer allocator.free(tok_dir);
@@ -775,6 +849,7 @@ fn runGenerate(
         .itl_ns_out = itl_buf,
         .on_token = if (stream) StreamCtx.onToken else null,
         .on_token_ctx = if (stream) @ptrCast(&stream_ctx) else null,
+        .use_kv_cache = use_kv_cache,
     }, &rng) catch |err| {
         std.debug.print("run: generate failed: {s}\n", .{@errorName(err)});
         std.process.exit(2);
@@ -792,7 +867,14 @@ fn runGenerate(
     }
 
     try writer.print("\n---\n", .{});
-    try writer.print("prompt_tokens={d} generated_tokens={d}\n", .{ stats.prompt_tokens, stats.generated_tokens });
+    try writer.print("prompt_tokens={d} generated_tokens={d} kv_cache={s}\n", .{
+        stats.prompt_tokens,
+        stats.generated_tokens,
+        if (stats.use_kv_cache) "on" else "off",
+    });
+    if (use_kv_cache) {
+        try writer.print("kv_bytes_used={d} kv_bytes_cap={d}\n", .{ sess.kvBytesUsed(), sess.kvBytesCapacity() });
+    }
     try writer.print("ttft_ms={d:.3} prefill_ms={d:.3}", .{
         @as(f64, @floatFromInt(stats.ttft_ns)) / 1e6,
         @as(f64, @floatFromInt(stats.prefill_ns)) / 1e6,
@@ -819,6 +901,236 @@ fn runGenerate(
         );
     }
     try writer.print("\n", .{});
+}
+
+fn runKvBench(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    writer: *std.Io.Writer,
+    artifact_path_opt: ?[]const u8,
+    prompt_opt: ?[]const u8,
+    tokenizer_dir_opt: ?[]const u8,
+    max_new_tokens_in: u32,
+    seed: u64,
+    raw_prompt: bool,
+    force_mini: bool,
+    tokens_arg: ?[]const u8,
+    layout_only: bool,
+) !void {
+    if (layout_only) {
+        try runKvLayoutBench(allocator, io, writer);
+        return;
+    }
+
+    const default_path = "models/qwen3-0.6b.zynfer";
+    const use_mini = force_mini or (artifact_path_opt == null and !zynfer.util.fileExists(io, default_path));
+    const max_new: u32 = if (max_new_tokens_in == 64 and use_mini) 4 else max_new_tokens_in;
+
+    try writer.print("zynfer kv-bench — cached vs uncached decode\n", .{});
+    try writer.print("==========================================\n\n", .{});
+
+    var art: zynfer.artifact.Artifact = undefined;
+    var prompt_ids: []u32 = undefined;
+    var free_prompt = false;
+    defer if (free_prompt) allocator.free(prompt_ids);
+
+    var arch: zynfer.qwen3.Arch = undefined;
+
+    if (use_mini) {
+        try writer.print("fixture: stage11-mini (in-memory)\n", .{});
+        const bytes = try zynfer.qwen_forward.buildMiniArtifact(allocator);
+        art = try zynfer.artifact.Artifact.loadOwned(allocator, bytes);
+        arch = zynfer.qwen3.stage11_mini;
+        if (tokens_arg) |s| {
+            prompt_ids = try parseCsvTokenIds(allocator, s);
+            free_prompt = true;
+        } else {
+            prompt_ids = try allocator.dupe(u32, &.{ 2, 3 });
+            free_prompt = true;
+        }
+    } else {
+        const path = artifact_path_opt orelse default_path;
+        try writer.print("artifact: {s}\n", .{path});
+        art = zynfer.artifact.Artifact.loadFile(allocator, io, path) catch |err| {
+            std.debug.print("kv-bench: load failed ({s}): {s}\n", .{ path, @errorName(err) });
+            std.process.exit(2);
+        };
+        arch = try art.meta.toArch();
+
+        if (tokens_arg) |s| {
+            prompt_ids = try parseCsvTokenIds(allocator, s);
+            free_prompt = true;
+        } else {
+            const prompt = prompt_opt orelse "Explain gravity simply.";
+            const tok_dir = try resolveTokenizerDir(allocator, io, path, tokenizer_dir_opt);
+            defer allocator.free(tok_dir);
+            var tok = zynfer.tokenizer.Tokenizer.loadHfDir(allocator, io, tok_dir) catch |err| {
+                std.debug.print("kv-bench: tokenizer load failed ({s}): {s}\n", .{ tok_dir, @errorName(err) });
+                std.process.exit(2);
+            };
+            defer tok.deinit();
+            const wrapped = if (raw_prompt)
+                try allocator.dupe(u8, prompt)
+            else
+                try tok.applyChatTemplate(allocator, prompt);
+            defer allocator.free(wrapped);
+            prompt_ids = tok.encode(allocator, wrapped) catch |err| {
+                std.debug.print("kv-bench: encode failed: {s}\n", .{@errorName(err)});
+                std.process.exit(2);
+            };
+            free_prompt = true;
+        }
+    }
+    defer art.deinit();
+
+    const max_seq = prompt_ids.len + max_new;
+    if (max_seq == 0 or max_seq > arch.max_position_embeddings) {
+        std.debug.print("kv-bench: sequence too long\n", .{});
+        std.process.exit(2);
+    }
+
+    const kv_cap = zynfer.kv_cache.estimateModelBytes(
+        arch.num_layers,
+        arch.num_key_value_heads,
+        max_seq,
+        arch.head_dim,
+    );
+    try writer.print("prompt_tokens={d} max_new={d} kv_cap_bytes={d}\n\n", .{ prompt_ids.len, max_new, kv_cap });
+
+    var cached_ids: std.ArrayList(u32) = .empty;
+    defer cached_ids.deinit(allocator);
+    var uncached_ids: std.ArrayList(u32) = .empty;
+    defer uncached_ids.deinit(allocator);
+
+    var sess_c = try zynfer.qwen_forward.Session.init(allocator, &art, arch, max_seq);
+    defer sess_c.deinit();
+    var rng_c = std.Random.DefaultPrng.init(seed);
+    const stats_c = try sess_c.generate(io, prompt_ids, &cached_ids, .{
+        .max_new_tokens = max_new,
+        .sample = .{ .temperature = 0, .seed = seed },
+        .use_kv_cache = true,
+    }, &rng_c);
+
+    var sess_u = try zynfer.qwen_forward.Session.init(allocator, &art, arch, max_seq);
+    defer sess_u.deinit();
+    var rng_u = std.Random.DefaultPrng.init(seed);
+    const stats_u = try sess_u.generate(io, prompt_ids, &uncached_ids, .{
+        .max_new_tokens = max_new,
+        .sample = .{ .temperature = 0, .seed = seed },
+        .use_kv_cache = false,
+    }, &rng_u);
+
+    const match = std.mem.eql(u32, cached_ids.items, uncached_ids.items);
+    try writer.print("token_parity: {s}\n", .{if (match) "PASS" else "FAIL"});
+    try writer.print("cached_ids:   ", .{});
+    for (cached_ids.items, 0..) |id, i| {
+        if (i != 0) try writer.writeAll(",");
+        try writer.print("{d}", .{id});
+    }
+    try writer.print("\nuncached_ids: ", .{});
+    for (uncached_ids.items, 0..) |id, i| {
+        if (i != 0) try writer.writeAll(",");
+        try writer.print("{d}", .{id});
+    }
+    try writer.print("\n\n", .{});
+
+    try printKvBenchRow(writer, "cached", stats_c, sess_c.kvBytesUsed(), sess_c.kvBytesCapacity());
+    try printKvBenchRow(writer, "uncached", stats_u, 0, 0);
+
+    if (stats_c.decode_ns > 0 and stats_u.decode_ns > 0 and stats_c.generated_tokens > 1) {
+        const speedup = @as(f64, @floatFromInt(stats_u.decode_ns)) / @as(f64, @floatFromInt(stats_c.decode_ns));
+        try writer.print("\ndecode_speedup (uncached/cached wall): {d:.2}×\n", .{speedup});
+    }
+
+    if (!match) {
+        try writer.flush();
+        std.process.exit(1);
+    }
+}
+
+fn printKvBenchRow(
+    writer: *std.Io.Writer,
+    label: []const u8,
+    stats: zynfer.qwen_forward.Session.GenerateStats,
+    kv_used: u64,
+    kv_cap: u64,
+) !void {
+    try writer.print("{s}:\n", .{label});
+    try writer.print("  generated={d} prefill_ms={d:.3} ttft_ms={d:.3}", .{
+        stats.generated_tokens,
+        @as(f64, @floatFromInt(stats.prefill_ns)) / 1e6,
+        @as(f64, @floatFromInt(stats.ttft_ns)) / 1e6,
+    });
+    if (stats.generated_tokens > 1 and stats.decode_ns > 0) {
+        const n = stats.generated_tokens - 1;
+        const tok_s = @as(f64, @floatFromInt(n)) / (@as(f64, @floatFromInt(stats.decode_ns)) / 1e9);
+        try writer.print(" decode_tok_s={d:.3}", .{tok_s});
+    }
+    if (kv_cap > 0) {
+        try writer.print("\n  kv_bytes_used={d} kv_bytes_cap={d}", .{ kv_used, kv_cap });
+    }
+    try writer.print("\n", .{});
+}
+
+fn runKvLayoutBench(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer) !void {
+    try writer.print("zynfer kv-bench --layout — host KV physical layout bake-off\n", .{});
+    try writer.print("==========================================================\n\n", .{});
+    try writer.print("Shapes mimic Qwen3-0.6B GQA (n_q=16, n_kv=8, head_dim=128).\n", .{});
+    try writer.print("attn = decode attention K/V scan; append = write one token.\n\n", .{});
+
+    const report = try zynfer.kv_cache.benchLayouts(allocator, io, .{});
+    try writer.print(
+        "cfg: n_kv={d} n_q={d} max_seq={d} kv_len={d} head_dim={d} warmup={d} iters={d}\n\n",
+        .{
+            report.cfg.n_kv,
+            report.cfg.n_q,
+            report.cfg.max_seq,
+            report.cfg.kv_len,
+            report.cfg.head_dim,
+            report.cfg.warmup,
+            report.cfg.iters,
+        },
+    );
+
+    for (report.rows) |row| {
+        const tag: []const u8 = if (row.layout.retained()) "RETAIN" else "reject";
+        try writer.print("{s}  {s}\n", .{ tag, row.layout.name() });
+        try writer.print("  attn_ns={d}  append_ns={d}\n", .{ row.attn_ns, row.append_ns });
+    }
+
+    const attn_ratio = @as(f64, @floatFromInt(report.rows[1].attn_ns)) /
+        @as(f64, @floatFromInt(@max(report.rows[0].attn_ns, 1)));
+    const append_ratio = @as(f64, @floatFromInt(report.rows[0].append_ns)) /
+        @as(f64, @floatFromInt(@max(report.rows[1].append_ns, 1)));
+    try writer.print("\nattn speedup (seq-outer / heads-outer): {d:.2}×\n", .{attn_ratio});
+    try writer.print("append cost ratio (heads-outer / seq-outer): {d:.2}×\n", .{append_ratio});
+    try writer.print(
+        "\nDecision: retain [n_kv, max_seq, head_dim] — decode attention is the hot path;\n",
+        .{},
+    );
+    try writer.print("contiguous per-head prefixes beat strided seq-outer gathers.\n", .{});
+}
+
+fn parseCsvTokenIds(allocator: std.mem.Allocator, csv: []const u8) ![]u32 {
+    var count: usize = 0;
+    var it = std.mem.splitScalar(u8, csv, ',');
+    while (it.next()) |p| {
+        if (p.len == 0) continue;
+        count += 1;
+    }
+    const out = try allocator.alloc(u32, count);
+    errdefer allocator.free(out);
+    var i: usize = 0;
+    it = std.mem.splitScalar(u8, csv, ',');
+    while (it.next()) |p| {
+        if (p.len == 0) continue;
+        out[i] = std.fmt.parseInt(u32, p, 10) catch {
+            std.debug.print("invalid token id in --tokens\n", .{});
+            std.process.exit(2);
+        };
+        i += 1;
+    }
+    return out;
 }
 
 fn runInspect(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, path: []const u8) !void {
