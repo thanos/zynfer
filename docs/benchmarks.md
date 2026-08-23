@@ -72,10 +72,10 @@ synthetic fixture metric, not LLM TTFT.
 
 | Metric | Status |
 | --- | --- |
-| Time to first token | `zynfer run` → `ttft_ms` (local full model) |
+| Time to first token | `zynfer run` / `chat` → `ttft_ms` (local full model) |
 | Prefill tok/s | Derived from `prefill_ms` / prompt_tokens on `run` |
-| Decode tok/s | `zynfer run` → `decode_tok_s` |
-| ITL p50/p95/p99 | Not yet (single-request mean only) |
+| Decode tok/s | `decode_tok_s` |
+| ITL p50/p95/p99 | `itl_ms p50=… p95=… p99=…` when ≥2 generated tokens |
 | Energy/token | N/A |
 | Peak model/KV/scratch memory | Partial — process RSS not yet on `run` |
 

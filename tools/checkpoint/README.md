@@ -3,10 +3,14 @@
 `safetensors_to_zynfer.py` turns a local Hugging Face Safetensors tree into a
 `.zynfer` artifact the Zig runtime can `inspect` / load.
 
+**Preferred one-shot:** `./zig-out/bin/zynfer setup` (wraps download + convert +
+optional golden via `tools/setup_qwen.py`). Never run that in CI.
+
 This path is **optional** for Stage 10. CI and `artifact-compile` use a tiny
 Zig fixture only. Full Qwen weights live under `models/` (gitignored).
 
-See also: `docs/artifact-format.md`, `docs/stages/10-checkpoint-artifact.md`.
+See also: `docs/artifact-format.md`, `docs/stages/10-checkpoint-artifact.md`,
+`docs/stages/12-tokenizer-sampling.md`.
 
 ## Prerequisites
 

@@ -1,71 +1,64 @@
 # Tutorial — Tokenizer, sampling, and `zynfer run` (Stage 12)
 
 Stage 11 proved the math. Stage 12 turns a **sentence** into model input and
-prints generated text.
+prints generated text (streaming).
 
 Full reference: [`docs/stages/12-tokenizer-sampling.md`](../stages/12-tokenizer-sampling.md).
 
-## Prerequisites
+## 0. One-shot setup (local only)
 
 ```bash
-# Artifact from Stage 10/11
-ls models/qwen3-0.6b.zynfer
-ls models/Qwen3-0.6B/vocab.json models/Qwen3-0.6B/merges.txt
 zig build -Dhip=off
+./zig-out/bin/zynfer setup
 ```
 
-## 1. Encode check (optional)
+This runs `tools/setup_qwen.py`:
 
-Tokenizer unit tests cover `"Explain gravity simply."` →
-`840, 20772, 23249, 4936, 13` when the HF dir exists.
+1. `pip install` huggingface_hub, safetensors, numpy (+ torch/transformers for golden)
+2. Download `Qwen/Qwen3-0.6B` → `models/Qwen3-0.6B`
+3. Convert → `models/qwen3-0.6b.zynfer`
+4. Optional golden → `ref_logits.f32`
+
+Flags: `--skip-golden`, `--skip-pip`, `--skip-download`.
+
+**Never run setup in CI** (large download).
+
+## 1. Encode check
 
 ```bash
 zig build test -Dhip=off
 ```
 
-## 2. Run generation
+## 2. Chat (recommended)
+
+```bash
+./zig-out/bin/zynfer chat "Explain gravity simply." --max-tokens 32
+```
+
+Streams tokens as they generate. Defaults:
+
+- artifact: `models/qwen3-0.6b.zynfer`
+- tokenizer: next to the artifact (`models/Qwen3-0.6B`) if present
+
+Metrics footer includes `ttft_ms`, `decode_tok_s`, and `itl_ms p50/p95/p99`.
+
+```bash
+./zig-out/bin/zynfer chat "What is the value of pi?" --max-tokens 16
+./zig-out/bin/zynfer chat --no-stream "Say hi." --max-tokens 8
+```
+
+## 3. Explicit `run`
 
 ```bash
 ./zig-out/bin/zynfer run models/qwen3-0.6b.zynfer \
   --prompt "Explain gravity simply." \
-  --tokenizer models/Qwen3-0.6B \
   --max-tokens 32
 ```
-
-You should see:
-
-1. Generated assistant text
-2. A `---` separator
-3. Metrics: `prompt_tokens`, `generated_tokens`, `ttft_ms`, `prefill_ms`,
-   and `decode_tok_s` when more than one new token was produced
-
-Default sampling is **greedy** (`--temperature 0`). CPU Qwen is slow — start
-with `--max-tokens 16` while debugging.
-
-## 3. What the command does
-
-1. Loads BPE from `--tokenizer`
-2. Wraps the prompt in the Qwen3 non-thinking chat template (`--raw` skips this)
-3. Encodes to token IDs
-4. Prefills the prompt (fills KV cache)
-5. Samples the next token, decodes one step, repeats
-6. Decodes generated IDs to UTF-8 and prints them
-
-## 4. Sampling knobs
-
-```bash
-./zig-out/bin/zynfer run models/qwen3-0.6b.zynfer \
-  --prompt "Explain gravity simply." \
-  --temperature 0.6 --top-k 20 --top-p 0.95 --seed 42 \
-  --max-tokens 32
-```
-
-Same `--seed` → same tokens for the same prompt and settings.
 
 ## What's next
 
 | Item | Stage |
 | --- | --- |
-| Deeper KV / prefill-decode curriculum focus | **13–14** (host KV already used here) |
+| KV curriculum depth | **13–14** |
 | Profiling one token | **15** |
 | Metal Qwen path | After CPU text path is trusted |

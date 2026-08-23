@@ -18,6 +18,8 @@ const usage =
     \\  zynfer artifact-compile [--out PATH] [--mini]  Write fixture .zynfer
     \\  zynfer forward-golden ARTIFACT [--tokens IDS] [--golden PATH] [--dump DIR]
     \\  zynfer run ARTIFACT --prompt TEXT [--tokenizer DIR] [sampling flags]
+    \\  zynfer chat [ARTIFACT] "PROMPT"   Interactive-style generate (streams tokens)
+    \\  zynfer setup [--skip-golden] [--skip-pip]   Download Qwen3-0.6B + build .zynfer
     \\  zynfer backends     List selectable backends
     \\  zynfer ops-bench    CPU vs Apple op microbenchmarks
     \\  zynfer block-bench  Tiny-block prefill/decode timings
@@ -61,8 +63,12 @@ pub fn main(init: std.process.Init) !void {
     var top_p: f32 = 1.0;
     var seed: u64 = 0;
     var raw_prompt = false;
+    var no_stream = false;
+    var skip_golden = false;
+    var skip_pip = false;
+    var skip_download = false;
     var artifact_mini = false;
-    var positionals: [8][]const u8 = undefined;
+    var positionals: [16][]const u8 = undefined;
     var n_pos: usize = 0;
     while (args_it.next()) |arg| {
         if (std.mem.eql(u8, arg, "--backend")) {
@@ -193,6 +199,14 @@ pub fn main(init: std.process.Init) !void {
             };
         } else if (std.mem.eql(u8, arg, "--raw")) {
             raw_prompt = true;
+        } else if (std.mem.eql(u8, arg, "--no-stream")) {
+            no_stream = true;
+        } else if (std.mem.eql(u8, arg, "--skip-golden")) {
+            skip_golden = true;
+        } else if (std.mem.eql(u8, arg, "--skip-pip")) {
+            skip_pip = true;
+        } else if (std.mem.eql(u8, arg, "--skip-download")) {
+            skip_download = true;
         } else if (!have_command and !std.mem.startsWith(u8, arg, "-")) {
             command = arg;
             have_command = true;
@@ -261,7 +275,7 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, command, "run")) {
         if (n_pos < 1 or prompt_arg == null) {
             std.debug.print(
-                "usage: zynfer run ARTIFACT.zynfer --prompt TEXT [--tokenizer DIR] [--max-tokens N] [--temperature T] [--top-k K] [--top-p P] [--seed S] [--raw]\n",
+                "usage: zynfer run ARTIFACT.zynfer --prompt TEXT [--tokenizer DIR] [--max-tokens N] [--temperature T] [--top-k K] [--top-p P] [--seed S] [--raw] [--no-stream]\n",
                 .{},
             );
             std.process.exit(2);
@@ -279,7 +293,49 @@ pub fn main(init: std.process.Init) !void {
             top_p,
             seed,
             raw_prompt,
+            !no_stream,
         );
+    } else if (std.mem.eql(u8, command, "chat")) {
+        // zynfer chat "prompt"  OR  zynfer chat ARTIFACT "prompt"  OR  --prompt=
+        var artifact_path: []const u8 = "models/qwen3-0.6b.zynfer";
+        var chat_prompt: ?[]const u8 = prompt_arg;
+        if (n_pos >= 1 and std.mem.endsWith(u8, positionals[0], ".zynfer")) {
+            artifact_path = positionals[0];
+            if (n_pos >= 2) chat_prompt = positionals[1];
+        } else if (n_pos >= 1) {
+            chat_prompt = positionals[0];
+        }
+        if (chat_prompt == null or chat_prompt.?.len == 0) {
+            std.debug.print(
+                "usage: zynfer chat [ARTIFACT.zynfer] \"PROMPT\" [--tokenizer DIR] [--max-tokens N] …\n",
+                .{},
+            );
+            std.process.exit(2);
+        }
+        if (!zynfer.util.fileExists(io, artifact_path)) {
+            std.debug.print(
+                "chat: artifact not found ({s})\n  run: ./zig-out/bin/zynfer setup\n",
+                .{artifact_path},
+            );
+            std.process.exit(2);
+        }
+        try runGenerate(
+            allocator,
+            io,
+            writer,
+            artifact_path,
+            chat_prompt.?,
+            tokenizer_dir,
+            max_tokens,
+            temperature,
+            top_k,
+            top_p,
+            seed,
+            raw_prompt,
+            !no_stream,
+        );
+    } else if (std.mem.eql(u8, command, "setup")) {
+        try runSetup(host, writer, skip_pip, skip_download, skip_golden);
     } else if (std.mem.eql(u8, command, "backends")) {
         try printBackends(writer);
     } else if (std.mem.eql(u8, command, "ops-bench")) {
@@ -474,14 +530,161 @@ fn printStage12(writer: *std.Io.Writer) !void {
     try writer.print("Done\n", .{});
     try writer.print("  tokenizer:        Qwen2 byte-level BPE (vocab.json + merges.txt)\n", .{});
     try writer.print("  sampling:         greedy / temperature / top-k / top-p / seeded RNG\n", .{});
-    try writer.print("  generate:         prefill + KV-cached decode loop\n", .{});
-    try writer.print("  CLI:              run ARTIFACT --prompt TEXT [--tokenizer DIR] …\n", .{});
-    try writer.print("  metrics:          TTFT, prefill_ns, decode tok/s\n", .{});
+    try writer.print("  generate:         prefill + KV-cached decode loop (streaming)\n", .{});
+    try writer.print("  CLI:              run / chat / setup\n", .{});
+    try writer.print("  metrics:          TTFT, prefill_ms, decode_tok_s, ITL p50/p95/p99\n", .{});
     try writer.print("  chat wrap:        Qwen3 non-thinking template (disable with --raw)\n\n", .{});
     try writer.print("Not in Stage 12\n", .{});
     try writer.print("  Metal Qwen path — later\n", .{});
-    try writer.print("  HF download in CI — never\n\n", .{});
+    try writer.print("  HF download in CI — never (use local `zynfer setup`)\n\n", .{});
     try writer.print("See docs/stages/12-tokenizer-sampling.md\n", .{});
+}
+
+const StreamCtx = struct {
+    tok: *const zynfer.tokenizer.Tokenizer,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    writer: *std.Io.Writer,
+    pending: std.ArrayList(u8),
+    stop_ids: []const u32,
+
+    fn onToken(ctx: ?*anyopaque, token_id: u32) void {
+        const self: *StreamCtx = @ptrCast(@alignCast(ctx.?));
+        for (self.stop_ids) |s| if (s == token_id) return;
+        const piece = self.tok.decode(self.allocator, &.{token_id}) catch return;
+        defer self.allocator.free(piece);
+        self.pending.appendSlice(self.allocator, piece) catch return;
+        self.flushUtf8() catch {};
+    }
+
+    fn flushUtf8(self: *StreamCtx) !void {
+        var i: usize = 0;
+        while (i < self.pending.items.len) {
+            const n = std.unicode.utf8ByteSequenceLength(self.pending.items[i]) catch break;
+            if (i + n > self.pending.items.len) break;
+            _ = std.unicode.utf8Decode(self.pending.items[i..][0..n]) catch break;
+            try self.writer.writeAll(self.pending.items[i .. i + n]);
+            i += n;
+        }
+        if (i > 0) {
+            const rest = self.pending.items[i..];
+            std.mem.copyForwards(u8, self.pending.items[0..rest.len], rest);
+            self.pending.shrinkRetainingCapacity(rest.len);
+            try self.writer.flush();
+        }
+    }
+
+    fn finish(self: *StreamCtx) !void {
+        if (self.pending.items.len != 0) {
+            try self.writer.writeAll(self.pending.items);
+            self.pending.clearRetainingCapacity();
+            try self.writer.flush();
+        }
+        try self.writer.writeAll("\n");
+        try self.writer.flush();
+    }
+};
+
+fn runSetup(
+    host: zynfer.util.Host,
+    writer: *std.Io.Writer,
+    skip_pip: bool,
+    skip_download: bool,
+    skip_golden: bool,
+) !void {
+    try writer.print("zynfer setup — download Qwen3-0.6B, convert .zynfer, optional golden\n", .{});
+    try writer.print("(live output from python3 tools/setup_qwen.py)\n\n", .{});
+    try writer.flush();
+
+    var argv_list: std.ArrayList([]const u8) = .empty;
+    defer argv_list.deinit(host.gpa);
+    try argv_list.append(host.gpa, "python3");
+    try argv_list.append(host.gpa, "tools/setup_qwen.py");
+    if (skip_pip) try argv_list.append(host.gpa, "--skip-pip");
+    if (skip_download) try argv_list.append(host.gpa, "--skip-download");
+    if (skip_golden) try argv_list.append(host.gpa, "--skip-golden");
+
+    var child = std.process.spawn(host.io, .{
+        .argv = argv_list.items,
+        .stdin = .ignore,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    }) catch {
+        std.debug.print("setup: failed to spawn python3 tools/setup_qwen.py\n", .{});
+        std.process.exit(2);
+    };
+    const term = child.wait(host.io) catch {
+        std.debug.print("setup: wait failed\n", .{});
+        std.process.exit(2);
+    };
+    switch (term) {
+        .exited => |code| if (code != 0) {
+            std.debug.print("setup: exited with code {d}\n", .{code});
+            std.process.exit(2);
+        },
+        else => {
+            std.debug.print("setup: process terminated abnormally\n", .{});
+            std.process.exit(2);
+        },
+    }
+}
+
+fn tokenizerDirHasFiles(io: std.Io, dir: []const u8) bool {
+    var vbuf: [512]u8 = undefined;
+    const vocab = std.fmt.bufPrint(&vbuf, "{s}/vocab.json", .{dir}) catch return false;
+    var mbuf: [512]u8 = undefined;
+    const merges = std.fmt.bufPrint(&mbuf, "{s}/merges.txt", .{dir}) catch return false;
+    return zynfer.util.fileExists(io, vocab) and zynfer.util.fileExists(io, merges);
+}
+
+fn resolveTokenizerDir(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    artifact_path: []const u8,
+    explicit: ?[]const u8,
+) ![]const u8 {
+    if (explicit) |d| {
+        if (tokenizerDirHasFiles(io, d)) return try allocator.dupe(u8, d);
+        std.debug.print(
+            "tokenizer: --tokenizer={s} missing vocab.json and/or merges.txt\n",
+            .{d},
+        );
+        std.process.exit(2);
+    }
+
+    // 1) sibling of artifact: models/qwen3-0.6b.zynfer → models/Qwen3-0.6B
+    if (std.fs.path.dirname(artifact_path)) |parent| {
+        var cand_buf: [512]u8 = undefined;
+        if (std.fmt.bufPrint(&cand_buf, "{s}/Qwen3-0.6B", .{parent})) |cand| {
+            if (tokenizerDirHasFiles(io, cand)) return try allocator.dupe(u8, cand);
+        } else |_| {}
+    }
+
+    // 2) conventional repo path
+    if (tokenizerDirHasFiles(io, "models/Qwen3-0.6B")) {
+        return try allocator.dupe(u8, "models/Qwen3-0.6B");
+    }
+
+    std.debug.print(
+        \\tokenizer: could not find vocab.json + merges.txt
+        \\  looked next to artifact and at models/Qwen3-0.6B
+        \\  fix with:  ./zig-out/bin/zynfer setup
+        \\       or:  --tokenizer models/Qwen3-0.6B
+        \\
+    , .{});
+    std.process.exit(2);
+}
+
+fn percentileNs(sorted: []u64, pct: f64) u64 {
+    if (sorted.len == 0) return 0;
+    if (sorted.len == 1) return sorted[0];
+    const rank = pct / 100.0 * @as(f64, @floatFromInt(sorted.len - 1));
+    const lo: usize = @intFromFloat(@floor(rank));
+    const hi = @min(lo + 1, sorted.len - 1);
+    const frac = rank - @as(f64, @floatFromInt(lo));
+    const a: f64 = @floatFromInt(sorted[lo]);
+    const b: f64 = @floatFromInt(sorted[hi]);
+    return @intFromFloat(a + (b - a) * frac);
 }
 
 fn runGenerate(
@@ -497,11 +700,14 @@ fn runGenerate(
     top_p: f32,
     seed: u64,
     raw_prompt: bool,
+    stream: bool,
 ) !void {
-    const tok_dir = tokenizer_dir_opt orelse "models/Qwen3-0.6B";
+    const tok_dir = try resolveTokenizerDir(allocator, io, artifact_path, tokenizer_dir_opt);
+    defer allocator.free(tok_dir);
+
     var tok = zynfer.tokenizer.Tokenizer.loadHfDir(allocator, io, tok_dir) catch |err| {
         std.debug.print(
-            "run: tokenizer load failed ({s}): {s}\n  pass --tokenizer DIR with vocab.json + merges.txt\n",
+            "run: tokenizer load failed ({s}): {s}\n  expected vocab.json + merges.txt (zynfer setup)\n",
             .{ tok_dir, @errorName(err) },
         );
         std.process.exit(2);
@@ -521,7 +727,10 @@ fn runGenerate(
     defer allocator.free(prompt_ids);
 
     var art = zynfer.artifact.Artifact.loadFile(allocator, io, artifact_path) catch |err| {
-        std.debug.print("run: load failed ({s}): {s}\n", .{ artifact_path, @errorName(err) });
+        std.debug.print(
+            "run: load failed ({s}): {s}\n  run: ./zig-out/bin/zynfer setup\n",
+            .{ artifact_path, @errorName(err) },
+        );
         std.process.exit(2);
     };
     defer art.deinit();
@@ -540,6 +749,19 @@ fn runGenerate(
     var out_ids: std.ArrayList(u32) = .empty;
     defer out_ids.deinit(allocator);
 
+    const itl_buf = try allocator.alloc(u64, max_new_tokens);
+    defer allocator.free(itl_buf);
+
+    var stream_ctx: StreamCtx = .{
+        .tok = &tok,
+        .allocator = allocator,
+        .io = io,
+        .writer = writer,
+        .pending = .empty,
+        .stop_ids = &stop_ids,
+    };
+    defer stream_ctx.pending.deinit(allocator);
+
     var rng = std.Random.DefaultPrng.init(seed);
     const stats = sess.generate(io, prompt_ids, &out_ids, .{
         .max_new_tokens = max_new_tokens,
@@ -550,18 +772,25 @@ fn runGenerate(
             .seed = seed,
         },
         .stop_ids = &stop_ids,
+        .itl_ns_out = itl_buf,
+        .on_token = if (stream) StreamCtx.onToken else null,
+        .on_token_ctx = if (stream) @ptrCast(&stream_ctx) else null,
     }, &rng) catch |err| {
         std.debug.print("run: generate failed: {s}\n", .{@errorName(err)});
         std.process.exit(2);
     };
 
-    const text = tok.decode(allocator, out_ids.items) catch |err| {
-        std.debug.print("run: decode failed: {s}\n", .{@errorName(err)});
-        std.process.exit(2);
-    };
-    defer allocator.free(text);
+    if (stream) {
+        try stream_ctx.finish();
+    } else {
+        const text = tok.decode(allocator, out_ids.items) catch |err| {
+            std.debug.print("run: decode failed: {s}\n", .{@errorName(err)});
+            std.process.exit(2);
+        };
+        defer allocator.free(text);
+        try writer.print("{s}\n", .{text});
+    }
 
-    try writer.print("{s}\n", .{text});
     try writer.print("\n---\n", .{});
     try writer.print("prompt_tokens={d} generated_tokens={d}\n", .{ stats.prompt_tokens, stats.generated_tokens });
     try writer.print("ttft_ms={d:.3} prefill_ms={d:.3}", .{
@@ -572,6 +801,22 @@ fn runGenerate(
         const decode_tokens = stats.generated_tokens - 1;
         const tok_s = @as(f64, @floatFromInt(decode_tokens)) / (@as(f64, @floatFromInt(stats.decode_ns)) / 1e9);
         try writer.print(" decode_tok_s={d:.3}", .{tok_s});
+    }
+    if (stats.itl_count > 0) {
+        const slice = itl_buf[0..stats.itl_count];
+        std.mem.sort(u64, slice, {}, std.sort.asc(u64));
+        const p50 = percentileNs(slice, 50);
+        const p95 = percentileNs(slice, 95);
+        const p99 = percentileNs(slice, 99);
+        try writer.print(
+            "\nitl_ms p50={d:.3} p95={d:.3} p99={d:.3} (n={d})",
+            .{
+                @as(f64, @floatFromInt(p50)) / 1e6,
+                @as(f64, @floatFromInt(p95)) / 1e6,
+                @as(f64, @floatFromInt(p99)) / 1e6,
+                stats.itl_count,
+            },
+        );
     }
     try writer.print("\n", .{});
 }

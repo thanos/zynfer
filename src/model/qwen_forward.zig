@@ -208,6 +208,11 @@ pub const Session = struct {
         sample: @import("../runtime/sample.zig").Config = .{},
         /// Stop when sampling these ids (typically eos / im_end / endoftext).
         stop_ids: []const u32 = &.{},
+        /// Optional per-token wall intervals after the first token (ITL), length >= max_new_tokens.
+        itl_ns_out: ?[]u64 = null,
+        /// Called after each new token id is appended (for streaming decode).
+        on_token: ?*const fn (ctx: ?*anyopaque, token_id: u32) void = null,
+        on_token_ctx: ?*anyopaque = null,
     };
 
     pub const GenerateStats = struct {
@@ -217,6 +222,8 @@ pub const Session = struct {
         /// Wall time from start of prefill to first generated token sampled.
         ttft_ns: u64,
         decode_ns: u64,
+        /// Number of ITL samples written to `itl_ns_out` (generated_tokens - 1 when streaming intervals).
+        itl_count: usize = 0,
     };
 
     /// Prefill `prompt_ids`, then autoregressively sample up to `max_new_tokens`.
@@ -246,6 +253,8 @@ pub const Session = struct {
         var generated: usize = 0;
         var decode_ns: u64 = 0;
         var ttft_ns: u64 = 0;
+        var itl_count: usize = 0;
+        var last_emit = t_prefill;
 
         while (generated < cfg.max_new_tokens) {
             if (self.blocks[0].cache.used >= self.max_seq) break;
@@ -254,7 +263,18 @@ pub const Session = struct {
             try out_ids.append(self.allocator, next);
             generated += 1;
 
-            if (generated == 1) ttft_ns = nsDelta(t0, std.Io.Clock.awake.now(io));
+            const t_emit = std.Io.Clock.awake.now(io);
+            if (generated == 1) {
+                ttft_ns = nsDelta(t0, t_emit);
+            } else if (cfg.itl_ns_out) |itl| {
+                if (itl_count < itl.len) {
+                    itl[itl_count] = nsDelta(last_emit, t_emit);
+                    itl_count += 1;
+                }
+            }
+            last_emit = t_emit;
+
+            if (cfg.on_token) |cb| cb(cfg.on_token_ctx, next);
             if (isStop(next, cfg.stop_ids)) break;
 
             const td0 = std.Io.Clock.awake.now(io);
@@ -270,6 +290,7 @@ pub const Session = struct {
             .prefill_ns = nsDelta(t0, t_prefill),
             .ttft_ns = ttft_ns,
             .decode_ns = decode_ns,
+            .itl_count = itl_count,
         };
     }
 };

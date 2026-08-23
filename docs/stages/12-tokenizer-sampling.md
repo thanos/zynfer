@@ -23,8 +23,9 @@ produces coherent continuation text (Qwen3 chat wrap by default).
   numbers back into letters (`vocab.json` + `merges.txt`, Qwen2 BPE).
 - **Sampling** — picks the next token from logits. Greedy = always the top
   score; temperature / top-k / top-p add controlled randomness.
-- **`zynfer run`** — encode prompt → prefill → sample → decode one token at
-  a time (KV cache) → print text + timing (TTFT, decode tok/s).
+- **`zynfer chat` / `run`** — encode prompt → prefill → sample → stream tokens
+  (KV cache) → print timing (TTFT, decode tok/s, ITL percentiles).
+- **`zynfer setup`** — download HF weights, convert `.zynfer`, optional golden.
 
 ## In scope
 
@@ -33,8 +34,8 @@ produces coherent continuation text (Qwen3 chat wrap by default).
 | Qwen2/Qwen3 BPE | `src/model/tokenizer.zig` |
 | Sampling | `src/runtime/sample.zig` |
 | Prefill + decode generate | `Session.generate` in `qwen_forward.zig` |
-| CLI | `zynfer run …`, `zynfer stage12` |
-| Metrics | TTFT (ns→ms), prefill_ms, decode_tok_s |
+| CLI | `run` / `chat` / `setup` |
+| Metrics | TTFT, prefill_ms, decode_tok_s, ITL p50/p95/p99 |
 
 ## Explicitly not Stage 12
 
@@ -53,18 +54,23 @@ produces coherent continuation text (Qwen3 chat wrap by default).
 ## Commands
 
 ```bash
+# One-shot local setup (download + convert + optional golden; never CI)
+./zig-out/bin/zynfer setup
+./zig-out/bin/zynfer setup --skip-golden
+
 zig build stage12 -Dhip=off
 zig build test -Dhip=off
 
-# Greedy (default temperature=0)
+# Chat (streams tokens; defaults artifact models/qwen3-0.6b.zynfer)
+./zig-out/bin/zynfer chat "Explain gravity simply." --max-tokens 32
+
+# Explicit run
 ./zig-out/bin/zynfer run models/qwen3-0.6b.zynfer \
   --prompt "Explain gravity simply." \
-  --tokenizer models/Qwen3-0.6B \
   --max-tokens 32
 
 # Sampled
-./zig-out/bin/zynfer run models/qwen3-0.6b.zynfer \
-  --prompt "Explain gravity simply." \
+./zig-out/bin/zynfer chat "Explain gravity simply." \
   --temperature 0.6 --top-k 20 --top-p 0.95 --seed 1 \
   --max-tokens 32
 ```
@@ -73,14 +79,15 @@ Flags:
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--prompt` | required | User text |
-| `--tokenizer` | `models/Qwen3-0.6B` | HF dir with vocab + merges |
+| `--prompt` | required for `run` | User text (`chat` takes positional prompt) |
+| `--tokenizer` | next to artifact / `models/Qwen3-0.6B` | HF dir with vocab + merges |
 | `--max-tokens` | 64 | New tokens to generate |
 | `--temperature` / `--temp` | 0 | 0 = greedy |
 | `--top-k` | 0 | 0 = off |
 | `--top-p` | 1.0 | 1 = off |
 | `--seed` | 0 | RNG seed |
 | `--raw` | off | Skip Qwen3 chat template |
+| `--no-stream` | off | Buffer full reply before printing |
 
 Default chat wrap (non-thinking):
 

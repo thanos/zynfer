@@ -35,6 +35,9 @@ CPU decode is the Stage 12 correctness path, not a speed target.
 
 ## Notes
 
+- Prefer `zynfer setup` then `zynfer chat "…"`.
 - Chat wrap defaults to Qwen3 non-thinking (`--raw` for plain continuation).
+- Streaming is on by default (`--no-stream` to buffer).
+- Tokenizer resolves next to the artifact, then `models/Qwen3-0.6B`.
 - Stop ids: `im_end`, `endoftext`, and configured eos.
-- Tokenizer / sampling / TTFT are Stage 12; Metal Qwen generate is later.
+- Integration optionally runs a short `chat` when local weights exist.

@@ -401,23 +401,101 @@ fn peekCp(text: []const u8, pos: usize) ?Cp {
 fn isLetter(cp: u21) bool {
     if (cp >= 'A' and cp <= 'Z') return true;
     if (cp >= 'a' and cp <= 'z') return true;
-    // Latin-1 supplement letters and common extended ranges (practical subset).
-    if (cp >= 0x00C0 and cp <= 0x02FF) return true;
-    if (cp >= 0x0370 and cp <= 0x03FF) return true; // Greek
-    if (cp >= 0x0400 and cp <= 0x052F) return true; // Cyrillic
-    if (cp >= 0x0900 and cp <= 0x097F) return true; // Devanagari
-    if (cp >= 0x4E00 and cp <= 0x9FFF) return true; // CJK
-    if (cp >= 0x3400 and cp <= 0x4DBF) return true;
-    if (cp >= 0xF900 and cp <= 0xFAFF) return true;
-    if (cp >= 0x3040 and cp <= 0x30FF) return true; // Hiragana/Katakana
-    if (cp >= 0xAC00 and cp <= 0xD7AF) return true; // Hangul
-    if (cp >= 0xFF21 and cp <= 0xFF3A) return true;
-    if (cp >= 0xFF41 and cp <= 0xFF5A) return true;
+    // Practical Unicode letter coverage for Qwen multilingual prompts.
+    // Ranges follow major script blocks (not a full UCD Letter property table).
+    const ranges = [_][2]u21{
+        .{ 0x00C0, 0x02FF }, // Latin extended / IPA
+        .{ 0x0370, 0x03FF }, // Greek
+        .{ 0x0400, 0x052F }, // Cyrillic
+        .{ 0x0530, 0x058F }, // Armenian
+        .{ 0x0590, 0x05FF }, // Hebrew
+        .{ 0x0600, 0x06FF }, // Arabic
+        .{ 0x0700, 0x074F }, // Syriac
+        .{ 0x0780, 0x07BF }, // Thaana
+        .{ 0x0900, 0x097F }, // Devanagari
+        .{ 0x0980, 0x09FF }, // Bengali
+        .{ 0x0A00, 0x0A7F }, // Gurmukhi
+        .{ 0x0A80, 0x0AFF }, // Gujarati
+        .{ 0x0B00, 0x0B7F }, // Oriya
+        .{ 0x0B80, 0x0BFF }, // Tamil
+        .{ 0x0C00, 0x0C7F }, // Telugu
+        .{ 0x0C80, 0x0CFF }, // Kannada
+        .{ 0x0D00, 0x0D7F }, // Malayalam
+        .{ 0x0E00, 0x0E7F }, // Thai
+        .{ 0x0E80, 0x0EFF }, // Lao
+        .{ 0x0F00, 0x0FFF }, // Tibetan
+        .{ 0x1000, 0x109F }, // Myanmar
+        .{ 0x10A0, 0x10FF }, // Georgian
+        .{ 0x1200, 0x137F }, // Ethiopic
+        .{ 0x13A0, 0x13FF }, // Cherokee
+        .{ 0x1400, 0x167F }, // Canadian Aboriginal
+        .{ 0x1680, 0x169F }, // Ogham
+        .{ 0x16A0, 0x16FF }, // Runic
+        .{ 0x1700, 0x171F }, // Tagalog
+        .{ 0x1720, 0x173F }, // Hanunoo
+        .{ 0x1740, 0x175F }, // Buhid
+        .{ 0x1760, 0x177F }, // Tagbanwa
+        .{ 0x1780, 0x17FF }, // Khmer
+        .{ 0x1800, 0x18AF }, // Mongolian
+        .{ 0x1900, 0x194F }, // Limbu
+        .{ 0x1950, 0x197F }, // Tai Le
+        .{ 0x1980, 0x19DF }, // New Tai Lue
+        .{ 0x1A00, 0x1A1F }, // Buginese
+        .{ 0x1B00, 0x1B7F }, // Balinese
+        .{ 0x1C00, 0x1C4F }, // Lepcha
+        .{ 0x1C50, 0x1C7F }, // Ol Chiki
+        .{ 0x1D00, 0x1D7F }, // Phonetic extensions
+        .{ 0x1E00, 0x1EFF }, // Latin extended additional
+        .{ 0x2C60, 0x2C7F }, // Latin extended C
+        .{ 0x2D00, 0x2D2F }, // Georgian supplement
+        .{ 0x2D30, 0x2D7F }, // Tifinagh
+        .{ 0x2D80, 0x2DDF }, // Ethiopic extended
+        .{ 0x3040, 0x30FF }, // Hiragana / Katakana
+        .{ 0x3100, 0x312F }, // Bopomofo
+        .{ 0x3130, 0x318F }, // Hangul compatibility
+        .{ 0x31A0, 0x31BF }, // Bopomofo extended
+        .{ 0x31F0, 0x31FF }, // Katakana phonetic
+        .{ 0x3400, 0x4DBF }, // CJK extension A
+        .{ 0x4E00, 0x9FFF }, // CJK unified
+        .{ 0xA000, 0xA48F }, // Yi
+        .{ 0xA4D0, 0xA4FF }, // Lisu
+        .{ 0xA500, 0xA63F }, // Vai
+        .{ 0xA640, 0xA69F }, // Cyrillic extended B
+        .{ 0xA6A0, 0xA6FF }, // Bamum
+        .{ 0xA720, 0xA7FF }, // Latin extended D
+        .{ 0xA800, 0xA82F }, // Syloti Nagri
+        .{ 0xA840, 0xA87F }, // Phags-pa
+        .{ 0xA880, 0xA8DF }, // Saurashtra
+        .{ 0xA900, 0xA92F }, // Kayah Li
+        .{ 0xA930, 0xA95F }, // Rejang
+        .{ 0xA960, 0xA97F }, // Hangul Jamo extended A
+        .{ 0xA980, 0xA9DF }, // Javanese
+        .{ 0xAA00, 0xAA5F }, // Cham
+        .{ 0xAA60, 0xAA7F }, // Myanmar extended A
+        .{ 0xAA80, 0xAADF }, // Tai Viet
+        .{ 0xABC0, 0xABFF }, // Meetei Mayek
+        .{ 0xAC00, 0xD7AF }, // Hangul syllables
+        .{ 0xF900, 0xFAFF }, // CJK compatibility ideographs
+        .{ 0xFB00, 0xFB4F }, // Alphabetic presentation forms
+        .{ 0xFE70, 0xFEFF }, // Arabic presentation forms B
+        .{ 0xFF21, 0xFF3A }, // Fullwidth Latin A–Z
+        .{ 0xFF41, 0xFF5A }, // Fullwidth Latin a–z
+        .{ 0xFF66, 0xFF9D }, // Halfwidth Katakana
+        .{ 0xFFA0, 0xFFDC }, // Halfwidth Hangul
+    };
+    for (ranges) |r| {
+        if (cp >= r[0] and cp <= r[1]) return true;
+    }
     return false;
 }
 
 fn isNumber(cp: u21) bool {
     if (cp >= '0' and cp <= '9') return true;
+    if (cp >= 0x0660 and cp <= 0x0669) return true; // Arabic-Indic
+    if (cp >= 0x06F0 and cp <= 0x06F9) return true; // Extended Arabic-Indic
+    if (cp >= 0x0966 and cp <= 0x096F) return true; // Devanagari
+    if (cp >= 0x09E6 and cp <= 0x09EF) return true; // Bengali
+    if (cp >= 0x0E50 and cp <= 0x0E59) return true; // Thai
     if (cp >= 0xFF10 and cp <= 0xFF19) return true; // fullwidth
     return false;
 }
