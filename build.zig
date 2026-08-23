@@ -141,6 +141,14 @@ pub fn build(b: *std.Build) void {
     const stageM1_step = b.step("stageM1", "Prefill/decode split Stage M1 ledger");
     stageM1_step.dependOn(&stageM1_cmd.step);
 
+    const stageM2_cmd = b.addRunArtifact(exe);
+    stageM2_cmd.step.dependOn(b.getInstallStep());
+    stageM2_cmd.addArg("stageM2");
+    stageM2_cmd.expectStdOutMatch("Stage M2");
+    stageM2_cmd.expectExitCode(0);
+    const stageM2_step = b.step("stageM2", "Profile one decode token Stage M2 ledger");
+    stageM2_step.dependOn(&stageM2_cmd.step);
+
     const qwen_bench_cmd = b.addRunArtifact(exe);
     qwen_bench_cmd.step.dependOn(b.getInstallStep());
     qwen_bench_cmd.addArg("qwen-bench");
@@ -152,6 +160,17 @@ pub fn build(b: *std.Build) void {
     qwen_bench_cmd.expectExitCode(0);
     const qwen_bench_step = b.step("qwen-bench", "Qwen prefill/decode split (Stage M1)");
     qwen_bench_step.dependOn(&qwen_bench_cmd.step);
+
+    const qwen_profile_cmd = b.addRunArtifact(exe);
+    qwen_profile_cmd.step.dependOn(b.getInstallStep());
+    qwen_profile_cmd.addArg("qwen-profile");
+    qwen_profile_cmd.addArg("--mini");
+    qwen_profile_cmd.expectStdOutMatch("one decode token");
+    qwen_profile_cmd.expectStdOutMatch("top3");
+    qwen_profile_cmd.expectStdOutMatch("json");
+    qwen_profile_cmd.expectExitCode(0);
+    const qwen_profile_step = b.step("qwen-profile", "Qwen one-token profile (Stage M2)");
+    qwen_profile_step.dependOn(&qwen_profile_cmd.step);
 
     const kv_bench_cmd = b.addRunArtifact(exe);
     kv_bench_cmd.step.dependOn(b.getInstallStep());
@@ -362,6 +381,12 @@ pub fn build(b: *std.Build) void {
     stageM1_ok.expectExitCode(0);
     integration_step.dependOn(&stageM1_ok.step);
 
+    const stageM2_ok = b.addRunArtifact(exe);
+    stageM2_ok.addArg("stageM2");
+    stageM2_ok.expectStdOutMatch("Stage M2");
+    stageM2_ok.expectExitCode(0);
+    integration_step.dependOn(&stageM2_ok.step);
+
     const qwen_bench_ok = b.addRunArtifact(exe);
     qwen_bench_ok.addArg("qwen-bench");
     qwen_bench_ok.addArg("--mini");
@@ -371,6 +396,15 @@ pub fn build(b: *std.Build) void {
     qwen_bench_ok.expectStdOutMatch("json");
     qwen_bench_ok.expectExitCode(0);
     integration_step.dependOn(&qwen_bench_ok.step);
+
+    const qwen_profile_ok = b.addRunArtifact(exe);
+    qwen_profile_ok.addArg("qwen-profile");
+    qwen_profile_ok.addArg("--mini");
+    qwen_profile_ok.expectStdOutMatch("one decode token");
+    qwen_profile_ok.expectStdOutMatch("top3");
+    qwen_profile_ok.expectStdOutMatch("json");
+    qwen_profile_ok.expectExitCode(0);
+    integration_step.dependOn(&qwen_profile_ok.step);
 
     const kv_bench_ok = b.addRunArtifact(exe);
     kv_bench_ok.addArg("kv-bench");

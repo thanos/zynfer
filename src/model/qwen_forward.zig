@@ -6,16 +6,18 @@ const artifact = @import("artifact.zig");
 const qwen3 = @import("qwen3.zig");
 const qwen_weights = @import("qwen_weights.zig");
 const qwen_block = @import("qwen_block.zig");
+const decode_profile = @import("decode_profile.zig");
 const cpu = @import("../backends/cpu/ops.zig");
 const backend_mod = @import("../runtime/backend.zig");
 const apple = @import("../backends/apple/qwen_adapter.zig");
 const apple_gpu = @import("../backends/apple/gpu.zig");
 const Tensor = @import("../runtime/tensor.zig").Tensor;
 const compare = @import("../runtime/compare.zig");
+const sample_mod = @import("../runtime/sample.zig");
 
 pub const BackendKind = backend_mod.BackendKind;
 
-pub const Error = qwen_weights.Error || qwen_block.Error || @import("../runtime/sample.zig").Error || backend_mod.SelectionError || std.mem.Allocator.Error;
+pub const Error = qwen_weights.Error || qwen_block.Error || sample_mod.Error || backend_mod.SelectionError || std.mem.Allocator.Error;
 
 pub const TopK = struct {
     id: u32,
@@ -144,6 +146,40 @@ pub const Session = struct {
         }
     }
 
+    fn forwardBlockProfiled(
+        self: *Session,
+        layer: u32,
+        in_view: Tensor,
+        out_view: Tensor,
+        buckets: *decode_profile.Accumulators,
+        io: std.Io,
+        enable_signposts: bool,
+    ) Error!void {
+        const pos = self.blocks[layer].cache.used;
+        switch (self.backend) {
+            .cpu => try qwen_block.forward(
+                qwen_block.ProfilingCpuAdapter{ .buckets = buckets, .io = io, .enable_signposts = enable_signposts },
+                &self.blocks[layer],
+                in_view,
+                pos,
+                out_view,
+            ),
+            .apple => try qwen_block.forward(
+                apple.ProfilingAdapter{
+                    .gpu = self.gpu.?,
+                    .buckets = buckets,
+                    .io = io,
+                    .enable_signposts = enable_signposts,
+                },
+                &self.blocks[layer],
+                in_view,
+                pos,
+                out_view,
+            ),
+            .amd_hip => return error.BackendUnavailable,
+        }
+    }
+
     pub fn backendName(self: Session) []const u8 {
         return self.backend.name();
     }
@@ -254,6 +290,84 @@ pub const Session = struct {
         }
     }
 
+    /// Stage M2: one decode token with per-family wall buckets (+ optional sample).
+    /// Caller must have already run prefill (KV primed). Does not mutate `buckets` wall until done.
+    pub fn profileDecodeToken(
+        self: *Session,
+        io: std.Io,
+        token_id: u32,
+        logits_out: []f32,
+        buckets: *decode_profile.Accumulators,
+        enable_signposts: bool,
+        do_sample: bool,
+        sample_cfg: sample_mod.Config,
+        rng: *std.Random.DefaultPrng,
+    ) Error!u32 {
+        if (logits_out.len != self.arch.vocab_size) return error.ShapeMismatch;
+        if (self.blocks[0].cache.used >= self.max_seq) return error.InvalidShape;
+
+        self.resetMetalLaunchCounters();
+        const wall0 = std.Io.Clock.awake.now(io);
+
+        const hidden: usize = @intCast(self.arch.hidden_size);
+        const t: usize = 1;
+        const token_ids = [_]u32{token_id};
+
+        const embed_view = try self.hidden_a.viewAs(&.{ t, hidden });
+        {
+            const t0 = std.Io.Clock.awake.now(io);
+            try cpu.embeddingGather(embed_view, self.weights.embed, &token_ids);
+            buckets.add(.embed, nsDelta(t0, std.Io.Clock.awake.now(io)));
+        }
+
+        var in_buf = self.hidden_a;
+        var out_buf = self.hidden_b;
+        var layer: u32 = 0;
+        while (layer < self.arch.num_layers) : (layer += 1) {
+            const in_view = try in_buf.viewAs(&.{ t, hidden });
+            const out_view = try out_buf.viewAs(&.{ t, hidden });
+            try self.forwardBlockProfiled(layer, in_view, out_view, buckets, io, enable_signposts);
+            const tmp = in_buf;
+            in_buf = out_buf;
+            out_buf = tmp;
+        }
+
+        {
+            const t0 = std.Io.Clock.awake.now(io);
+            const last_in = try in_buf.viewAs(&.{ t, hidden });
+            const last_row = try last_in.viewLastRow();
+            const normed_row = try self.normed.viewAs(&.{ 1, hidden });
+            try cpu.rmsNorm(normed_row, last_row, self.weights.final_norm, self.arch.rms_norm_eps);
+            const normed_only = try normed_row.viewAs(&.{hidden});
+            if (self.weights.lm_head_tied) {
+                try lmHeadTied(logits_out, try normed_only.f32s(), self.weights.embed);
+            } else {
+                var logits_t = self.logits;
+                try cpu.matvec(logits_t, self.weights.lm_head, normed_only);
+                @memcpy(logits_out, try logits_t.f32s());
+            }
+            buckets.add(.lm_head, nsDelta(t0, std.Io.Clock.awake.now(io)));
+        }
+
+        var sampled: u32 = 0;
+        if (do_sample) {
+            const probs = try self.allocator.alloc(f32, self.arch.vocab_size);
+            defer self.allocator.free(probs);
+            const idx = try self.allocator.alloc(u32, self.arch.vocab_size);
+            defer self.allocator.free(idx);
+            const t0 = std.Io.Clock.awake.now(io);
+            sampled = try sample_mod.sampleWithScratch(logits_out, sample_cfg, probs, idx, rng);
+            buckets.add(.sampling, nsDelta(t0, std.Io.Clock.awake.now(io)));
+        }
+
+        const snap = self.metalLaunchSnapshot();
+        buckets.metal_encodes = snap.encodes;
+        buckets.metal_waits = snap.waits;
+        buckets.kv_len = self.blocks[0].cache.used;
+        buckets.wall_ns = nsDelta(wall0, std.Io.Clock.awake.now(io));
+        return sampled;
+    }
+
     pub const GenerateConfig = struct {
         max_new_tokens: u32 = 64,
         sample: @import("../runtime/sample.zig").Config = .{},
@@ -325,7 +439,6 @@ pub const Session = struct {
         cfg: GenerateConfig,
         rng: *std.Random.DefaultPrng,
     ) Error!GenerateStats {
-        const sample_mod = @import("../runtime/sample.zig");
         if (prompt_ids.len == 0) return error.InvalidShape;
 
         const logits = try self.allocator.alloc(f32, self.arch.vocab_size);
@@ -408,7 +521,6 @@ pub const Session = struct {
         cfg: GenerateConfig,
         rng: *std.Random.DefaultPrng,
     ) Error!GenerateStats {
-        const sample_mod = @import("../runtime/sample.zig");
         if (prompt_ids.len == 0) return error.InvalidShape;
 
         const logits = try self.allocator.alloc(f32, self.arch.vocab_size);
@@ -776,4 +888,34 @@ test "Stage M1: Metal generate reports measured encode/wait counts" {
     try std.testing.expect(stats.decode_steps >= 1);
     try std.testing.expect(stats.metal_encodes_decode > 0);
     try std.testing.expectEqual(stats.metal_encodes_decode, stats.metal_waits_decode);
+}
+
+test "Stage M2: profileDecodeToken fills family buckets" {
+    if (apple_gpu.skipAppleGpuTests()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const bytes = try buildMiniArtifact(gpa);
+    defer gpa.free(bytes);
+    var art = try artifact.Artifact.loadOwned(gpa, try gpa.dupe(u8, bytes));
+    defer art.deinit();
+
+    const arch = qwen3.stage11_mini;
+    const prompt = [_]u32{ 2, 3 };
+    var sess = try Session.initWithBackend(gpa, &art, arch, prompt.len + 2, .apple);
+    defer sess.deinit();
+
+    const logits = try gpa.alloc(f32, arch.vocab_size);
+    defer gpa.free(logits);
+    try sess.prefillLastLogits(&prompt, logits);
+
+    var buckets = decode_profile.Accumulators{};
+    var rng = std.Random.DefaultPrng.init(0);
+    const io = std.testing.io;
+    _ = try sess.profileDecodeToken(io, 1, logits, &buckets, false, true, .{ .temperature = 0 }, &rng);
+
+    try std.testing.expect(buckets.wall_ns > 0);
+    try std.testing.expect(buckets.sumFamilies() > 0);
+    try std.testing.expect(buckets.metal_encodes > 0);
+    try std.testing.expectEqual(buckets.metal_encodes, buckets.metal_waits);
+    const top = buckets.top3();
+    try std.testing.expect(top[0].ns >= top[1].ns);
 }

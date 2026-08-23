@@ -58,7 +58,7 @@ int8, ICB, extra fusions, Core ML/ANE — reopened at Qwen scale in M3–M7.
 | --- | --- | --- | --- |
 | **M0** | Metal Qwen forward + generate (f32) | — | **in progress** (open checklist in stage doc) |
 | **M1** | Prefill vs decode on Qwen | 14 | **done** — [`docs/stages/M1-prefill-vs-decode-qwen.md`](stages/M1-prefill-vs-decode-qwen.md) |
-| **M2** | Profile one decode token | 15 | not started |
+| **M2** | Profile one decode token | 15 | **done** — [`docs/stages/M2-profile-one-decode-token.md`](stages/M2-profile-one-decode-token.md) |
 | **M3** | Qwen-scale scheduling + fusion | 16 (Apple) | not started |
 | **M4** | fp16/bf16 Metal path | 8 reject reopen | not started |
 | **M5** | Weight quantization (Apple) | 18 (Apple) | not started |
@@ -71,6 +71,9 @@ baseline, per-layer ladder, LM-head path A/B, `kv_len>256` parity — see
 [`docs/stages/M0-metal-qwen-forward.md`](stages/M0-metal-qwen-forward.md).
 
 **M1 gate:** `zynfer qwen-bench` split report on CPU + Apple.
+
+**M2 gate:** `zynfer qwen-profile` names top-3 costs for one decode token
+(+ measured STREAM bandwidth / roofline).
 
 ---
 

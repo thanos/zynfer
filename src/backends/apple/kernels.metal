@@ -669,3 +669,21 @@ kernel void kv_append_f32(
     k_cache[dst] = k_new[src];
     v_cache[dst] = v_new[src];
 }
+
+// STREAM triad: c[i] = a[i] + scalar * b[i]. Bytes moved ≈ 3 * n * 4.
+struct StreamTriadParams {
+    float scalar;
+    uint n;
+};
+
+kernel void stream_triad_f32(
+    device const float *a [[buffer(0)]],
+    device const float *b [[buffer(1)]],
+    device float *c [[buffer(2)]],
+    constant StreamTriadParams &p [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid < p.n) {
+        c[gid] = a[gid] + p.scalar * b[gid];
+    }
+}

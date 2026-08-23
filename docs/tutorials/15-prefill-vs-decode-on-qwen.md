@@ -43,5 +43,5 @@ routine generates keep the M1 split.
 
 ## 5. Next
 
-**M2** profiles *where* one Metal decode token goes (and the bandwidth
-roofline). Do not start fusion (M3) until that table exists.
+**M2** is done (`qwen-profile`). **M3** collapses waits / fusions only for
+bottlenecks that table named.

@@ -109,9 +109,9 @@ pub const Arch = struct {
         return weight_bytes + kv_bytes;
     }
 
-    /// M0 Metal path: one encode+wait per op in `qwen_block` (~18 launches/layer).
+    /// M0 Metal path: measured ~17 encode+wait launches per layer (was rough 18).
     pub fn estimateMetalOpLaunchesPerDecodeToken(self: Arch) u32 {
-        const ops_per_layer: u32 = 18; // rms×3 + matmul×7 + rope×2 + attn + silu + add×2 (+qk norms in rms)
+        const ops_per_layer: u32 = 17;
         return ops_per_layer * self.num_layers;
     }
 };
@@ -122,7 +122,7 @@ test "Qwen3-0.6B dims are consistent" {
     try std.testing.expectEqual(@as(u32, 1024), a.kvDim());
     try std.testing.expectEqualStrings("qwen3-0.6b", a.model_id.name());
     try std.testing.expect(a.estimateDecodeBytesPerToken(128) > a.estimateDecodeBytesPerToken(1));
-    try std.testing.expectEqual(@as(u32, 18 * 28), a.estimateMetalOpLaunchesPerDecodeToken());
+    try std.testing.expectEqual(@as(u32, 17 * 28), a.estimateMetalOpLaunchesPerDecodeToken());
 }
 
 /// Tiny architecture for Stage 11 CI tests (1 layer, f32 fixture artifact).

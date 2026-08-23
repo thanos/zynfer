@@ -1050,6 +1050,77 @@ pub fn matvecF16(gpu: *Gpu, y: Tensor, a: Tensor, x: Tensor) Error!void {
     return error.Unsupported;
 }
 
+const StreamTriadParams = extern struct {
+    scalar: f32,
+    n: u32,
+};
+
+/// Measure sustainable unified-memory bandwidth via Metal STREAM triad.
+/// Returns bytes moved (3 × n × 4 × iters) and wall ns for the timed iters (after warmup).
+pub fn measureSustainableBandwidth(
+    gpu: *Gpu,
+    io: std.Io,
+    elems: u32,
+    warmup: u32,
+    iters: u32,
+) Error!@import("../../model/decode_profile.zig").Bandwidth {
+    const decode_profile = @import("../../model/decode_profile.zig");
+    if (!have_apple) return error.AppleUnavailable;
+    if (elems == 0 or iters == 0) return error.Invalid;
+    const bytes = @as(usize, elems) * @sizeOf(f32);
+    var a = try gpu.allocShared(bytes);
+    defer a.deinit();
+    var b = try gpu.allocShared(bytes);
+    defer b.deinit();
+    var cbuf = try gpu.allocShared(bytes);
+    defer cbuf.deinit();
+    @memset(a.bytes, 1);
+    @memset(b.bytes, 2);
+    @memset(cbuf.bytes, 0);
+    const params = StreamTriadParams{ .scalar = 1.5, .n = elems };
+    const tg = gpu.threadgroup1d();
+    var w: u32 = 0;
+    while (w < warmup) : (w += 1) {
+        try launchBufs(gpu, "stream_triad_f32", elems, 1, 1, tg, 1, 1, &.{ a, b, cbuf }, std.mem.asBytes(&params));
+    }
+    const t0 = std.Io.Clock.awake.now(io);
+    var i: u32 = 0;
+    while (i < iters) : (i += 1) {
+        try launchBufs(gpu, "stream_triad_f32", elems, 1, 1, tg, 1, 1, &.{ a, b, cbuf }, std.mem.asBytes(&params));
+    }
+    const t1 = std.Io.Clock.awake.now(io);
+    const elapsed: u64 = @intCast(@max(@as(i96, 0), t1.nanoseconds - t0.nanoseconds));
+    const bytes_moved = @as(u64, elems) * 3 * @sizeOf(f32) * iters;
+    return decode_profile.Bandwidth{ .bytes_moved = bytes_moved, .elapsed_ns = elapsed };
+}
+
+/// Mean wall ns for one tiny encode+wait (add_f32), after warmup.
+pub fn measureEmptyLaunchNs(gpu: *Gpu, io: std.Io, warmup: u32, iters: u32) Error!u64 {
+    if (!have_apple) return error.AppleUnavailable;
+    if (iters == 0) return error.Invalid;
+    const n: u32 = 64;
+    var a = try gpu.allocShared(n * 4);
+    defer a.deinit();
+    var b = try gpu.allocShared(n * 4);
+    defer b.deinit();
+    var cbuf = try gpu.allocShared(n * 4);
+    defer cbuf.deinit();
+    @memset(a.bytes, 0);
+    @memset(b.bytes, 0);
+    var w: u32 = 0;
+    while (w < warmup) : (w += 1) {
+        try launch1d(gpu, "add_f32", n, &.{ a, b, cbuf });
+    }
+    const t0 = std.Io.Clock.awake.now(io);
+    var i: u32 = 0;
+    while (i < iters) : (i += 1) {
+        try launch1d(gpu, "add_f32", n, &.{ a, b, cbuf });
+    }
+    const t1 = std.Io.Clock.awake.now(io);
+    const elapsed: u64 = @intCast(@max(@as(i96, 0), t1.nanoseconds - t0.nanoseconds));
+    return elapsed / iters;
+}
+
 test "fp16 Metal matmul/matvec are Unsupported" {
     if (gpu_mod.skipAppleGpuTests()) return error.SkipZigTest;
     var gpu = try Gpu.init();

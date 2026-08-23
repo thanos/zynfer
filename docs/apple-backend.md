@@ -87,24 +87,27 @@ ZYNFER_APPLE_BLOCK=baseline ./zig-out/bin/zynfer block-bench --backend apple
 1. Open **Instruments** → **Metal System Trace** (or **Game Performance**
    with Metal).
 2. Choose the `zynfer` process (or launch from Instruments).
-3. Record one `block-bench` run (~seconds). Stop.
+3. Record one `block-bench` or `qwen-profile --mini` run (~seconds). Stop.
 4. In the timeline, select GPU / command-buffer lanes. Expect:
-   - **Stage 6:** one command buffer per forward, many short dispatches,
-     then a **single** `waitUntilCompleted`;
-   - **baseline:** a gap after every dispatch in
-     `zynfer_mtl_encode_and_wait`.
+   - **Stage 6 (tiny-block):** one command buffer per forward, many short
+     dispatches, then a **single** `waitUntilCompleted`;
+   - **M0 Qwen baseline:** a gap after every dispatch in
+     `zynfer_mtl_encode_and_wait` (~17 waits/layer).
 5. With `ZYNFER_SIGNPOSTS=1`, os_signpost intervals also label
-   `prefill` / `decode` / `weights_upload` and the encode/batch waits
-   under subsystem `com.zynfer.metal` / category `stage8`.
+   `prefill` / `decode` / `weights_upload`, encode/batch waits, and
+   Stage M2 Qwen families (`qwen.rmsnorm`, `qwen.qkv`, `qwen.mlp`, …)
+   under subsystem `com.zynfer.metal`.
 
 | Signal | Meaning |
 | --- | --- |
 | One wait gap per forward (Stage 6) | CB batching working |
-| Serial gaps between every kernel (baseline) | Per-op `waitUntilCompleted` |
+| Serial gaps between every kernel (M0 Qwen / baseline) | Per-op `waitUntilCompleted` |
 | Short GPU kernels vs long wall time (baseline) | Launch/sync bound |
 | Nested `prefill`/`decode` around batch wait | Session-level signposts |
+| `qwen.*` family intervals (`qwen-profile`) | Stage M2 one-token breakdown |
 
 Measured A/B: `bench/results/apple-stage6-dev-laptop.md` (~8× decode).
+One-token profile: `bench/results/stageM2-dev-laptop.md`.
 
 ### Case study (baseline, not an optimization)
 
@@ -309,7 +312,7 @@ Apple Stage 7/8 or curriculum Stages 10–12 / 16 land.
 | --- | --- |
 | **Fused vs `baseline` numerical A/B test** | **done** — Stage 6 |
 | **Attention `kv_len` cap** | **done** — raised to **256**; tested at 96 |
-| **Signposts** | **done** — `ZYNFER_SIGNPOSTS=1` (`prefill`/`decode`/`weights_upload` + encode/batch) |
+| **Signposts** | **done** — `ZYNFER_SIGNPOSTS=1` (`prefill`/`decode`/`weights_upload` + encode/batch + M2 `qwen.*` families) |
 | **Peak RSS** | **done** — `peak_rss_bytes` in block-bench JSON; Peak memory in `docs/benchmarks.md` |
 | **Stress / cancel paths** | **done** — repeated Session + batch abort + dual-`Gpu` concurrency |
 | **fp16 / bf16 Metal** | **rejected** — `Unsupported` stubs |
@@ -327,7 +330,7 @@ Stage 8 ledger: `bench/results/apple-stage8-dev-laptop.md`.
 | --- | --- |
 | **Metal Qwen forward + generate** | **M0 (in progress)** — open checklist in [`docs/stages/M0-metal-qwen-forward.md`](stages/M0-metal-qwen-forward.md) |
 | **Prefill/decode split on Qwen** | **M1 (done)** — [`docs/stages/M1-prefill-vs-decode-qwen.md`](stages/M1-prefill-vs-decode-qwen.md) |
-| **Profile one token + roofline** | M2 (old 15) |
+| **Profile one token + roofline** | **done** — M2 (`qwen-profile`) |
 | **Qwen-scale batched schedule / fusion** | M3 (old 16) |
 | **fp16 / quant / static decode / ANE** | M4–M7 |
 | **Qwen3-4B Apple capstone** | M8 (old 25 slice) |

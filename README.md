@@ -35,6 +35,7 @@ See [`docs/stages/13-kv-cache.md`](docs/stages/13-kv-cache.md).
 [`docs/roadmap.md`](docs/roadmap.md). **M0:** Metal Qwen blocks + `--backend apple`
 (gate open — checklist in [`docs/stages/M0-metal-qwen-forward.md`](docs/stages/M0-metal-qwen-forward.md)).
 **M1 done:** `qwen-bench` prefill/decode split.
+**M2 done:** `qwen-profile` one-token family table + STREAM roofline.
 **Phase R (AMD)** waits for hardware; **Phase S (serving)** after M8.
 
 The Zig repository, HIP device enumeration (when ROCm is present),
@@ -1095,8 +1096,10 @@ zig build block-bench      # tiny-block prefill/decode (path labels in JSON)
 # Stage 7 force paths (must exit 2):
 #   ZYNFER_FORCE_SME=1 zig build run -- stage7
 #   ZYNFER_FORCE_COREML=1 zig build run -- caps
-# Stage 8 optional Instruments labels (prefill/decode/weights_upload + encode/batch):
+# Stage 8 / M2 optional Instruments labels (prefill/decode/weights_upload +
+# encode/batch + qwen.* families):
 #   ZYNFER_SIGNPOSTS=1 zig build run -- block-bench -- --backend apple
+#   ZYNFER_SIGNPOSTS=1 ./zig-out/bin/zynfer qwen-profile --mini
 zig build bench            # time HIP property queries
 zig build integration      # CLI contracts against the installed binary
 zig build docs             # Zig autodoc → zig-out/docs/api

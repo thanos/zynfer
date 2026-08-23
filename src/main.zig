@@ -17,6 +17,7 @@ const usage =
     \\  zynfer stage13      KV cache Stage 13 ledger
     \\  zynfer stageM0      Metal Qwen forward Stage M0 ledger
     \\  zynfer stageM1      Prefill/decode split Stage M1 ledger
+    \\  zynfer stageM2      Profile one decode token Stage M2 ledger
     \\  zynfer inspect PATH Validate and print a .zynfer artifact
     \\  zynfer artifact-compile [--out PATH] [--mini]  Write fixture .zynfer
     \\  zynfer forward-golden ARTIFACT [--tokens IDS] [--golden PATH] [--dump DIR] [--backend cpu|apple]
@@ -24,6 +25,7 @@ const usage =
     \\  zynfer chat [ARTIFACT] "PROMPT"   Interactive-style generate (streams tokens)
     \\  zynfer kv-bench [ARTIFACT] [--mini] [--layout] [--prompt TEXT] [--max-tokens N]
     \\  zynfer qwen-bench [ARTIFACT] [--mini] [--prompt TEXT] [--max-tokens N]
+    \\  zynfer qwen-profile [ARTIFACT] [--mini] [--prompt TEXT] [--backend apple|cpu]
     \\  zynfer setup [--skip-golden] [--skip-pip]   Download Qwen3-0.6B + build .zynfer
     \\  zynfer backends     List selectable backends
     \\  zynfer ops-bench    CPU vs Apple op microbenchmarks
@@ -274,6 +276,8 @@ pub fn main(init: std.process.Init) !void {
         try printStageM0(writer);
     } else if (std.mem.eql(u8, command, "stageM1") or std.mem.eql(u8, command, "stagem1")) {
         try printStageM1(writer);
+    } else if (std.mem.eql(u8, command, "stageM2") or std.mem.eql(u8, command, "stagem2")) {
+        try printStageM2(writer);
     } else if (std.mem.eql(u8, command, "inspect")) {
         if (n_pos < 1) {
             std.debug.print("usage: zynfer inspect PATH.zynfer\n", .{});
@@ -342,6 +346,20 @@ pub fn main(init: std.process.Init) !void {
             raw_prompt,
             artifact_mini,
             tokens_arg,
+        );
+    } else if (std.mem.eql(u8, command, "qwen-profile")) {
+        try runQwenProfile(
+            allocator,
+            io,
+            writer,
+            if (n_pos >= 1) positionals[0] else null,
+            prompt_arg,
+            tokenizer_dir,
+            seed,
+            raw_prompt,
+            artifact_mini,
+            tokens_arg,
+            forced_backend,
         );
     } else if (std.mem.eql(u8, command, "chat")) {
         // zynfer chat "prompt"  OR  zynfer chat ARTIFACT "prompt"  OR  --prompt=
@@ -673,6 +691,21 @@ fn printStageM1(writer: *std.Io.Writer) !void {
     try writer.print("  per-op decode profile / roofline — M2\n", .{});
     try writer.print("  batched Metal schedule — M3\n\n", .{});
     try writer.print("See docs/stages/M1-prefill-vs-decode-qwen.md\n", .{});
+}
+
+fn printStageM2(writer: *std.Io.Writer) !void {
+    try writer.print("zynfer Stage M2 — Profile one decode token\n", .{});
+    try writer.print("==========================================\n\n", .{});
+    try writer.print("Done\n", .{});
+    try writer.print("  CLI:              qwen-profile [--mini] → per-family table + top3 + json\n", .{});
+    try writer.print("  families:         RMSNorm, QKV, RoPE, attention, O-proj, MLP,\n", .{});
+    try writer.print("                    host layout, embed, LM head, sampling\n", .{});
+    try writer.print("  Metal:            measured enc/wait + empty-launch overhead estimate\n", .{});
+    try writer.print("  roofline:         STREAM triad bandwidth / B/tok_est → ideal tok/s\n", .{});
+    try writer.print("  signposts:        ZYNFER_SIGNPOSTS=1 → qwen.* family intervals\n\n", .{});
+    try writer.print("Not in Stage M2\n", .{});
+    try writer.print("  batched one-CB schedule / fusion ledger — M3\n\n", .{});
+    try writer.print("See docs/stages/M2-profile-one-decode-token.md\n", .{});
 }
 
 const StreamCtx = struct {
@@ -1462,6 +1495,249 @@ fn runQwenBench(
         try writer.flush();
         std.process.exit(1);
     }
+}
+
+/// Stage M2: per-family wall profile for one Metal (or CPU) decode token + roofline.
+fn runQwenProfile(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    writer: *std.Io.Writer,
+    artifact_path_opt: ?[]const u8,
+    prompt_opt: ?[]const u8,
+    tokenizer_dir_opt: ?[]const u8,
+    seed: u64,
+    raw_prompt: bool,
+    force_mini: bool,
+    tokens_arg: ?[]const u8,
+    forced_backend: ?[]const u8,
+) !void {
+    const default_path = "models/qwen3-0.6b.zynfer";
+    const use_mini = force_mini or (artifact_path_opt == null and !zynfer.util.fileExists(io, default_path));
+
+    try writer.print("zynfer qwen-profile — one decode token (Stage M2)\n", .{});
+    try writer.print("=================================================\n\n", .{});
+
+    var art: zynfer.artifact.Artifact = undefined;
+    var prompt_ids: []u32 = undefined;
+    var free_prompt = false;
+    defer if (free_prompt) allocator.free(prompt_ids);
+    var arch: zynfer.qwen3.Arch = undefined;
+
+    if (use_mini) {
+        try writer.print("fixture: stage11-mini (in-memory)\n", .{});
+        const bytes = try zynfer.qwen_forward.buildMiniArtifact(allocator);
+        art = try zynfer.artifact.Artifact.loadOwned(allocator, bytes);
+        arch = zynfer.qwen3.stage11_mini;
+        if (tokens_arg) |s| {
+            prompt_ids = try parseCsvTokenIds(allocator, s);
+            free_prompt = true;
+        } else {
+            prompt_ids = try allocator.dupe(u32, &.{ 2, 3 });
+            free_prompt = true;
+        }
+    } else {
+        const path = artifact_path_opt orelse default_path;
+        try writer.print("artifact: {s}\n", .{path});
+        art = zynfer.artifact.Artifact.loadFile(allocator, io, path) catch |err| {
+            std.debug.print("qwen-profile: load failed ({s}): {s}\n", .{ path, @errorName(err) });
+            std.process.exit(2);
+        };
+        arch = try art.meta.toArch();
+        if (tokens_arg) |s| {
+            prompt_ids = try parseCsvTokenIds(allocator, s);
+            free_prompt = true;
+        } else {
+            const prompt = prompt_opt orelse "Explain gravity simply.";
+            const tok_dir = try resolveTokenizerDir(allocator, io, path, tokenizer_dir_opt);
+            defer allocator.free(tok_dir);
+            var tok = zynfer.tokenizer.Tokenizer.loadHfDir(allocator, io, tok_dir) catch |err| {
+                std.debug.print("qwen-profile: tokenizer load failed ({s}): {s}\n", .{ tok_dir, @errorName(err) });
+                std.process.exit(2);
+            };
+            defer tok.deinit();
+            const wrapped = if (raw_prompt)
+                try allocator.dupe(u8, prompt)
+            else
+                try tok.applyChatTemplate(allocator, prompt);
+            defer allocator.free(wrapped);
+            prompt_ids = tok.encode(allocator, wrapped) catch |err| {
+                std.debug.print("qwen-profile: encode failed: {s}\n", .{@errorName(err)});
+                std.process.exit(2);
+            };
+            free_prompt = true;
+        }
+    }
+    defer art.deinit();
+
+    const max_seq = prompt_ids.len + 2;
+    if (max_seq == 0 or max_seq > arch.max_position_embeddings) {
+        std.debug.print("qwen-profile: sequence too long\n", .{});
+        std.process.exit(2);
+    }
+
+    var kind: zynfer.BackendKind = .apple;
+    if (forced_backend) |name| {
+        kind = zynfer.backend.parseBackendKind(name) catch {
+            std.debug.print("qwen-profile: unknown --backend {s}\n", .{name});
+            std.process.exit(2);
+        };
+    } else if (use_mini) {
+        // Prefer Apple when available for the M2 gate; fall back to CPU.
+        zynfer.backend.requireBackend(.apple) catch {
+            kind = .cpu;
+        };
+    }
+    zynfer.backend.requireBackend(kind) catch |err| {
+        std.debug.print("qwen-profile: backend {s} unavailable: {s}\n", .{ kind.name(), @errorName(err) });
+        std.process.exit(2);
+    };
+
+    try writer.print("backend={s} prompt_tokens={d} layers={d} hidden={d}\n", .{
+        kind.name(),
+        prompt_ids.len,
+        arch.num_layers,
+        arch.hidden_size,
+    });
+    try writer.print("signposts: set ZYNFER_SIGNPOSTS=1 for Instruments (qwen.* + encode/batch)\n\n", .{});
+
+    var sess = zynfer.qwen_forward.Session.initWithBackend(allocator, &art, arch, max_seq, kind) catch |err| {
+        std.debug.print("qwen-profile: session init failed: {s}\n", .{@errorName(err)});
+        std.process.exit(2);
+    };
+    defer sess.deinit();
+
+    const logits = try allocator.alloc(f32, arch.vocab_size);
+    defer allocator.free(logits);
+    try sess.prefillLastLogits(prompt_ids, logits);
+
+    // Warm one unprofiled decode so the profiled step is not cold-start dominated.
+    if (prompt_ids.len + 1 < max_seq) {
+        const warm_id = try zynfer.sample.argmax(logits);
+        try sess.decodeToken(warm_id, logits);
+    }
+
+    var buckets = zynfer.decode_profile.Accumulators{};
+    var rng = std.Random.DefaultPrng.init(if (seed != 0) seed else 1);
+    const profile_token = try zynfer.sample.argmax(logits);
+    _ = try sess.profileDecodeToken(io, profile_token, logits, &buckets, true, true, .{ .temperature = 0 }, &rng);
+
+    const sum_ns = buckets.sumFamilies();
+    const wall_ms = @as(f64, @floatFromInt(buckets.wall_ns)) / 1e6;
+    try writer.print("{s:<28} {s:>10} {s:>8}\n", .{ "operation", "ms", "%" });
+    try writer.print("{s:-<28} {s:->10} {s:->8}\n", .{ "", "", "" });
+
+    const Family = zynfer.decode_profile.Family;
+    var fi: usize = 0;
+    while (fi < zynfer.decode_profile.family_count) : (fi += 1) {
+        const fam: Family = @enumFromInt(fi);
+        const ns = buckets.ns[fi];
+        const ms = @as(f64, @floatFromInt(ns)) / 1e6;
+        const pct = if (sum_ns == 0) 0 else 100.0 * @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(sum_ns));
+        try writer.print("{s:<28} {d:>10.3} {d:>7.1}\n", .{ fam.label(), ms, pct });
+    }
+    try writer.print("{s:-<28} {s:->10} {s:->8}\n", .{ "", "", "" });
+    try writer.print("{s:<28} {d:>10.3}\n", .{ "sum(families)", @as(f64, @floatFromInt(sum_ns)) / 1e6 });
+    try writer.print("{s:<28} {d:>10.3}\n", .{ "wall decode token", wall_ms });
+    const unaccounted = if (buckets.wall_ns > sum_ns) buckets.wall_ns - sum_ns else 0;
+    try writer.print("{s:<28} {d:>10.3}\n\n", .{ "unaccounted", @as(f64, @floatFromInt(unaccounted)) / 1e6 });
+
+    const top = buckets.top3();
+    try writer.print("top3:\n", .{});
+    try writer.print("  1. {s} ({d:.1}%)\n", .{
+        top[0].family.label(),
+        if (sum_ns == 0) 0 else 100.0 * @as(f64, @floatFromInt(top[0].ns)) / @as(f64, @floatFromInt(sum_ns)),
+    });
+    try writer.print("  2. {s} ({d:.1}%)\n", .{
+        top[1].family.label(),
+        if (sum_ns == 0) 0 else 100.0 * @as(f64, @floatFromInt(top[1].ns)) / @as(f64, @floatFromInt(sum_ns)),
+    });
+    try writer.print("  3. {s} ({d:.1}%)\n\n", .{
+        top[2].family.label(),
+        if (sum_ns == 0) 0 else 100.0 * @as(f64, @floatFromInt(top[2].ns)) / @as(f64, @floatFromInt(sum_ns)),
+    });
+
+    try writer.print("metal_encodes={d} metal_waits={d} kv_len={d}\n", .{
+        buckets.metal_encodes,
+        buckets.metal_waits,
+        buckets.kv_len,
+    });
+
+    var empty_launch_ns: u64 = 0;
+    var bw_gbps: f64 = 0;
+    if (kind == .apple) {
+        if (sess.gpu) |g| {
+            empty_launch_ns = zynfer.apple.ops.measureEmptyLaunchNs(g, io, 8, 64) catch 0;
+            const est = zynfer.decode_profile.emptyLaunchOverheadNs(buckets.metal_encodes, empty_launch_ns);
+            try writer.print(
+                "empty_encode_wait_ns={d} → est_launch_overhead_ms={d:.3} (embedded in Metal op families on M0 path)\n",
+                .{ empty_launch_ns, @as(f64, @floatFromInt(est)) / 1e6 },
+            );
+            // ~64 MiB elements: large enough for STREAM, small enough for laptop CI.
+            const elems: u32 = if (use_mini) (1 << 20) else (16 << 20);
+            if (zynfer.apple.ops.measureSustainableBandwidth(g, io, elems, 2, 4)) |bw| {
+                bw_gbps = bw.gbps();
+                try writer.print(
+                    "bandwidth_stream_triad: elems={d} bytes_moved={d} elapsed_ms={d:.3} → {d:.1} GB/s (measured)\n",
+                    .{
+                        elems,
+                        bw.bytes_moved,
+                        @as(f64, @floatFromInt(bw.elapsed_ns)) / 1e6,
+                        bw_gbps,
+                    },
+                );
+            } else |_| {
+                try writer.print("bandwidth_stream_triad: measurement failed\n", .{});
+            }
+        }
+    } else {
+        try writer.print("bandwidth_stream_triad: n/a (CPU backend)\n", .{});
+    }
+
+    const bytes_tok = arch.estimateDecodeBytesPerToken(buckets.kv_len);
+    const roof = zynfer.decode_profile.roofline(bytes_tok, bw_gbps, buckets.wall_ns);
+    try writer.print("bytes_per_tok_est={d}\n", .{bytes_tok});
+    if (bw_gbps > 0) {
+        try writer.print(
+            "roofline: ideal_tok_s={d:.3} measured_tok_s={d:.3} fraction={d:.4}\n",
+            .{ roof.ideal_tok_s, roof.measured_tok_s, roof.fraction },
+        );
+    } else {
+        try writer.print(
+            "roofline: ideal_tok_s=n/a measured_tok_s={d:.3} (no bandwidth)\n",
+            .{roof.measured_tok_s},
+        );
+    }
+
+    try writer.print("\njson\n", .{});
+    try writer.print(
+        "{{\"cmd\":\"qwen-profile\",\"backend\":\"{s}\",\"mini\":{},\"prompt_tokens\":{d},\"kv_len\":{d},\"wall_ns\":{d},\"sum_families_ns\":{d},\"metal_encodes\":{d},\"metal_waits\":{d},\"empty_launch_ns\":{d},\"bandwidth_gbps\":{d:.3},\"bytes_per_tok_est\":{d},\"ideal_tok_s\":{d:.6},\"measured_tok_s\":{d:.6},\"roofline_fraction\":{d:.6},\"top3\":[\"{s}\",\"{s}\",\"{s}\"],\"families\":{{",
+        .{
+            kind.name(),
+            use_mini,
+            prompt_ids.len,
+            buckets.kv_len,
+            buckets.wall_ns,
+            sum_ns,
+            buckets.metal_encodes,
+            buckets.metal_waits,
+            empty_launch_ns,
+            bw_gbps,
+            bytes_tok,
+            roof.ideal_tok_s,
+            roof.measured_tok_s,
+            roof.fraction,
+            top[0].family.label(),
+            top[1].family.label(),
+            top[2].family.label(),
+        },
+    );
+    fi = 0;
+    while (fi < zynfer.decode_profile.family_count) : (fi += 1) {
+        if (fi != 0) try writer.writeAll(",");
+        const fam: Family = @enumFromInt(fi);
+        try writer.print("\"{s}\":{d}", .{ fam.label(), buckets.ns[fi] });
+    }
+    try writer.print("}}}}\n", .{});
 }
 
 fn parseCsvTokenIds(allocator: std.mem.Allocator, csv: []const u8) ![]u32 {

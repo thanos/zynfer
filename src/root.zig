@@ -16,6 +16,7 @@ pub const kv_cache = @import("runtime/kv_cache.zig");
 pub const tiny_block = @import("model/tiny_block.zig");
 pub const qwen3 = @import("model/qwen3.zig");
 pub const qwen_forward = @import("model/qwen_forward.zig");
+pub const decode_profile = @import("model/decode_profile.zig");
 pub const tokenizer = @import("model/tokenizer.zig");
 pub const artifact = @import("model/artifact.zig");
 pub const sample = @import("runtime/sample.zig");
@@ -52,6 +53,7 @@ test {
     _ = tiny_block;
     _ = qwen3;
     _ = qwen_forward;
+    _ = decode_profile;
     _ = tokenizer;
     _ = artifact;
     _ = sample;
