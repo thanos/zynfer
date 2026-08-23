@@ -30,7 +30,10 @@ See [`docs/stages/12-tokenizer-sampling.md`](docs/stages/12-tokenizer-sampling.m
 **Stage 13 — KV cache is done (CPU)** — cached vs uncached generate, parity,
 `kv-bench`, memory formula.
 See [`docs/stages/13-kv-cache.md`](docs/stages/13-kv-cache.md).
-**Stage 14+ — prefill/decode metrics depth / AMD / serving remain.**
+**Phase M (Apple Qwen, fast path) — in progress** — see
+[`baoulo/prompts/fable-5-prompt.md`](baoulo/prompts/fable-5-prompt.md) and
+[`docs/roadmap.md`](docs/roadmap.md). **M0:** Metal Qwen blocks + `--backend apple`.
+**Phase R (AMD)** waits for hardware; **Phase S (serving)** after M8.
 
 The Zig repository, HIP device enumeration (when ROCm is present),
 environment report, CPU f32 reference ops, Metal kernels, a tiny

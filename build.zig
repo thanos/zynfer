@@ -125,6 +125,14 @@ pub fn build(b: *std.Build) void {
     const stage13_step = b.step("stage13", "KV cache Stage 13 ledger");
     stage13_step.dependOn(&stage13_cmd.step);
 
+    const stageM0_cmd = b.addRunArtifact(exe);
+    stageM0_cmd.step.dependOn(b.getInstallStep());
+    stageM0_cmd.addArg("stageM0");
+    stageM0_cmd.expectStdOutMatch("Stage M0");
+    stageM0_cmd.expectExitCode(0);
+    const stageM0_step = b.step("stageM0", "Metal Qwen forward Stage M0 ledger");
+    stageM0_step.dependOn(&stageM0_cmd.step);
+
     const kv_bench_cmd = b.addRunArtifact(exe);
     kv_bench_cmd.step.dependOn(b.getInstallStep());
     kv_bench_cmd.addArg("kv-bench");
@@ -321,6 +329,12 @@ pub fn build(b: *std.Build) void {
     stage13_ok.expectStdOutMatch("Stage 13");
     stage13_ok.expectExitCode(0);
     integration_step.dependOn(&stage13_ok.step);
+
+    const stageM0_ok = b.addRunArtifact(exe);
+    stageM0_ok.addArg("stageM0");
+    stageM0_ok.expectStdOutMatch("Stage M0");
+    stageM0_ok.expectExitCode(0);
+    integration_step.dependOn(&stageM0_ok.step);
 
     const kv_bench_ok = b.addRunArtifact(exe);
     kv_bench_ok.addArg("kv-bench");

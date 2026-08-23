@@ -224,7 +224,7 @@ pub const Gpu = struct {
         caps.addDisabled("AMX is not a public contract; CPU matrix wins attribute to Accelerate only");
         caps.addDisabled("No tokenizer/sampling; Stage 10 loads .zynfer metadata/tensors only");
         caps.addDisabled("Full Qwen forward is Stage 11; TTFT/tok/s need Stage 12");
-        caps.addDisabled("Metal attention_f32 caps kv_len at 256 (thread-local scores); larger returns Unsupported");
+        caps.addDisabled("Metal attention_f32 caps kv_len at 2048 (256 thread-local fast path); larger returns Unsupported");
         caps.addDisabled("Per-op apple.ops path still waits each kernel; Stage 6 batch+resident KV is the tiny-block schedule");
         caps.addDisabled("Each Gpu is single-owner; concurrent sessions need one Gpu (and buffers) per thread");
         if (!self.features.simdgroup_matrix_available) {

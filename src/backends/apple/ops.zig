@@ -445,9 +445,10 @@ pub fn rope(gpu: *Gpu, x: Tensor, pos0: usize, theta: f32) Error!void {
     try download(xb, x);
 }
 
-/// Thread-local softmax; `kv_len` must be <= `max_attention_kv`.
-/// Stage 8 raised the cap from 64 → 256 (still thread-local scores).
-pub const max_attention_kv: usize = 256;
+/// Thread-local softmax fast path for kv_len ≤ 256; device scores above that.
+/// Stage M0 raised cap to 2048 for Qwen-scale context.
+pub const max_attention_kv: usize = 2048;
+pub const max_attention_kv_threadlocal: usize = 256;
 
 const AttentionParams = extern struct {
     n_q: u32,
@@ -495,18 +496,36 @@ pub fn attention(
         .kv_stride = @intCast(kv_stride),
         .head_dim = @intCast(d),
     };
-    try launchBufs(
-        gpu,
-        "attention_f32",
-        @intCast(q_len),
-        @intCast(n_q),
-        1,
-        1,
-        1,
-        1,
-        &.{ qb, kb, vb, ob },
-        std.mem.asBytes(&params),
-    );
+    if (kv_len <= max_attention_kv_threadlocal) {
+        try launchBufs(
+            gpu,
+            "attention_f32",
+            @intCast(q_len),
+            @intCast(n_q),
+            1,
+            1,
+            1,
+            1,
+            &.{ qb, kb, vb, ob },
+            std.mem.asBytes(&params),
+        );
+    } else {
+        const score_elems = n_q * q_len * kv_len;
+        var sb = try gpu.allocShared(score_elems * @sizeOf(f32));
+        defer sb.deinit();
+        try launchBufs(
+            gpu,
+            "attention_f32_buf",
+            @intCast(q_len),
+            @intCast(n_q),
+            1,
+            1,
+            1,
+            1,
+            &.{ qb, kb, vb, ob, sb },
+            std.mem.asBytes(&params),
+        );
+    }
     try download(ob, out);
 }
 
@@ -622,7 +641,14 @@ pub fn encodeAttention(
         .kv_stride = kv_stride,
         .head_dim = head_dim,
     };
-    try launchBufs(gpu, "attention_f32", q_len, n_q, 1, 1, 1, 1, &.{ q, k, v, out }, std.mem.asBytes(&params));
+    if (kv_len <= max_attention_kv_threadlocal) {
+        try launchBufs(gpu, "attention_f32", q_len, n_q, 1, 1, 1, 1, &.{ q, k, v, out }, std.mem.asBytes(&params));
+    } else {
+        const score_elems = @as(usize, n_q) * @as(usize, q_len) * @as(usize, kv_len);
+        var sb = try gpu.allocShared(score_elems * @sizeOf(f32));
+        defer sb.deinit();
+        try launchBufs(gpu, "attention_f32_buf", q_len, n_q, 1, 1, 1, 1, &.{ q, k, v, out, sb }, std.mem.asBytes(&params));
+    }
 }
 
 const PermuteParams = extern struct {

@@ -1,4 +1,5 @@
-//! Full Qwen3 CPU forward: embed → blocks → final norm → LM head → logits.
+//! Full Qwen3 forward: embed → blocks → final norm → LM head → logits.
+//! CPU is the correctness oracle; Metal routing is Stage M0.
 
 const std = @import("std");
 const artifact = @import("artifact.zig");
@@ -6,10 +7,15 @@ const qwen3 = @import("qwen3.zig");
 const qwen_weights = @import("qwen_weights.zig");
 const qwen_block = @import("qwen_block.zig");
 const cpu = @import("../backends/cpu/ops.zig");
+const backend_mod = @import("../runtime/backend.zig");
+const apple = @import("../backends/apple/qwen_adapter.zig");
+const apple_gpu = @import("../backends/apple/gpu.zig");
 const Tensor = @import("../runtime/tensor.zig").Tensor;
 const compare = @import("../runtime/compare.zig");
 
-pub const Error = qwen_weights.Error || qwen_block.Error || @import("../runtime/sample.zig").Error || std.mem.Allocator.Error;
+pub const BackendKind = backend_mod.BackendKind;
+
+pub const Error = qwen_weights.Error || qwen_block.Error || @import("../runtime/sample.zig").Error || backend_mod.SelectionError || std.mem.Allocator.Error;
 
 pub const TopK = struct {
     id: u32,
@@ -28,6 +34,8 @@ pub const Session = struct {
     normed: Tensor,
     logits: Tensor,
     allocator: std.mem.Allocator,
+    backend: BackendKind,
+    gpu: ?*apple_gpu.Gpu,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -35,6 +43,17 @@ pub const Session = struct {
         arch: qwen3.Arch,
         max_seq: usize,
     ) Error!Session {
+        return initWithBackend(allocator, art, arch, max_seq, .cpu);
+    }
+
+    pub fn initWithBackend(
+        allocator: std.mem.Allocator,
+        art: *const artifact.Artifact,
+        arch: qwen3.Arch,
+        max_seq: usize,
+        kind: BackendKind,
+    ) Error!Session {
+        try backend_mod.requireBackend(kind);
         if (max_seq == 0 or max_seq > arch.max_position_embeddings) return error.InvalidShape;
         var weights = try qwen_weights.Weights.load(allocator, art, arch);
         errdefer weights.deinit();
@@ -57,6 +76,14 @@ pub const Session = struct {
         const hidden: usize = @intCast(arch.hidden_size);
         const vocab: usize = @intCast(arch.vocab_size);
 
+        var gpu: ?*apple_gpu.Gpu = null;
+        if (kind == .apple) {
+            const g = try allocator.create(apple_gpu.Gpu);
+            errdefer allocator.destroy(g);
+            g.* = try apple_gpu.Gpu.init();
+            gpu = g;
+        }
+
         return .{
             .arch = arch,
             .weights = weights,
@@ -67,10 +94,16 @@ pub const Session = struct {
             .normed = try Tensor.alloc(allocator, .f32, &.{ max_seq, hidden }),
             .logits = try Tensor.alloc(allocator, .f32, &.{vocab}),
             .allocator = allocator,
+            .backend = kind,
+            .gpu = gpu,
         };
     }
 
     pub fn deinit(self: *Session) void {
+        if (self.gpu) |g| {
+            g.deinit();
+            self.allocator.destroy(g);
+        }
         self.hidden_a.deinit();
         self.hidden_b.deinit();
         self.normed.deinit();
@@ -83,6 +116,36 @@ pub const Session = struct {
 
     pub fn reset(self: *Session) void {
         for (self.blocks) |*b| b.reset();
+    }
+
+    fn forwardBlock(
+        self: *Session,
+        layer: u32,
+        in_view: Tensor,
+        out_view: Tensor,
+    ) Error!void {
+        const pos = self.blocks[layer].cache.used;
+        switch (self.backend) {
+            .cpu => try qwen_block.forward(
+                qwen_block.CpuAdapter{},
+                &self.blocks[layer],
+                in_view,
+                pos,
+                out_view,
+            ),
+            .apple => try qwen_block.forward(
+                apple.Adapter{ .gpu = self.gpu.? },
+                &self.blocks[layer],
+                in_view,
+                pos,
+                out_view,
+            ),
+            .amd_hip => return error.BackendUnavailable,
+        }
+    }
+
+    pub fn backendName(self: Session) []const u8 {
+        return self.backend.name();
     }
 
     /// Prefill `token_ids` and write logits for the **last** token into `logits_out`.
@@ -124,13 +187,7 @@ pub const Session = struct {
         while (layer < self.arch.num_layers) : (layer += 1) {
             const in_view = try in_buf.viewAs(&.{ t, hidden });
             const out_view = try out_buf.viewAs(&.{ t, hidden });
-            try qwen_block.forward(
-                qwen_block.CpuAdapter{},
-                &self.blocks[layer],
-                in_view,
-                self.blocks[layer].cache.used,
-                out_view,
-            );
+            try self.forwardBlock(layer, in_view, out_view);
             if (hook) |_| {
                 const out = try out_view.f32s();
                 var name_buf: [32]u8 = undefined;
@@ -177,13 +234,7 @@ pub const Session = struct {
         while (layer < self.arch.num_layers) : (layer += 1) {
             const in_view = try in_buf.viewAs(&.{ t, hidden });
             const out_view = try out_buf.viewAs(&.{ t, hidden });
-            try qwen_block.forward(
-                qwen_block.CpuAdapter{},
-                &self.blocks[layer],
-                in_view,
-                self.blocks[layer].cache.used,
-                out_view,
-            );
+            try self.forwardBlock(layer, in_view, out_view);
             const tmp = in_buf;
             in_buf = out_buf;
             out_buf = tmp;
@@ -635,4 +686,30 @@ test "Stage 13: cached generate matches uncached greedy tokens" {
     try std.testing.expect(cached_ids.items.len == max_new);
     try std.testing.expect(sess_c.kvBytesUsed() > 0);
     try std.testing.expect(sess_c.kvBytesCapacity() >= sess_c.kvBytesUsed());
+}
+
+test "Stage M0: mini Metal forward matches CPU logits" {
+    if (apple_gpu.skipAppleGpuTests()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const bytes = try buildMiniArtifact(gpa);
+    defer gpa.free(bytes);
+    var art = try artifact.Artifact.loadOwned(gpa, try gpa.dupe(u8, bytes));
+    defer art.deinit();
+
+    const arch = qwen3.stage11_mini;
+    const token_ids = [_]u32{ 2, 3 };
+
+    var cpu_sess = try Session.init(gpa, &art, arch, 8);
+    defer cpu_sess.deinit();
+    var metal_sess = try Session.initWithBackend(gpa, &art, arch, 8, .apple);
+    defer metal_sess.deinit();
+
+    const cpu_logits = try gpa.alloc(f32, arch.vocab_size);
+    defer gpa.free(cpu_logits);
+    const metal_logits = try gpa.alloc(f32, arch.vocab_size);
+    defer gpa.free(metal_logits);
+
+    try cpu_sess.prefillLastLogits(&token_ids, cpu_logits);
+    try metal_sess.prefillLastLogits(&token_ids, metal_logits);
+    try compare.expectClose(cpu_logits, metal_logits, 3e-3, 3e-3);
 }

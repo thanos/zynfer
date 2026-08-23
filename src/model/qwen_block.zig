@@ -7,8 +7,9 @@ const KvCache = @import("../runtime/kv_cache.zig").KvCache;
 const qwen3 = @import("qwen3.zig");
 const qwen_weights = @import("qwen_weights.zig");
 const cpu = @import("../backends/cpu/ops.zig");
+const apple_ops = @import("../backends/apple/ops.zig");
 
-pub const Error = TensorError;
+pub const Error = TensorError || cpu.OpsError || apple_ops.Error;
 
 pub const Scratch = struct {
     xn: Tensor,

@@ -15,9 +15,10 @@ const usage =
     \\  zynfer stage11      Qwen forward + golden logits Stage 11 ledger
     \\  zynfer stage12      Tokenizer + sampling Stage 12 ledger
     \\  zynfer stage13      KV cache Stage 13 ledger
+    \\  zynfer stageM0      Metal Qwen forward Stage M0 ledger
     \\  zynfer inspect PATH Validate and print a .zynfer artifact
     \\  zynfer artifact-compile [--out PATH] [--mini]  Write fixture .zynfer
-    \\  zynfer forward-golden ARTIFACT [--tokens IDS] [--golden PATH] [--dump DIR]
+    \\  zynfer forward-golden ARTIFACT [--tokens IDS] [--golden PATH] [--dump DIR] [--backend cpu|apple]
     \\  zynfer run ARTIFACT --prompt TEXT [--tokenizer DIR] [sampling flags]
     \\  zynfer chat [ARTIFACT] "PROMPT"   Interactive-style generate (streams tokens)
     \\  zynfer kv-bench [ARTIFACT] [--mini] [--layout] [--prompt TEXT] [--max-tokens N]
@@ -267,6 +268,8 @@ pub fn main(init: std.process.Init) !void {
         try printStage12(writer);
     } else if (std.mem.eql(u8, command, "stage13")) {
         try printStage13(writer);
+    } else if (std.mem.eql(u8, command, "stageM0") or std.mem.eql(u8, command, "stagem0")) {
+        try printStageM0(writer);
     } else if (std.mem.eql(u8, command, "inspect")) {
         if (n_pos < 1) {
             std.debug.print("usage: zynfer inspect PATH.zynfer\n", .{});
@@ -281,11 +284,11 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("usage: zynfer forward-golden ARTIFACT.zynfer [--tokens 1,2,3] [--golden PATH] [--dump DIR]\n", .{});
             std.process.exit(2);
         }
-        try runForwardGolden(allocator, io, writer, positionals[0], tokens_arg, golden_path, dump_dir);
+        try runForwardGolden(allocator, io, writer, positionals[0], tokens_arg, golden_path, dump_dir, try resolveKind(forced_backend));
     } else if (std.mem.eql(u8, command, "run")) {
         if (n_pos < 1 or prompt_arg == null) {
             std.debug.print(
-                "usage: zynfer run ARTIFACT.zynfer --prompt TEXT [--tokenizer DIR] [--max-tokens N] [--temperature T] [--top-k K] [--top-p P] [--seed S] [--raw] [--no-stream] [--no-kv-cache]\n",
+                "usage: zynfer run ARTIFACT.zynfer --prompt TEXT [--tokenizer DIR] [--max-tokens N] [--temperature T] [--top-k K] [--top-p P] [--seed S] [--raw] [--no-stream] [--no-kv-cache] [--backend cpu|apple]\n",
                 .{},
             );
             std.process.exit(2);
@@ -305,6 +308,7 @@ pub fn main(init: std.process.Init) !void {
             raw_prompt,
             !no_stream,
             !no_kv_cache,
+            try resolveKind(forced_backend),
         );
     } else if (std.mem.eql(u8, command, "kv-bench")) {
         try runKvBench(
@@ -360,6 +364,7 @@ pub fn main(init: std.process.Init) !void {
             raw_prompt,
             !no_stream,
             !no_kv_cache,
+            try resolveKind(forced_backend),
         );
     } else if (std.mem.eql(u8, command, "setup")) {
         try runSetup(host, writer, skip_pip, skip_download, skip_golden);
@@ -613,6 +618,25 @@ fn printStage13(writer: *std.Io.Writer) !void {
     try writer.print("See docs/stages/13-kv-cache.md\n", .{});
 }
 
+fn printStageM0(writer: *std.Io.Writer) !void {
+    try writer.print("zynfer Stage M0 — Metal Qwen forward + generate (f32)\n", .{});
+    try writer.print("===================================================\n\n", .{});
+    try writer.print("In progress / Phase M capstone path (see baoulo/prompts/fable-5-prompt.md)\n\n", .{});
+    try writer.print("Done (M0 baseline)\n", .{});
+    try writer.print("  routing:          qwen_block → apple qwen_adapter (per-op Metal)\n", .{});
+    try writer.print("  backend:          --backend cpu|apple on run / forward-golden / chat\n", .{});
+    try writer.print("  attention cap:    kv_len ≤ {d} ({d} thread-local fast path)\n", .{
+        zynfer.apple.ops.max_attention_kv,
+        zynfer.apple.ops.max_attention_kv_threadlocal,
+    });
+    try writer.print("  oracle:           CPU reference; embed/norm/lm_head on CPU (M0)\n", .{});
+    try writer.print("  CI test:          mini artifact Metal logits vs CPU\n\n", .{});
+    try writer.print("Next (M1–M8)\n", .{});
+    try writer.print("  M1 prefill/decode split  M2 profile token  M3 batched 28-layer schedule\n", .{});
+    try writer.print("  M4 fp16  M5 quant  M6 static decode  M7 ANE experiment  M8 Qwen3-4B capstone\n\n", .{});
+    try writer.print("See docs/stages/M0-metal-qwen-forward.md\n", .{});
+}
+
 const StreamCtx = struct {
     tok: *const zynfer.tokenizer.Tokenizer,
     allocator: std.mem.Allocator,
@@ -775,6 +799,7 @@ fn runGenerate(
     raw_prompt: bool,
     stream: bool,
     use_kv_cache: bool,
+    backend: zynfer.BackendKind,
 ) !void {
     const tok_dir = try resolveTokenizerDir(allocator, io, artifact_path, tokenizer_dir_opt);
     defer allocator.free(tok_dir);
@@ -816,7 +841,7 @@ fn runGenerate(
         std.process.exit(2);
     }
 
-    var sess = try zynfer.qwen_forward.Session.init(allocator, &art, arch, max_seq);
+    var sess = try zynfer.qwen_forward.Session.initWithBackend(allocator, &art, arch, max_seq, backend);
     defer sess.deinit();
 
     const stop_ids = [_]u32{ tok.eos_token_id, tok.endoftext_id, tok.im_end_id };
@@ -867,10 +892,11 @@ fn runGenerate(
     }
 
     try writer.print("\n---\n", .{});
-    try writer.print("prompt_tokens={d} generated_tokens={d} kv_cache={s}\n", .{
+    try writer.print("prompt_tokens={d} generated_tokens={d} kv_cache={s} backend={s}\n", .{
         stats.prompt_tokens,
         stats.generated_tokens,
         if (stats.use_kv_cache) "on" else "off",
+        sess.backendName(),
     });
     if (use_kv_cache) {
         try writer.print("kv_bytes_used={d} kv_bytes_cap={d}\n", .{ sess.kvBytesUsed(), sess.kvBytesCapacity() });
@@ -1207,6 +1233,7 @@ fn runForwardGolden(
     tokens_arg: ?[]const u8,
     golden_path: ?[]const u8,
     dump_dir: ?[]const u8,
+    backend: zynfer.BackendKind,
 ) !void {
     var art = zynfer.artifact.Artifact.loadFile(allocator, io, artifact_path) catch |err| {
         std.debug.print("forward-golden: load failed ({s}): {s}\n", .{ artifact_path, @errorName(err) });
@@ -1226,7 +1253,7 @@ fn runForwardGolden(
         try token_list.append(allocator, 3);
     }
 
-    var sess = try zynfer.qwen_forward.Session.init(allocator, &art, arch, token_list.items.len);
+    var sess = try zynfer.qwen_forward.Session.initWithBackend(allocator, &art, arch, token_list.items.len, backend);
     defer sess.deinit();
 
     const logits = try allocator.alloc(f32, arch.vocab_size);
@@ -1284,7 +1311,7 @@ fn runForwardGolden(
     var top: [8]zynfer.qwen_forward.TopK = undefined;
     zynfer.qwen_forward.topK(logits, 8, &top);
 
-    try writer.print("forward-golden: {s}\n", .{artifact_path});
+    try writer.print("forward-golden: {s} backend={s}\n", .{ artifact_path, sess.backendName() });
     try writer.print("tokens: {d}\n", .{token_list.items.len});
     try writer.print("top logits (last token):\n", .{});
     for (top) |entry| {

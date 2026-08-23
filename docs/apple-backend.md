@@ -271,7 +271,7 @@ Stage 6 A/B: `bench/results/apple-stage6-dev-laptop.md`.
 | Metal `simdgroup_matrix` matmul | Apple7+; auto when M·N·K≥64³; `_x4` force-only (slower at 256³) |
 | Metal int8 GEMV/GEMM (`matvec_q8_f32` / `matmul_q8_f32`) | explicit API; fair (prepacked) benches; not auto over f32 |
 | Metal fused / batched tiny-block | Stage 6 one CB/wait + resident KV; ~8× vs per-op baseline |
-| Metal attention long context | Stage 8: `kv_len` ≤ 256 |
+| Metal attention long context | Stage M0: `kv_len` ≤ **2048** (256 thread-local fast path) |
 | SME / SME2 | hardware probed (`FEAT_SME`); kernels **rejected** (Stage 7) |
 | Core ML / ANE | framework probed; inference path **rejected** (no verified subgraph) |
 | fp16 / bf16 Metal | **rejected** Stage 8 (`Unsupported`); kernels remain f32 |
@@ -321,15 +321,27 @@ Apple Stage 7/8 or curriculum Stages 10–12 / 16 land.
 
 Stage 8 ledger: `bench/results/apple-stage8-dev-laptop.md`.
 
-### Still open — curriculum (not Apple-6)
+### Still open — curriculum (Phase M)
 
 | Item | Lands in |
 | --- | --- |
-| **Qwen loader / artifact** | **done (Stage 10)** — `.zynfer` v1; full weights via optional Python converter |
-| **Full Qwen forward + golden logits** | Stage 11 — [`docs/stages/11-qwen-forward.md`](stages/11-qwen-forward.md) |
-| **Tokenizer / sampling** (real TTFT) | Stage 12 |
-| **HF download in CI** | Never — local `hf download` + converter only |
-| **Qwen-scale / HIP fusion ledger** | Stage 16 |
+| **Metal Qwen forward + generate** | **M0 (in progress)** — [`docs/stages/M0-metal-qwen-forward.md`](stages/M0-metal-qwen-forward.md) |
+| **Prefill/decode split on Qwen** | M1 (old 14) |
+| **Profile one token + roofline** | M2 (old 15) |
+| **Qwen-scale batched schedule / fusion** | M3 (old 16) |
+| **fp16 / quant / static decode / ANE** | M4–M7 |
+| **Qwen3-4B Apple capstone** | M8 (old 25 slice) |
+
+See [`docs/roadmap.md`](roadmap.md) and [`baoulo/prompts/fable-5-prompt.md`](../baoulo/prompts/fable-5-prompt.md).
+
+### Previously mapped (done)
+
+| Item | Lands in |
+| --- | --- |
+| **Qwen loader / artifact** | **done (Stage 10)** |
+| **Full Qwen forward + golden logits** | **done (Stage 11)** |
+| **Tokenizer / sampling** | **done (Stage 12)** |
+| **KV cache** | **done (Stage 13)** |
 
 Stage 5 matrix paths: `bench/results/apple-stage5-dev-laptop.md`.
 

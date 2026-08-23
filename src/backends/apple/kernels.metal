@@ -460,7 +460,8 @@ struct AttentionParams {
 };
 
 // One thread per (q_token, q_head). Scores live in thread-local memory.
-// kv_len is capped at 256 (Stage 8); Zig returns Unsupported above that.
+// kv_len is capped at max_attention_kv (Stage M0); Zig returns Unsupported above that.
+// For kv_len <= 256, scores live in thread-local memory (fast path).
 kernel void attention_f32(
     device const float *q [[buffer(0)]],
     device const float *k [[buffer(1)]],
@@ -513,6 +514,71 @@ kernel void attention_f32(
     }
     for (uint tk = 0; tk < p.kv_len; tk++) {
         float w = scores[tk] * inv;
+        if (w == 0.0f) {
+            continue;
+        }
+        device const float *vrow = v + (kv_h * p.kv_stride + tk) * d;
+        for (uint i = 0; i < d; i++) {
+            orow[i] += w * vrow[i];
+        }
+    }
+}
+
+// Long-context path: scores in device memory (Stage M0). Layout per (q_head, q_token):
+// scores[(h * q_len + tq) * kv_len + tk]
+kernel void attention_f32_buf(
+    device const float *q [[buffer(0)]],
+    device const float *k [[buffer(1)]],
+    device const float *v [[buffer(2)]],
+    device float *out [[buffer(3)]],
+    device float *scores [[buffer(4)]],
+    constant AttentionParams &p [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint tq = gid.x;
+    uint h = gid.y;
+    if (tq >= p.q_len || h >= p.n_q) {
+        return;
+    }
+    uint group = p.n_q / p.n_kv;
+    uint kv_h = h / group;
+    uint d = p.head_dim;
+    float scale = rsqrt(float(d));
+    device float *row_scores = scores + (h * p.q_len + tq) * p.kv_len;
+
+    device const float *qrow = q + (h * p.q_len + tq) * d;
+    float max_s = -INFINITY;
+    for (uint tk = 0; tk < p.kv_len; tk++) {
+        bool causal_ok = (p.kv_len - p.q_len + tq) >= tk;
+        if (!causal_ok) {
+            row_scores[tk] = -INFINITY;
+            continue;
+        }
+        device const float *krow = k + (kv_h * p.kv_stride + tk) * d;
+        float dot = 0.0f;
+        for (uint i = 0; i < d; i++) {
+            dot += qrow[i] * krow[i];
+        }
+        row_scores[tk] = dot * scale;
+        max_s = max(max_s, row_scores[tk]);
+    }
+
+    float sum = 0.0f;
+    for (uint tk = 0; tk < p.kv_len; tk++) {
+        if (isinf(row_scores[tk])) {
+            row_scores[tk] = 0.0f;
+        } else {
+            row_scores[tk] = exp(row_scores[tk] - max_s);
+            sum += row_scores[tk];
+        }
+    }
+    float inv = (sum == 0.0f) ? 0.0f : 1.0f / sum;
+    device float *orow = out + (h * p.q_len + tq) * d;
+    for (uint i = 0; i < d; i++) {
+        orow[i] = 0.0f;
+    }
+    for (uint tk = 0; tk < p.kv_len; tk++) {
+        float w = row_scores[tk] * inv;
         if (w == 0.0f) {
             continue;
         }

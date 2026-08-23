@@ -1,115 +1,119 @@
 # Roadmap
 
 Zynfer is built as a staged curriculum. Each stage produces code, tests,
-a tutorial, a benchmark command, and a short report. Do not skip ahead
-when correctness is unresolved.
+a tutorial, a benchmark command, and a short report.
 
-| Stage | Title | Status |
+**Planning authority:** [`baoulo/prompts/fable-5-prompt.md`](../baoulo/prompts/fable-5-prompt.md)
+supersedes the stage ordering in the master development prompt. Golden
+Rules, Definition of Done, benchmark philosophy, and teaching obligations
+from the master prompt remain binding.
+
+## Phase overview
+
+```text
+Phase M — Apple Qwen backend, complete and fast   (now)
+Phase R — AMD gfx1201 campaign                    (when hardware lands)
+Phase S — Serving & scale, backend-neutral        (after M, overlapping R)
+```
+
+| Phase | Goal | Precondition |
 | --- | --- | --- |
-| 0 | Reproducible development environment | **done on the Mac and HIP-absent hosts** |
-| Apple-1 | Backend-neutral types + CPU oracle | **done** |
-| Apple-2 | Metal device / shared buffers / trivial kernel | **done** |
-| Apple-3 | Metal LLM ops vs CPU + SwiGLU fixture | **done** |
-| Apple-4 | Prefill/decode + KV cache | **done** (tiny-block; Stage 6 owns resident-KV schedule) |
-| Apple-5 | simdgroup_matrix / quantized GEMV / Accelerate | **done** (size-gated; see `bench/results/apple-stage5-dev-laptop.md`) |
-| Apple-6 | Fusion / fewer waits / Metal-resident KV | **done** (one CB/wait + resident KV; see `bench/results/apple-stage6-dev-laptop.md`) |
-| Apple-7 | SME / Core ML experiments | **done** (probed; both inference paths **rejected** — `bench/results/apple-stage7-dev-laptop.md`) |
-| Apple-8 | Hardening + Stage 6 leftovers | **done** (kv_len 256, signposts, RSS, stress; ICB/fp16/extra fusion rejected — `bench/results/apple-stage8-dev-laptop.md`) |
-| 1 | Zig meets HIP (alloc, copy, streams) | not started |
-| 2 | First AMD kernel (vector add) | not started |
-| 3 | Tensor representation and memory planning | partial (host tensors exist; no GPU planner) |
-| 4 | Reductions, softmax, RMSNorm | CPU + Metal f32; not HIP |
-| 5 | GEMV and GEMM | CPU + Metal f32; not HIP |
-| 6 | SiLU and SwiGLU | CPU + Metal f32; not HIP |
-| 7 | RoPE | CPU + Metal f32; not HIP |
-| 8 | Attention from scratch | CPU + Metal f32 (`kv_len` ≤ 256 on Metal) |
-| 9 | One complete transformer block | **done as tiny fixture**; not a Qwen block |
-| 10 | Checkpoint inspection and artifact compiler | **done** (`.zynfer` v1 + inspect/load; see `bench/results/stage10-dev-laptop.md`) |
-| 11 | Full Qwen3-0.6B forward pass | **done** — CPU forward + golden logits ([`docs/stages/11-qwen-forward.md`](stages/11-qwen-forward.md)) |
-| 12 | Tokenizer and sampling | **done** — BPE + generate CLI ([`docs/stages/12-tokenizer-sampling.md`](stages/12-tokenizer-sampling.md)) |
-| 13 | KV cache | **done** — cached vs uncached Qwen generate ([`docs/stages/13-kv-cache.md`](stages/13-kv-cache.md)) |
-| 14 | Prefill vs decode | **done for tiny block**; Qwen metric split next |
-| 15 | Profiling the whole token | not started |
-| 16 | Kernel fusion | Apple-6 CB batching + `silu_mul`/`add_rmsnorm` done for tiny-block; Qwen-scale / further fusions / ICB → Apple-8 + this stage |
-| 17 | HIP graphs | not started |
-| 18 | Quantization | not started |
-| 19 | AMD-specific kernel tuning | not started |
-| 20 | Static decode memory plan | not started |
-| 21 | Batching and scheduling | not started |
-| 22 | Prefix reuse / cache management | not started |
-| 23 | Speculative / multi-token prediction | not started |
-| 24 | Server | not started |
-| 25 | Move to a serious model | not started |
+| **M** | Maximally fast Apple M-series Qwen inference (Metal primary) | Mac + Stages 10–13 done |
+| **R** | Maximally fast RDNA 4 HIP inference | Physical `gfx1201` hardware |
+| **S** | Batching, prefix cache, speculative, HTTP server | M8 Apple-complete |
 
 ## Milestones
 
-- **A. Hello, GPU** — Zig controls the R9700 through HIP. Stage 0 starts this; Stage 1 finishes memory copies.
-- **B. We own the math** — transformer primitives on our kernels.
-- **C. One block** — one Qwen block matches the oracle.
-- **D. It is an LLM** — Qwen3-0.6B greedy tokens match the reference.
-- **E. It is an inference engine** — KV-cached generation.
-- **F. We understand the bottleneck** — one decode token is accounted for.
-- **G. AMD-native** — important kernels tuned for `gfx1201`.
-- **H. Specialized** — quantization, fusion, graphs help and are measured.
-- **I. Useful** — concurrent requests.
-- **J. NInfer philosophy** — a larger registered checkpoint on one R9700.
+- **A. Hello, GPU** — HIP alloc/copy (Phase R0)
+- **B. We own the math** — transformer primitives on our kernels
+- **C. One block** — one Qwen block matches the oracle
+- **D. It is an LLM** — Qwen3-0.6B greedy tokens match reference (**done**)
+- **E. It is an inference engine** — KV-cached generation (**done**, Stage 13)
+- **F. We understand the bottleneck** — one decode token accounted for (M2)
+- **G. AMD-native** — kernels tuned for `gfx1201` (Phase R)
+- **H. Specialized** — quant, fusion, graphs measured (M4–M6, R5–R7)
+- **I. Useful** — concurrent requests (Phase S)
+- **J. NInfer philosophy** — registered larger checkpoint (M8 Apple, R10 AMD)
 
-## Current rule
+---
 
-The AMD curriculum still starts at Stage 1 (HIP alloc/copy) on the
-R9700. The development laptop additionally has a CPU oracle, naive
-Apple Metal ops, and a tiny transformer-block prefill/decode fixture.
-Apple Stages 0–8 are closed for the tiny fixture: measured matrix paths
-(Stage 5), one-CB/wait + Metal-resident KV (Stage 6), Stage 7 SME /
-Core ML rejection, and Stage 8 hardening (kv_len 256, signposts, RSS,
-stress tests; ICB/fp16/extra tiny-block fusions rejected with reasons).
-Do not treat Qwen loading as unfinished Apple Stage 6–8 work—it is
-mapped to curriculum Stages 10–12 / 16 (see `docs/apple-backend.md`).
+## Closed foundation (do not reopen without trigger)
 
-Do not start a full Qwen forward pass until a checkpoint loader exists
-(Stage 10 provides the `.zynfer` loader; Stage 11 is the forward).
+| Area | Status |
+| --- | --- |
+| Apple Stages 0–8 (tiny-block) | **Closed** — one CB/wait, resident KV, simdgroup, int8 ops |
+| Stage 10 | **Done** — `.zynfer` v1 |
+| Stage 11 | **Done** — Qwen CPU forward + golden |
+| Stage 12 | **Done** — tokenizer + sampling |
+| Stage 13 | **Done** — KV cache vs uncached |
 
-See `docs/apple-backend.md` for the deferred→stage map and the
-Instruments recipe for wait dominance.
+Tiny-block rejects with **reopen triggers** (see fable-5 §1): fp16, Session
+int8, ICB, extra fusions, Core ML/ANE — reopened at Qwen scale in M3–M7.
 
-## Post–v0.1.0 plan
+---
 
-Apple Stages 0–8 are **closed**. Remaining work is curriculum Stages
-1–25 (AMD + real model), not more Apple-tiny-block polish.
+## Phase M — Apple M-series (strict order)
 
-### Track A — Make it an LLM (Mac-first)
+| Stage | Title | Old # | Status |
+| --- | --- | --- | --- |
+| **M0** | Metal Qwen forward + generate (f32) | — | **in progress** |
+| **M1** | Prefill vs decode on Qwen | 14 | not started |
+| **M2** | Profile one decode token | 15 | not started |
+| **M3** | Qwen-scale scheduling + fusion | 16 (Apple) | not started |
+| **M4** | fp16/bf16 Metal path | 8 reject reopen | not started |
+| **M5** | Weight quantization (Apple) | 18 (Apple) | not started |
+| **M6** | Static decode plan (Apple) | 20 (Apple) | not started |
+| **M7** | ANE / Core ML gated experiment | 7 reject reopen | not started |
+| **M8** | Capstone: quantized Qwen3-4B + matrix | 25 (Apple) | not started |
 
-| Order | Stage | Goal |
+**M0 gate:** Metal greedy tokens match CPU golden; `--backend apple` on
+`run` / `forward-golden`; first honest TTFT/decode tok/s baseline.
+
+---
+
+## Phase R — AMD RDNA 4 (when hardware available)
+
+| Stage | Content | Old # |
 | --- | --- | --- |
-| 1 | **10** | **done** — checkpoint inspect + `.zynfer` artifact compiler / loader |
-| 2 | **11** | **done** — Qwen3 forward + golden logits (CPU; mini CI fixture) — [`docs/stages/11-qwen-forward.md`](stages/11-qwen-forward.md) |
-| 3 | **12** | **done** — tokenizer + sampling → TTFT / tok/s — [`docs/stages/12-tokenizer-sampling.md`](stages/12-tokenizer-sampling.md) |
-| 4 | **13** | **done** — KV cache vs full recompute; memory formula — [`docs/stages/13-kv-cache.md`](stages/13-kv-cache.md) |
+| R0 | HIP env + alloc/copy/streams | 0–1 |
+| R1 | First kernel + module loader | 2 |
+| R2 | Port op set vs CPU oracle | 3–8 |
+| R3 | Qwen block → full forward + golden | 9, 11 |
+| R4 | Prefill/decode split + ROCm profiling | 14–15 |
+| R5 | Fusion ledger on RDNA 4 | 16 |
+| R6 | HIP graphs (measurement-gated) | 17 |
+| R7 | Quantization for `gfx1201` | 18 |
+| R8 | `gfx1201` tuning notebook | 19 |
+| R9 | Static decode plan (discrete VRAM) | 20 |
+| R10 | R9700 validation + large checkpoints | 25 |
 
-Stage 11 owns **forward + golden logits** only. Stage 12 owns tokenizer,
-sampling, `zynfer run`, and vocabulary TTFT / decode tok/s on CPU.
-Stage 13 owns the educational KV vs uncached comparison (parity + bench).
-HF weight download is never CI — local convert only (Stage 10 converter).
+Until hardware lands: keep backend seam clean, compile-only stubs, **no
+fabricated AMD numbers**.
 
-### Track B — AMD / HIP (when RDNA 4 hardware is available)
+---
 
-| Order | Stage | Goal |
+## Phase S — Serving (after M8, overlaps R)
+
+| Stage | Title | Old # |
 | --- | --- | --- |
-| parallel | **1** | HIP alloc / copy / streams (Milestone A) |
-| then | **2–8** | Port CPU/Metal math onto HIP |
-| then | **9** | One **Qwen** block on HIP (tiny fixture already done) |
+| S1 | Batching and scheduling | 21 |
+| S2 | Prefix reuse / cache management | 22 |
+| S3 | Speculative / MTP | 23 |
+| S4 | HTTP server | 24 |
 
-Hardware: Mac daily → economical RDNA 4 lab card → rent R9700 only for
-large/final validation (`baoulo` multi-backend prompt).
+---
 
-### Track C — Engine depth (after tokens exist)
+## Legacy stage index (traceability)
 
-Stages **13–14** expand KV / prefill-decode to Qwen scale; **15**
-profiles one token; **16** takes Qwen-scale fusion / ICB leftovers;
-**17–25** graphs, quant, `gfx1201` tuning, serving, larger checkpoints.
+| Old | Maps to |
+| --- | --- |
+| 0–9 | Foundation + tiny block (partial HIP) |
+| 10–13 | **Done** (CPU Qwen path) |
+| 14–16 | M1–M3 |
+| 17–19 | R6–R8 |
+| 18, 20 | M5–M6 (Apple); R7, R9 (AMD) |
+| 21–24 | S1–S4 |
+| 25 | M8 (Apple 4B) + R10 (large AMD) |
 
-### Do not reopen
-
-Apple 0–8 tiny-block rejects (SME/Core ML inference, Session int8 on the
-toy block, speculative extra MSL fusions) stay closed until Stage 16 has
-realistic shapes.
+See `docs/apple-backend.md` for Apple tiny-block deferred map and
+Instruments recipes.

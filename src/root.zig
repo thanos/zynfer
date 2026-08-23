@@ -30,6 +30,7 @@ pub const apple = struct {
     pub const gpu = @import("backends/apple/gpu.zig");
     pub const ops = @import("backends/apple/ops.zig");
     pub const block = @import("backends/apple/block.zig");
+    pub const qwen_adapter = @import("backends/apple/qwen_adapter.zig");
     pub const coreml = @import("backends/apple/coreml.zig");
 };
 
@@ -60,5 +61,6 @@ test {
     _ = apple.gpu;
     _ = apple.ops;
     _ = apple.block;
+    _ = apple.qwen_adapter;
     _ = apple.coreml;
 }
