@@ -26,7 +26,7 @@ when correctness is unresolved.
 | 9 | One complete transformer block | **done as tiny fixture**; not a Qwen block |
 | 10 | Checkpoint inspection and artifact compiler | **done** (`.zynfer` v1 + inspect/load; see `bench/results/stage10-dev-laptop.md`) |
 | 11 | Full Qwen3-0.6B forward pass | **done** — CPU forward + golden logits ([`docs/stages/11-qwen-forward.md`](stages/11-qwen-forward.md)) |
-| 12 | Tokenizer and sampling | not started (absorbs TTFT/tok/s deferred from Apple-6) |
+| 12 | Tokenizer and sampling | **done** — BPE + generate CLI ([`docs/stages/12-tokenizer-sampling.md`](stages/12-tokenizer-sampling.md)) |
 | 13 | KV cache | **host layout + Metal-resident for tiny block** |
 | 14 | Prefill vs decode | **done for tiny block** |
 | 15 | Profiling the whole token | not started |
@@ -83,13 +83,11 @@ Apple Stages 0–8 are **closed**. Remaining work is curriculum Stages
 | --- | --- | --- |
 | 1 | **10** | **done** — checkpoint inspect + `.zynfer` artifact compiler / loader |
 | 2 | **11** | **done** — Qwen3 forward + golden logits (CPU; mini CI fixture) — [`docs/stages/11-qwen-forward.md`](stages/11-qwen-forward.md) |
-| 3 | **12** | Tokenizer + sampling → real TTFT / tok/s / ITL |
+| 3 | **12** | **done** — tokenizer + sampling → TTFT / tok/s — [`docs/stages/12-tokenizer-sampling.md`](stages/12-tokenizer-sampling.md) |
 
-Stage 11 owns **forward + golden logits** only. Tokenizer, sampling, and
-TTFT metrics are Stage 12. HF weight download is never CI — local convert
-only (Stage 10 converter).
-
-Until Stage 12, vocabulary TTFT/tok/s stay N/A in the benchmark matrix.
+Stage 11 owns **forward + golden logits** only. Stage 12 owns tokenizer,
+sampling, `zynfer run`, and vocabulary TTFT / decode tok/s on CPU.
+HF weight download is never CI — local convert only (Stage 10 converter).
 
 ### Track B — AMD / HIP (when RDNA 4 hardware is available)
 

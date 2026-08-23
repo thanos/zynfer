@@ -109,6 +109,14 @@ pub fn build(b: *std.Build) void {
     const stage11_step = b.step("stage11", "Qwen forward + golden logits Stage 11 ledger");
     stage11_step.dependOn(&stage11_cmd.step);
 
+    const stage12_cmd = b.addRunArtifact(exe);
+    stage12_cmd.step.dependOn(b.getInstallStep());
+    stage12_cmd.addArg("stage12");
+    stage12_cmd.expectStdOutMatch("Stage 12");
+    stage12_cmd.expectExitCode(0);
+    const stage12_step = b.step("stage12", "Tokenizer + sampling Stage 12 ledger");
+    stage12_step.dependOn(&stage12_cmd.step);
+
     const ops_bench_cmd = b.addRunArtifact(exe);
     ops_bench_cmd.step.dependOn(b.getInstallStep());
     ops_bench_cmd.addArg("ops-bench");
@@ -273,6 +281,12 @@ pub fn build(b: *std.Build) void {
     stage11_ok.expectExitCode(0);
     integration_step.dependOn(&stage11_ok.step);
 
+    const stage12_ok = b.addRunArtifact(exe);
+    stage12_ok.addArg("stage12");
+    stage12_ok.expectStdOutMatch("Stage 12");
+    stage12_ok.expectExitCode(0);
+    integration_step.dependOn(&stage12_ok.step);
+
     const forward_mini_compile = b.addRunArtifact(exe);
     forward_mini_compile.step.dependOn(b.getInstallStep());
     forward_mini_compile.addArg("artifact-compile");
@@ -291,6 +305,20 @@ pub fn build(b: *std.Build) void {
     forward_mini.expectExitCode(0);
     forward_mini.step.dependOn(&forward_mini_compile.step);
     integration_step.dependOn(&forward_mini.step);
+
+    // Optional local full-model smoke: only when models/qwen3-0.6b.zynfer exists.
+    const run_local_if = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        \\if [ -f models/qwen3-0.6b.zynfer ] && [ -f models/Qwen3-0.6B/vocab.json ]; then
+        \\  ./zig-out/bin/zynfer chat "Say hi in one short sentence." --max-tokens 8 --no-stream;
+        \\else
+        \\  echo "skip local zynfer run (no models/qwen3-0.6b.zynfer)";
+        \\fi
+    });
+    run_local_if.step.dependOn(b.getInstallStep());
+    run_local_if.expectExitCode(0);
+    integration_step.dependOn(&run_local_if.step);
 
     const docs_lib = b.addLibrary(.{
         .name = "zynfer",

@@ -24,6 +24,9 @@ and [`docs/tutorials/11-qwen-forward-and-golden.md`](../../docs/tutorials/11-qwe
 
 Canonical workflow and troubleshooting: [`docs/stages/11-qwen-forward.md`](../../docs/stages/11-qwen-forward.md).
 
+**Preferred setup (local):** `./zig-out/bin/zynfer setup` then
+`./zig-out/bin/zynfer chat "…"`.
+
 ## Generate golden logits
 
 ```bash

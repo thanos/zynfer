@@ -24,7 +24,10 @@ The project is also educational. Every major subsystem is developed in stages, b
 prefill, last-token logits vs PyTorch golden on local weights; mini fixture in
 CI. Workflow: [`docs/stages/11-qwen-forward.md`](docs/stages/11-qwen-forward.md),
 fixtures: [`tools/fixtures/README.md`](tools/fixtures/README.md).
-**Stage 12 — tokenizer + sampling is next.**
+**Stage 12 — tokenizer + sampling is done (CPU)** — `zynfer run --prompt`
+with Qwen2 BPE, greedy/temp/top-k/top-p, TTFT metrics.
+See [`docs/stages/12-tokenizer-sampling.md`](docs/stages/12-tokenizer-sampling.md).
+**Stage 13+ — KV curriculum depth / AMD / serving remain.**
 
 The Zig repository, HIP device enumeration (when ROCm is present),
 environment report, CPU f32 reference ops, Metal kernels, a tiny
