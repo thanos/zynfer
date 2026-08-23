@@ -13,9 +13,11 @@ const usage =
     \\  zynfer stage8       Hardening leftovers + retain/reject ledger
     \\  zynfer stage10      Checkpoint / .zynfer artifact Stage 10 ledger
     \\  zynfer stage11      Qwen forward + golden logits Stage 11 ledger
+    \\  zynfer stage12      Tokenizer + sampling Stage 12 ledger
     \\  zynfer inspect PATH Validate and print a .zynfer artifact
     \\  zynfer artifact-compile [--out PATH] [--mini]  Write fixture .zynfer
     \\  zynfer forward-golden ARTIFACT [--tokens IDS] [--golden PATH] [--dump DIR]
+    \\  zynfer run ARTIFACT --prompt TEXT [--tokenizer DIR] [sampling flags]
     \\  zynfer backends     List selectable backends
     \\  zynfer ops-bench    CPU vs Apple op microbenchmarks
     \\  zynfer block-bench  Tiny-block prefill/decode timings
@@ -51,6 +53,14 @@ pub fn main(init: std.process.Init) !void {
     var tokens_arg: ?[]const u8 = null;
     var golden_path: ?[]const u8 = null;
     var dump_dir: ?[]const u8 = null;
+    var prompt_arg: ?[]const u8 = null;
+    var tokenizer_dir: ?[]const u8 = null;
+    var max_tokens: u32 = 64;
+    var temperature: f32 = 0;
+    var top_k: u32 = 0;
+    var top_p: f32 = 1.0;
+    var seed: u64 = 0;
+    var raw_prompt = false;
     var artifact_mini = false;
     var positionals: [8][]const u8 = undefined;
     var n_pos: usize = 0;
@@ -92,6 +102,97 @@ pub fn main(init: std.process.Init) !void {
             };
         } else if (std.mem.startsWith(u8, arg, "--dump=")) {
             dump_dir = arg["--dump=".len..];
+        } else if (std.mem.eql(u8, arg, "--prompt")) {
+            prompt_arg = args_it.next() orelse {
+                std.debug.print("missing value for --prompt\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.startsWith(u8, arg, "--prompt=")) {
+            prompt_arg = arg["--prompt=".len..];
+        } else if (std.mem.eql(u8, arg, "--tokenizer")) {
+            tokenizer_dir = args_it.next() orelse {
+                std.debug.print("missing value for --tokenizer\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.startsWith(u8, arg, "--tokenizer=")) {
+            tokenizer_dir = arg["--tokenizer=".len..];
+        } else if (std.mem.eql(u8, arg, "--max-tokens")) {
+            const v = args_it.next() orelse {
+                std.debug.print("missing value for --max-tokens\n", .{});
+                std.process.exit(2);
+            };
+            max_tokens = std.fmt.parseInt(u32, v, 10) catch {
+                std.debug.print("invalid --max-tokens\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.startsWith(u8, arg, "--max-tokens=")) {
+            max_tokens = std.fmt.parseInt(u32, arg["--max-tokens=".len..], 10) catch {
+                std.debug.print("invalid --max-tokens\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.eql(u8, arg, "--temperature") or std.mem.eql(u8, arg, "--temp")) {
+            const v = args_it.next() orelse {
+                std.debug.print("missing value for --temperature\n", .{});
+                std.process.exit(2);
+            };
+            temperature = std.fmt.parseFloat(f32, v) catch {
+                std.debug.print("invalid --temperature\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.startsWith(u8, arg, "--temperature=")) {
+            temperature = std.fmt.parseFloat(f32, arg["--temperature=".len..]) catch {
+                std.debug.print("invalid --temperature\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.startsWith(u8, arg, "--temp=")) {
+            temperature = std.fmt.parseFloat(f32, arg["--temp=".len..]) catch {
+                std.debug.print("invalid --temp\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.eql(u8, arg, "--top-k")) {
+            const v = args_it.next() orelse {
+                std.debug.print("missing value for --top-k\n", .{});
+                std.process.exit(2);
+            };
+            top_k = std.fmt.parseInt(u32, v, 10) catch {
+                std.debug.print("invalid --top-k\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.startsWith(u8, arg, "--top-k=")) {
+            top_k = std.fmt.parseInt(u32, arg["--top-k=".len..], 10) catch {
+                std.debug.print("invalid --top-k\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.eql(u8, arg, "--top-p")) {
+            const v = args_it.next() orelse {
+                std.debug.print("missing value for --top-p\n", .{});
+                std.process.exit(2);
+            };
+            top_p = std.fmt.parseFloat(f32, v) catch {
+                std.debug.print("invalid --top-p\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.startsWith(u8, arg, "--top-p=")) {
+            top_p = std.fmt.parseFloat(f32, arg["--top-p=".len..]) catch {
+                std.debug.print("invalid --top-p\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.eql(u8, arg, "--seed")) {
+            const v = args_it.next() orelse {
+                std.debug.print("missing value for --seed\n", .{});
+                std.process.exit(2);
+            };
+            seed = std.fmt.parseInt(u64, v, 10) catch {
+                std.debug.print("invalid --seed\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.startsWith(u8, arg, "--seed=")) {
+            seed = std.fmt.parseInt(u64, arg["--seed=".len..], 10) catch {
+                std.debug.print("invalid --seed\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.eql(u8, arg, "--raw")) {
+            raw_prompt = true;
         } else if (!have_command and !std.mem.startsWith(u8, arg, "-")) {
             command = arg;
             have_command = true;
@@ -140,6 +241,8 @@ pub fn main(init: std.process.Init) !void {
         try printStage10(writer);
     } else if (std.mem.eql(u8, command, "stage11")) {
         try printStage11(writer);
+    } else if (std.mem.eql(u8, command, "stage12")) {
+        try printStage12(writer);
     } else if (std.mem.eql(u8, command, "inspect")) {
         if (n_pos < 1) {
             std.debug.print("usage: zynfer inspect PATH.zynfer\n", .{});
@@ -155,6 +258,28 @@ pub fn main(init: std.process.Init) !void {
             std.process.exit(2);
         }
         try runForwardGolden(allocator, io, writer, positionals[0], tokens_arg, golden_path, dump_dir);
+    } else if (std.mem.eql(u8, command, "run")) {
+        if (n_pos < 1 or prompt_arg == null) {
+            std.debug.print(
+                "usage: zynfer run ARTIFACT.zynfer --prompt TEXT [--tokenizer DIR] [--max-tokens N] [--temperature T] [--top-k K] [--top-p P] [--seed S] [--raw]\n",
+                .{},
+            );
+            std.process.exit(2);
+        }
+        try runGenerate(
+            allocator,
+            io,
+            writer,
+            positionals[0],
+            prompt_arg.?,
+            tokenizer_dir,
+            max_tokens,
+            temperature,
+            top_k,
+            top_p,
+            seed,
+            raw_prompt,
+        );
     } else if (std.mem.eql(u8, command, "backends")) {
         try printBackends(writer);
     } else if (std.mem.eql(u8, command, "ops-bench")) {
@@ -341,6 +466,114 @@ fn printStage11(writer: *std.Io.Writer) !void {
     try writer.print("  Metal Qwen path — after CPU golden matches\n", .{});
     try writer.print("  HF download in CI — never\n\n", .{});
     try writer.print("See docs/stages/11-qwen-forward.md\n", .{});
+}
+
+fn printStage12(writer: *std.Io.Writer) !void {
+    try writer.print("zynfer Stage 12 — tokenizer + sampling (CPU)\n", .{});
+    try writer.print("=============================================\n\n", .{});
+    try writer.print("Done\n", .{});
+    try writer.print("  tokenizer:        Qwen2 byte-level BPE (vocab.json + merges.txt)\n", .{});
+    try writer.print("  sampling:         greedy / temperature / top-k / top-p / seeded RNG\n", .{});
+    try writer.print("  generate:         prefill + KV-cached decode loop\n", .{});
+    try writer.print("  CLI:              run ARTIFACT --prompt TEXT [--tokenizer DIR] …\n", .{});
+    try writer.print("  metrics:          TTFT, prefill_ns, decode tok/s\n", .{});
+    try writer.print("  chat wrap:        Qwen3 non-thinking template (disable with --raw)\n\n", .{});
+    try writer.print("Not in Stage 12\n", .{});
+    try writer.print("  Metal Qwen path — later\n", .{});
+    try writer.print("  HF download in CI — never\n\n", .{});
+    try writer.print("See docs/stages/12-tokenizer-sampling.md\n", .{});
+}
+
+fn runGenerate(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    writer: *std.Io.Writer,
+    artifact_path: []const u8,
+    prompt: []const u8,
+    tokenizer_dir_opt: ?[]const u8,
+    max_new_tokens: u32,
+    temperature: f32,
+    top_k: u32,
+    top_p: f32,
+    seed: u64,
+    raw_prompt: bool,
+) !void {
+    const tok_dir = tokenizer_dir_opt orelse "models/Qwen3-0.6B";
+    var tok = zynfer.tokenizer.Tokenizer.loadHfDir(allocator, io, tok_dir) catch |err| {
+        std.debug.print(
+            "run: tokenizer load failed ({s}): {s}\n  pass --tokenizer DIR with vocab.json + merges.txt\n",
+            .{ tok_dir, @errorName(err) },
+        );
+        std.process.exit(2);
+    };
+    defer tok.deinit();
+
+    const wrapped = if (raw_prompt)
+        try allocator.dupe(u8, prompt)
+    else
+        try tok.applyChatTemplate(allocator, prompt);
+    defer allocator.free(wrapped);
+
+    const prompt_ids = tok.encode(allocator, wrapped) catch |err| {
+        std.debug.print("run: encode failed: {s}\n", .{@errorName(err)});
+        std.process.exit(2);
+    };
+    defer allocator.free(prompt_ids);
+
+    var art = zynfer.artifact.Artifact.loadFile(allocator, io, artifact_path) catch |err| {
+        std.debug.print("run: load failed ({s}): {s}\n", .{ artifact_path, @errorName(err) });
+        std.process.exit(2);
+    };
+    defer art.deinit();
+
+    const arch = try art.meta.toArch();
+    const max_seq = prompt_ids.len + max_new_tokens;
+    if (max_seq == 0 or max_seq > arch.max_position_embeddings) {
+        std.debug.print("run: sequence too long (prompt={d} + max_tokens={d})\n", .{ prompt_ids.len, max_new_tokens });
+        std.process.exit(2);
+    }
+
+    var sess = try zynfer.qwen_forward.Session.init(allocator, &art, arch, max_seq);
+    defer sess.deinit();
+
+    const stop_ids = [_]u32{ tok.eos_token_id, tok.endoftext_id, tok.im_end_id };
+    var out_ids: std.ArrayList(u32) = .empty;
+    defer out_ids.deinit(allocator);
+
+    var rng = std.Random.DefaultPrng.init(seed);
+    const stats = sess.generate(io, prompt_ids, &out_ids, .{
+        .max_new_tokens = max_new_tokens,
+        .sample = .{
+            .temperature = temperature,
+            .top_k = top_k,
+            .top_p = top_p,
+            .seed = seed,
+        },
+        .stop_ids = &stop_ids,
+    }, &rng) catch |err| {
+        std.debug.print("run: generate failed: {s}\n", .{@errorName(err)});
+        std.process.exit(2);
+    };
+
+    const text = tok.decode(allocator, out_ids.items) catch |err| {
+        std.debug.print("run: decode failed: {s}\n", .{@errorName(err)});
+        std.process.exit(2);
+    };
+    defer allocator.free(text);
+
+    try writer.print("{s}\n", .{text});
+    try writer.print("\n---\n", .{});
+    try writer.print("prompt_tokens={d} generated_tokens={d}\n", .{ stats.prompt_tokens, stats.generated_tokens });
+    try writer.print("ttft_ms={d:.3} prefill_ms={d:.3}", .{
+        @as(f64, @floatFromInt(stats.ttft_ns)) / 1e6,
+        @as(f64, @floatFromInt(stats.prefill_ns)) / 1e6,
+    });
+    if (stats.generated_tokens > 1 and stats.decode_ns > 0) {
+        const decode_tokens = stats.generated_tokens - 1;
+        const tok_s = @as(f64, @floatFromInt(decode_tokens)) / (@as(f64, @floatFromInt(stats.decode_ns)) / 1e9);
+        try writer.print(" decode_tok_s={d:.3}", .{tok_s});
+    }
+    try writer.print("\n", .{});
 }
 
 fn runInspect(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, path: []const u8) !void {

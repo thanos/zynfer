@@ -66,20 +66,18 @@ Local captures that should not be committed:
 
 ## Inference metrics (tiny-block fixture only)
 
-Vocabulary TTFT still N/A — no tokenizer (curriculum Stage 12; was an
-Apple Stage 6 gate item deferred for lack of a loaded model). The tiny
-block reports wall time for a synthetic residual stream. Remaining
-post–Stage 6 work is mapped in `docs/apple-backend.md` (Apple-7/8,
-Stages 10–12 / 16)—do not treat it as dropped Stage 6 scope.
+Vocabulary TTFT is reported by `zynfer run` (Stage 12) as `ttft_ms` /
+`decode_tok_s` on the CPU Qwen path. Tiny-block `block-bench` remains a
+synthetic fixture metric, not LLM TTFT.
 
 | Metric | Status |
 | --- | --- |
-| Time to first token | N/A — no tokenizer or Qwen forward pass |
-| Prefill tok/s | N/A as an LLM metric; `block-bench` reports `cpu_prefill_ns` / `apple_prefill_ns` |
-| Decode tok/s | N/A as an LLM metric; `block-bench` reports `*_decode_ns_per_token` |
-| ITL p50/p95/p99 | N/A |
+| Time to first token | `zynfer run` → `ttft_ms` (local full model) |
+| Prefill tok/s | Derived from `prefill_ms` / prompt_tokens on `run` |
+| Decode tok/s | `zynfer run` → `decode_tok_s` |
+| ITL p50/p95/p99 | Not yet (single-request mean only) |
 | Energy/token | N/A |
-| Peak model/KV/scratch memory | N/A — no loaded Qwen weights |
+| Peak model/KV/scratch memory | Partial — process RSS not yet on `run` |
 
 Interactive (later): time to first token, inter-token latency,
 single-request decode tok/s.

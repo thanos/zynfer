@@ -9,7 +9,7 @@ const cpu = @import("../backends/cpu/ops.zig");
 const Tensor = @import("../runtime/tensor.zig").Tensor;
 const compare = @import("../runtime/compare.zig");
 
-pub const Error = qwen_weights.Error || qwen_block.Error;
+pub const Error = qwen_weights.Error || qwen_block.Error || @import("../runtime/sample.zig").Error || std.mem.Allocator.Error;
 
 pub const TopK = struct {
     id: u32,
@@ -158,7 +158,130 @@ pub const Session = struct {
         }
         dump(hook, hook_ctx, "logits", logits_out);
     }
+
+    /// Decode one new token using the KV cache filled by a prior prefill/decode.
+    pub fn decodeToken(self: *Session, token_id: u32, logits_out: []f32) Error!void {
+        if (logits_out.len != self.arch.vocab_size) return error.ShapeMismatch;
+        if (self.blocks[0].cache.used >= self.max_seq) return error.InvalidShape;
+
+        const hidden: usize = @intCast(self.arch.hidden_size);
+        const t: usize = 1;
+        const token_ids = [_]u32{token_id};
+
+        const embed_view = try self.hidden_a.viewAs(&.{ t, hidden });
+        try cpu.embeddingGather(embed_view, self.weights.embed, &token_ids);
+
+        var in_buf = self.hidden_a;
+        var out_buf = self.hidden_b;
+        var layer: u32 = 0;
+        while (layer < self.arch.num_layers) : (layer += 1) {
+            const in_view = try in_buf.viewAs(&.{ t, hidden });
+            const out_view = try out_buf.viewAs(&.{ t, hidden });
+            try qwen_block.forward(
+                qwen_block.CpuAdapter{},
+                &self.blocks[layer],
+                in_view,
+                self.blocks[layer].cache.used,
+                out_view,
+            );
+            const tmp = in_buf;
+            in_buf = out_buf;
+            out_buf = tmp;
+        }
+
+        const last_in = try in_buf.viewAs(&.{ t, hidden });
+        const last_row = try last_in.viewLastRow();
+        const normed_row = try self.normed.viewAs(&.{ 1, hidden });
+        try cpu.rmsNorm(normed_row, last_row, self.weights.final_norm, self.arch.rms_norm_eps);
+        const normed_only = try normed_row.viewAs(&.{hidden});
+        if (self.weights.lm_head_tied) {
+            try lmHeadTied(logits_out, try normed_only.f32s(), self.weights.embed);
+        } else {
+            var logits_t = self.logits;
+            try cpu.matvec(logits_t, self.weights.lm_head, normed_only);
+            @memcpy(logits_out, try logits_t.f32s());
+        }
+    }
+
+    pub const GenerateConfig = struct {
+        max_new_tokens: u32 = 64,
+        sample: @import("../runtime/sample.zig").Config = .{},
+        /// Stop when sampling these ids (typically eos / im_end / endoftext).
+        stop_ids: []const u32 = &.{},
+    };
+
+    pub const GenerateStats = struct {
+        prompt_tokens: usize,
+        generated_tokens: usize,
+        prefill_ns: u64,
+        /// Wall time from start of prefill to first generated token sampled.
+        ttft_ns: u64,
+        decode_ns: u64,
+    };
+
+    /// Prefill `prompt_ids`, then autoregressively sample up to `max_new_tokens`.
+    /// Appends generated ids to `out_ids` (caller provides ArrayList).
+    pub fn generate(
+        self: *Session,
+        io: std.Io,
+        prompt_ids: []const u32,
+        out_ids: *std.ArrayList(u32),
+        cfg: GenerateConfig,
+        rng: *std.Random.DefaultPrng,
+    ) Error!GenerateStats {
+        const sample_mod = @import("../runtime/sample.zig");
+        if (prompt_ids.len == 0) return error.InvalidShape;
+
+        const logits = try self.allocator.alloc(f32, self.arch.vocab_size);
+        defer self.allocator.free(logits);
+        const probs = try self.allocator.alloc(f32, self.arch.vocab_size);
+        defer self.allocator.free(probs);
+        const idx = try self.allocator.alloc(u32, self.arch.vocab_size);
+        defer self.allocator.free(idx);
+
+        const t0 = std.Io.Clock.awake.now(io);
+        try self.prefillLastLogits(prompt_ids, logits);
+        const t_prefill = std.Io.Clock.awake.now(io);
+
+        var generated: usize = 0;
+        var decode_ns: u64 = 0;
+        var ttft_ns: u64 = 0;
+
+        while (generated < cfg.max_new_tokens) {
+            if (self.blocks[0].cache.used >= self.max_seq) break;
+
+            const next = try sample_mod.sampleWithScratch(logits, cfg.sample, probs, idx, rng);
+            try out_ids.append(self.allocator, next);
+            generated += 1;
+
+            if (generated == 1) ttft_ns = nsDelta(t0, std.Io.Clock.awake.now(io));
+            if (isStop(next, cfg.stop_ids)) break;
+
+            const td0 = std.Io.Clock.awake.now(io);
+            try self.decodeToken(next, logits);
+            decode_ns += nsDelta(td0, std.Io.Clock.awake.now(io));
+        }
+
+        if (ttft_ns == 0) ttft_ns = nsDelta(t0, std.Io.Clock.awake.now(io));
+
+        return .{
+            .prompt_tokens = prompt_ids.len,
+            .generated_tokens = generated,
+            .prefill_ns = nsDelta(t0, t_prefill),
+            .ttft_ns = ttft_ns,
+            .decode_ns = decode_ns,
+        };
+    }
 };
+
+fn isStop(id: u32, stop_ids: []const u32) bool {
+    for (stop_ids) |s| if (s == id) return true;
+    return false;
+}
+
+fn nsDelta(start: std.Io.Timestamp, end: std.Io.Timestamp) u64 {
+    return @intCast(@max(@as(i96, 0), end.nanoseconds - start.nanoseconds));
+}
 
 fn lmHeadTied(logits: []f32, hidden: []const f32, embed: Tensor) Error!void {
     if (embed.rank != 2) return error.InvalidShape;
