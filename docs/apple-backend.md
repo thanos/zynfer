@@ -331,7 +331,7 @@ Stage 8 ledger: `bench/results/apple-stage8-dev-laptop.md`.
 | **Metal Qwen forward + generate** | **M0 (in progress)** — open checklist in [`docs/stages/M0-metal-qwen-forward.md`](stages/M0-metal-qwen-forward.md) |
 | **Prefill/decode split on Qwen** | **M1 (done)** — [`docs/stages/M1-prefill-vs-decode-qwen.md`](stages/M1-prefill-vs-decode-qwen.md) |
 | **Profile one token + roofline** | **done** — M2 (`qwen-profile`) |
-| **Qwen-scale batched schedule / fusion** | M3 (old 16) |
+| **Qwen-scale batched schedule / fusion** | **done** — M3 (`qwen_schedule`) |
 | **fp16 / quant / static decode / ANE** | M4–M7 |
 | **Qwen3-4B Apple capstone** | M8 (old 25 slice) |
 

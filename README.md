@@ -36,6 +36,7 @@ See [`docs/stages/13-kv-cache.md`](docs/stages/13-kv-cache.md).
 (gate open — checklist in [`docs/stages/M0-metal-qwen-forward.md`](docs/stages/M0-metal-qwen-forward.md)).
 **M1 done:** `qwen-bench` prefill/decode split.
 **M2 done:** `qwen-profile` one-token family table + STREAM roofline.
+**M3 done:** batched Metal Qwen (`~2` waits/forward) + fusion ledger.
 **Phase R (AMD)** waits for hardware; **Phase S (serving)** after M8.
 
 The Zig repository, HIP device enumeration (when ROCm is present),

@@ -71,6 +71,8 @@ Vocabulary TTFT is reported by `zynfer run` (Stage 12) as `ttft_ms` /
 cached vs uncached decode. Stage M1 adds `zynfer qwen-bench` for
 **prefill vs decode** on CPU and Metal. Stage M2 adds `zynfer qwen-profile`
 for a per-family one-token breakdown + STREAM bandwidth roofline.
+Stage M3’s default Apple path collapses waits (`wait/tok` ≈ 2); use
+`ZYNFER_QWEN_METAL=baseline` for the M0 per-op A/B.
 Tiny-block `block-bench` remains a synthetic fixture metric, not LLM TTFT.
 
 | Metric | Status |

@@ -43,5 +43,5 @@ routine generates keep the M1 split.
 
 ## 5. Next
 
-**M2** is done (`qwen-profile`). **M3** collapses waits / fusions only for
-bottlenecks that table named.
+**M2** is done (`qwen-profile`). **M3** is done (batched schedule +
+fusion ledger). **M4** halves bytes/token with fp16.

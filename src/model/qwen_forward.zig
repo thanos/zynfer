@@ -11,6 +11,7 @@ const cpu = @import("../backends/cpu/ops.zig");
 const backend_mod = @import("../runtime/backend.zig");
 const apple = @import("../backends/apple/qwen_adapter.zig");
 const apple_gpu = @import("../backends/apple/gpu.zig");
+const apple_schedule = @import("../backends/apple/qwen_schedule.zig");
 const Tensor = @import("../runtime/tensor.zig").Tensor;
 const compare = @import("../runtime/compare.zig");
 const sample_mod = @import("../runtime/sample.zig");
@@ -38,6 +39,8 @@ pub const Session = struct {
     allocator: std.mem.Allocator,
     backend: BackendKind,
     gpu: ?*apple_gpu.Gpu,
+    /// Stage M3 batched schedule (null on CPU or baseline Metal).
+    metal_stack: ?*apple_schedule.MetalStack,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -79,11 +82,18 @@ pub const Session = struct {
         const vocab: usize = @intCast(arch.vocab_size);
 
         var gpu: ?*apple_gpu.Gpu = null;
+        var metal_stack: ?*apple_schedule.MetalStack = null;
         if (kind == .apple) {
             const g = try allocator.create(apple_gpu.Gpu);
             errdefer allocator.destroy(g);
             g.* = try apple_gpu.Gpu.init();
             gpu = g;
+            if (!apple_schedule.useBaselinePath()) {
+                const ms = try allocator.create(apple_schedule.MetalStack);
+                errdefer allocator.destroy(ms);
+                ms.* = try apple_schedule.MetalStack.init(allocator, g, arch, max_seq, &weights);
+                metal_stack = ms;
+            }
         }
 
         return .{
@@ -98,10 +108,15 @@ pub const Session = struct {
             .allocator = allocator,
             .backend = kind,
             .gpu = gpu,
+            .metal_stack = metal_stack,
         };
     }
 
     pub fn deinit(self: *Session) void {
+        if (self.metal_stack) |ms| {
+            ms.deinit();
+            self.allocator.destroy(ms);
+        }
         if (self.gpu) |g| {
             g.deinit();
             self.allocator.destroy(g);
@@ -118,6 +133,14 @@ pub const Session = struct {
 
     pub fn reset(self: *Session) void {
         for (self.blocks) |*b| b.reset();
+        if (self.metal_stack) |ms| ms.reset();
+    }
+
+    fn syncHostKvUsed(self: *Session) void {
+        if (self.metal_stack) |ms| {
+            const used = ms.layers_kv[0].used;
+            for (self.blocks) |*b| b.cache.used = used;
+        }
     }
 
     fn forwardBlock(
@@ -217,6 +240,13 @@ pub const Session = struct {
             dump(hook, hook_ctx, "embed_last", embed[(t - 1) * hidden ..][0..hidden]);
         }
 
+        if (self.metal_stack) |ms| {
+            try ms.forwardLastLogits(embed_view, logits_out);
+            self.syncHostKvUsed();
+            dump(hook, hook_ctx, "logits", logits_out);
+            return;
+        }
+
         var in_buf = self.hidden_a;
         var out_buf = self.hidden_b;
         var layer: u32 = 0;
@@ -264,6 +294,12 @@ pub const Session = struct {
         const embed_view = try self.hidden_a.viewAs(&.{ t, hidden });
         try cpu.embeddingGather(embed_view, self.weights.embed, &token_ids);
 
+        if (self.metal_stack) |ms| {
+            try ms.forwardLastLogits(embed_view, logits_out);
+            self.syncHostKvUsed();
+            return;
+        }
+
         var in_buf = self.hidden_a;
         var out_buf = self.hidden_b;
         var layer: u32 = 0;
@@ -305,6 +341,29 @@ pub const Session = struct {
     ) Error!u32 {
         if (logits_out.len != self.arch.vocab_size) return error.ShapeMismatch;
         if (self.blocks[0].cache.used >= self.max_seq) return error.InvalidShape;
+
+        // M3 batched path: one timed forward (family split is M0-baseline-oriented).
+        if (self.metal_stack != null) {
+            self.resetMetalLaunchCounters();
+            const wall0 = std.Io.Clock.awake.now(io);
+            try self.decodeToken(token_id, logits_out);
+            buckets.wall_ns = nsDelta(wall0, std.Io.Clock.awake.now(io));
+            buckets.add(.mlp, buckets.wall_ns); // whole stack under one row for M3 profile
+            buckets.metal_encodes = apple_schedule.last_qwen_encodes;
+            buckets.metal_waits = apple_schedule.last_qwen_waits;
+            buckets.kv_len = self.blocks[0].cache.used;
+            var sampled: u32 = 0;
+            if (do_sample) {
+                const probs = try self.allocator.alloc(f32, self.arch.vocab_size);
+                defer self.allocator.free(probs);
+                const idx = try self.allocator.alloc(u32, self.arch.vocab_size);
+                defer self.allocator.free(idx);
+                const t0 = std.Io.Clock.awake.now(io);
+                sampled = try sample_mod.sampleWithScratch(logits_out, sample_cfg, probs, idx, rng);
+                buckets.add(.sampling, nsDelta(t0, std.Io.Clock.awake.now(io)));
+            }
+            return sampled;
+        }
 
         self.resetMetalLaunchCounters();
         const wall0 = std.Io.Clock.awake.now(io);
@@ -883,11 +942,18 @@ test "Stage M1: Metal generate reports measured encode/wait counts" {
 
     try std.testing.expect(stats.metal_encodes_prefill > 0);
     try std.testing.expect(stats.metal_waits_prefill > 0);
-    // M0 per-op path: every encode waits.
-    try std.testing.expectEqual(stats.metal_encodes_prefill, stats.metal_waits_prefill);
     try std.testing.expect(stats.decode_steps >= 1);
     try std.testing.expect(stats.metal_encodes_decode > 0);
-    try std.testing.expectEqual(stats.metal_encodes_decode, stats.metal_waits_decode);
+    try std.testing.expect(stats.metal_waits_decode > 0);
+    if (sess.metal_stack == null) {
+        // M0 per-op path: every encode waits.
+        try std.testing.expectEqual(stats.metal_encodes_prefill, stats.metal_waits_prefill);
+        try std.testing.expectEqual(stats.metal_encodes_decode, stats.metal_waits_decode);
+    } else {
+        // M3 batched: waits ≪ encodes (one CB for stack + one for LM head per forward).
+        try std.testing.expect(stats.metal_waits_prefill < stats.metal_encodes_prefill);
+        try std.testing.expect(stats.metal_waits_decode < stats.metal_encodes_decode);
+    }
 }
 
 test "Stage M2: profileDecodeToken fills family buckets" {
@@ -915,7 +981,57 @@ test "Stage M2: profileDecodeToken fills family buckets" {
     try std.testing.expect(buckets.wall_ns > 0);
     try std.testing.expect(buckets.sumFamilies() > 0);
     try std.testing.expect(buckets.metal_encodes > 0);
-    try std.testing.expectEqual(buckets.metal_encodes, buckets.metal_waits);
+    try std.testing.expect(buckets.metal_waits > 0);
+    if (sess.metal_stack == null) {
+        try std.testing.expectEqual(buckets.metal_encodes, buckets.metal_waits);
+    } else {
+        try std.testing.expect(buckets.metal_waits < buckets.metal_encodes);
+        try std.testing.expectEqual(@as(u32, 2), apple_schedule.last_qwen_waits);
+    }
     const top = buckets.top3();
     try std.testing.expect(top[0].ns >= top[1].ns);
+}
+
+test "Stage M3: batched Metal mini matches CPU logits and collapses waits" {
+    if (apple_gpu.skipAppleGpuTests()) return error.SkipZigTest;
+    defer apple_schedule.force_baseline_path = null;
+
+    const gpa = std.testing.allocator;
+    const bytes = try buildMiniArtifact(gpa);
+    defer gpa.free(bytes);
+    var art = try artifact.Artifact.loadOwned(gpa, try gpa.dupe(u8, bytes));
+    defer art.deinit();
+
+    const arch = qwen3.stage11_mini;
+    const token_ids = [_]u32{ 2, 3 };
+
+    apple_schedule.force_baseline_path = false;
+    var batched = try Session.initWithBackend(gpa, &art, arch, 8, .apple);
+    defer batched.deinit();
+    try std.testing.expect(batched.metal_stack != null);
+
+    apple_schedule.force_baseline_path = true;
+    var baseline = try Session.initWithBackend(gpa, &art, arch, 8, .apple);
+    defer baseline.deinit();
+    try std.testing.expect(baseline.metal_stack == null);
+
+    var cpu_sess = try Session.init(gpa, &art, arch, 8);
+    defer cpu_sess.deinit();
+
+    const cpu_logits = try gpa.alloc(f32, arch.vocab_size);
+    defer gpa.free(cpu_logits);
+    const bat_logits = try gpa.alloc(f32, arch.vocab_size);
+    defer gpa.free(bat_logits);
+    const base_logits = try gpa.alloc(f32, arch.vocab_size);
+    defer gpa.free(base_logits);
+
+    try cpu_sess.prefillLastLogits(&token_ids, cpu_logits);
+    try batched.prefillLastLogits(&token_ids, bat_logits);
+    try baseline.prefillLastLogits(&token_ids, base_logits);
+
+    try compare.expectClose(cpu_logits, bat_logits, 3e-3, 3e-3);
+    try compare.expectClose(cpu_logits, base_logits, 3e-3, 3e-3);
+    try std.testing.expectEqualStrings(apple_schedule.path_batched, apple_schedule.last_qwen_path);
+    try std.testing.expectEqual(@as(u32, 2), apple_schedule.last_qwen_waits);
+    try std.testing.expect(apple_schedule.last_qwen_encodes > 10);
 }

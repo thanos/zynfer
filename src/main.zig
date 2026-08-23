@@ -18,6 +18,7 @@ const usage =
     \\  zynfer stageM0      Metal Qwen forward Stage M0 ledger
     \\  zynfer stageM1      Prefill/decode split Stage M1 ledger
     \\  zynfer stageM2      Profile one decode token Stage M2 ledger
+    \\  zynfer stageM3      Qwen-scale schedule + fusion Stage M3 ledger
     \\  zynfer inspect PATH Validate and print a .zynfer artifact
     \\  zynfer artifact-compile [--out PATH] [--mini]  Write fixture .zynfer
     \\  zynfer forward-golden ARTIFACT [--tokens IDS] [--golden PATH] [--dump DIR] [--backend cpu|apple]
@@ -278,6 +279,8 @@ pub fn main(init: std.process.Init) !void {
         try printStageM1(writer);
     } else if (std.mem.eql(u8, command, "stageM2") or std.mem.eql(u8, command, "stagem2")) {
         try printStageM2(writer);
+    } else if (std.mem.eql(u8, command, "stageM3") or std.mem.eql(u8, command, "stagem3")) {
+        try printStageM3(writer);
     } else if (std.mem.eql(u8, command, "inspect")) {
         if (n_pos < 1) {
             std.debug.print("usage: zynfer inspect PATH.zynfer\n", .{});
@@ -674,7 +677,7 @@ fn printStageM0(writer: *std.Io.Writer) !void {
     try writer.print("  [ ] per-layer dump ladder on Metal\n", .{});
     try writer.print("  [ ] LM-head GEMV path A/B (naive / simdgroup / Accelerate)\n", .{});
     try writer.print("  [ ] attention parity at kv_len > 256 (device scores)\n", .{});
-    try writer.print("  (Stage 6 resident-KV / one-CB → deferred to M3)\n\n", .{});
+    try writer.print("  (Stage 6 resident-KV / one-CB → done in M3)\n\n", .{});
     try writer.print("See docs/stages/M0-metal-qwen-forward.md\n", .{});
 }
 
@@ -706,6 +709,23 @@ fn printStageM2(writer: *std.Io.Writer) !void {
     try writer.print("Not in Stage M2\n", .{});
     try writer.print("  batched one-CB schedule / fusion ledger — M3\n\n", .{});
     try writer.print("See docs/stages/M2-profile-one-decode-token.md\n", .{});
+}
+
+fn printStageM3(writer: *std.Io.Writer) !void {
+    try writer.print("zynfer Stage M3 — Qwen-scale schedule + fusion\n", .{});
+    try writer.print("==============================================\n\n", .{});
+    try writer.print("Done\n", .{});
+    try writer.print("  path:             batched_resident_kv_fused (default on Apple)\n", .{});
+    try writer.print("  A/B:              ZYNFER_QWEN_METAL=baseline → M0 per-op path\n", .{});
+    try writer.print("  schedule:         one CB for all layers + one CB for final norm/LM head\n", .{});
+    try writer.print("                    (≈2 waits/forward; resident weights + Metal KV)\n", .{});
+    try writer.print("  retained:         silu_mul, add_rmsnorm_f32, Metal LM-head matvec\n", .{});
+    try writer.print("  rejected:         Q/K+RoPE fuse, attention tiling, dequant-GEMV (→M5),\n", .{});
+    try writer.print("                    ICB/encode-once (KV mutates every decode)\n\n", .{});
+    try writer.print("Not in Stage M3\n", .{});
+    try writer.print("  fp16/bf16 weights+KV — M4\n", .{});
+    try writer.print("  int8 session weights — M5\n\n", .{});
+    try writer.print("See docs/stages/M3-qwen-schedule-fusion.md\n", .{});
 }
 
 const StreamCtx = struct {
@@ -1435,8 +1455,9 @@ fn runQwenBench(
     }
 
     try writer.print("\nnotes:\n", .{});
-    try writer.print("  enc/tok + wait/tok = measured Metal launches / waits per decodeToken (M0 per-op path).\n", .{});
-    try writer.print("  CPU rows show 0 (no Metal). Prefill Metal totals printed below when present.\n", .{});
+    try writer.print("  enc/tok + wait/tok = measured Metal launches / waits per decodeToken.\n", .{});
+    try writer.print("  M3 default (batched): waits ≈ 2/forward; M0 baseline: waits ≈ encodes.\n", .{});
+    try writer.print("  Force baseline with ZYNFER_QWEN_METAL=baseline. CPU rows show 0.\n", .{});
     try writer.print("  B/tok_est = f32 weight reads + KV read at end-of-run kv_len (approx).\n", .{});
     try writer.print("  decode_t/s uses generated_tokens-1 (intervals after first token).\n", .{});
     var ri: usize = 0;

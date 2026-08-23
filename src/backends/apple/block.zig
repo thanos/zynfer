@@ -332,7 +332,7 @@ pub const Session = struct {
         try apple_ops.encodeKvAppend(self.gpu, s.k_htd, s.v_htd, s.k_cache, s.v_cache, n_kv, tu, d, max_seq, used_u);
 
         const kv_len: u32 = used_u + tu;
-        try apple_ops.encodeAttention(self.gpu, s.attn_htd, s.q_htd, s.k_cache, s.v_cache, n_q, n_kv, tu, kv_len, max_seq, d);
+        try apple_ops.encodeAttention(self.gpu, s.attn_htd, s.q_htd, s.k_cache, s.v_cache, n_q, n_kv, tu, kv_len, max_seq, d, null);
         try apple_ops.encodePermuteHeadsTokens(self.gpu, s.attn_lin, s.attn_htd, tu, n_q, d);
         try apple_ops.encodeMatmulNaive(self.gpu, s.ao, s.attn_lin, w.wo, tu, hu, qd);
         try apple_ops.encodeAddRmsNorm(self.gpu, s.x1, s.mlp_n, s.x, s.ao, w.wn, tu, hu, spec.eps);

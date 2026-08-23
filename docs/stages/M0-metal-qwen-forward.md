@@ -50,7 +50,7 @@ Do **not** mark M0 done until these are checked off. Source of truth:
 | 3 | Per-layer differential ladder (embed → block0 → … → logits → tokens) | **OPEN** | Stage 11 dump-hook style for Metal |
 | 4 | LM-head GEMV path selection (naive vs simdgroup vs Accelerate) | **OPEN** | Vocab 151936; measure, do not assume; still CPU in M0 |
 | 5 | Ceiling differential tests at new `kv_len` boundary | **OPEN** | Parity at 257 / 512 / 1024 (device scores path) |
-| 6 | Stage 6 reuse where free (persistent weights / resident KV) | **DEFERRED→M3** | Correctness-first; batched schedule is M3 |
+| 6 | Stage 6 reuse where free (persistent weights / resident KV) | **DONE (M3)** | `qwen_schedule` batched_resident_kv_fused |
 
 ## Gate (exit criterion)
 

@@ -149,6 +149,14 @@ pub fn build(b: *std.Build) void {
     const stageM2_step = b.step("stageM2", "Profile one decode token Stage M2 ledger");
     stageM2_step.dependOn(&stageM2_cmd.step);
 
+    const stageM3_cmd = b.addRunArtifact(exe);
+    stageM3_cmd.step.dependOn(b.getInstallStep());
+    stageM3_cmd.addArg("stageM3");
+    stageM3_cmd.expectStdOutMatch("Stage M3");
+    stageM3_cmd.expectExitCode(0);
+    const stageM3_step = b.step("stageM3", "Qwen schedule/fusion Stage M3 ledger");
+    stageM3_step.dependOn(&stageM3_cmd.step);
+
     const qwen_bench_cmd = b.addRunArtifact(exe);
     qwen_bench_cmd.step.dependOn(b.getInstallStep());
     qwen_bench_cmd.addArg("qwen-bench");
@@ -386,6 +394,12 @@ pub fn build(b: *std.Build) void {
     stageM2_ok.expectStdOutMatch("Stage M2");
     stageM2_ok.expectExitCode(0);
     integration_step.dependOn(&stageM2_ok.step);
+
+    const stageM3_ok = b.addRunArtifact(exe);
+    stageM3_ok.addArg("stageM3");
+    stageM3_ok.expectStdOutMatch("Stage M3");
+    stageM3_ok.expectExitCode(0);
+    integration_step.dependOn(&stageM3_ok.step);
 
     const qwen_bench_ok = b.addRunArtifact(exe);
     qwen_bench_ok.addArg("qwen-bench");

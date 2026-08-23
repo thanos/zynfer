@@ -53,10 +53,9 @@ On Qwen3-0.6B Metal, one decode token’s top three were:
 2. **MLP** (Metal matmuls + silu, launch-heavy)
 3. **QKV projection**
 
-That ranking — not intuition — drives M3 (schedule collapse) and the
-open M0 LM-head path work.
+That ranking — not intuition — drove M3 (schedule collapse + Metal LM head).
 
 ## 5. Next
 
-**M3** collapses waits across 28 layers and runs the fusion ledger only
-for bottlenecks M2 named.
+**M3 is done** (`batched_resident_kv_fused`, ~2 waits/forward). **M4**
+halves bytes/token with fp16.

@@ -631,6 +631,7 @@ pub fn encodeAttention(
     kv_len: u32,
     kv_stride: u32,
     head_dim: u32,
+    scores_scratch: ?Buffer,
 ) Error!void {
     if (kv_len > max_attention_kv) return error.Unsupported;
     const params = AttentionParams{
@@ -643,12 +644,24 @@ pub fn encodeAttention(
     };
     if (kv_len <= max_attention_kv_threadlocal) {
         try launchBufs(gpu, "attention_f32", q_len, n_q, 1, 1, 1, 1, &.{ q, k, v, out }, std.mem.asBytes(&params));
-    } else {
-        const score_elems = @as(usize, n_q) * @as(usize, q_len) * @as(usize, kv_len);
-        var sb = try gpu.allocShared(score_elems * @sizeOf(f32));
-        defer sb.deinit();
-        try launchBufs(gpu, "attention_f32_buf", q_len, n_q, 1, 1, 1, 1, &.{ q, k, v, out, sb }, std.mem.asBytes(&params));
+        return;
     }
+    // Device score buffer required for long KV (and mandatory inside a batch).
+    if (scores_scratch) |sb| {
+        try launchBufs(gpu, "attention_f32_buf", q_len, n_q, 1, 1, 1, 1, &.{ q, k, v, out, sb }, std.mem.asBytes(&params));
+        return;
+    }
+    if (gpu.batch_active) return error.Unsupported;
+    const score_elems = @as(usize, n_q) * @as(usize, q_len) * @as(usize, kv_len);
+    var sb = try gpu.allocShared(score_elems * @sizeOf(f32));
+    defer sb.deinit();
+    try launchBufs(gpu, "attention_f32_buf", q_len, n_q, 1, 1, 1, 1, &.{ q, k, v, out, sb }, std.mem.asBytes(&params));
+}
+
+pub fn encodeMatvec(gpu: *Gpu, y: Buffer, a: Buffer, x: Buffer, m: u32, k: u32) Error!void {
+    const params = MatmulParams{ .m = m, .n = 1, .k = k };
+    const tg = gpu.threadgroup1d();
+    try launchBufs(gpu, "matvec_f32", m, 1, 1, tg, 1, 1, &.{ a, x, y }, std.mem.asBytes(&params));
 }
 
 const PermuteParams = extern struct {
