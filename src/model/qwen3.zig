@@ -56,6 +56,64 @@ pub const Arch = struct {
     pub fn kvDim(self: Arch) u32 {
         return self.num_key_value_heads * self.head_dim;
     }
+
+    /// Prefill matmul shapes hit once per layer (token count = prompt length `t`).
+    /// Format: M×N×K with A=[M,K] B=[K,N] in Zynfer layout (HF weight transposed at load).
+    pub fn describePrefillGemms(self: Arch, t: usize, buf: []u8) []const u8 {
+        const h = self.hidden_size;
+        const qd = self.qDim();
+        const kvd = self.kvDim();
+        const inter = self.intermediate_size;
+        return std.fmt.bufPrint(buf, "per_layer t={d}: Q {d}×{d}×{d}; K/V {d}×{d}×{d}; O {d}×{d}×{d}; gate/up {d}×{d}×{d}; down {d}×{d}×{d}; ×{d} layers; lm_head 1×{d}×{d}", .{
+            t,
+            t,
+            qd,
+            h,
+            t,
+            kvd,
+            h,
+            t,
+            h,
+            qd,
+            t,
+            inter,
+            h,
+            t,
+            h,
+            inter,
+            self.num_layers,
+            self.vocab_size,
+            h,
+        }) catch "gemm shapes (buf too small)";
+    }
+
+    /// Decode matmul shapes (t=1) per layer + LM head.
+    pub fn describeDecodeGemms(self: Arch, buf: []u8) []const u8 {
+        return self.describePrefillGemms(1, buf);
+    }
+
+    /// Approximate f32 bytes touched per decode token (weights + growing KV read).
+    /// Weight side: all dense projections once; KV: layers × n_kv × kv_len × head_dim × 2 × 4.
+    pub fn estimateDecodeBytesPerToken(self: Arch, kv_len: usize) u64 {
+        const h: u64 = self.hidden_size;
+        const qd: u64 = self.qDim();
+        const kvd: u64 = self.kvDim();
+        const inter: u64 = self.intermediate_size;
+        const layers: u64 = self.num_layers;
+        // Q,K,V,O + gate,up,down + norms ignored (tiny)
+        const weight_elems = layers * ((h * qd) + (h * kvd) + (h * kvd) + (qd * h) +
+            (h * inter) + (h * inter) + (inter * h)) + (@as(u64, self.vocab_size) * h); // lm_head / tied embed
+        const weight_bytes = weight_elems * @sizeOf(f32);
+        const kv_bytes = layers * @as(u64, self.num_key_value_heads) * @as(u64, @intCast(kv_len)) *
+            @as(u64, self.head_dim) * 2 * @sizeOf(f32);
+        return weight_bytes + kv_bytes;
+    }
+
+    /// M0 Metal path: one encode+wait per op in `qwen_block` (~18 launches/layer).
+    pub fn estimateMetalOpLaunchesPerDecodeToken(self: Arch) u32 {
+        const ops_per_layer: u32 = 18; // rms×3 + matmul×7 + rope×2 + attn + silu + add×2 (+qk norms in rms)
+        return ops_per_layer * self.num_layers;
+    }
 };
 
 test "Qwen3-0.6B dims are consistent" {
@@ -63,6 +121,8 @@ test "Qwen3-0.6B dims are consistent" {
     try std.testing.expectEqual(@as(u32, 2048), a.qDim());
     try std.testing.expectEqual(@as(u32, 1024), a.kvDim());
     try std.testing.expectEqualStrings("qwen3-0.6b", a.model_id.name());
+    try std.testing.expect(a.estimateDecodeBytesPerToken(128) > a.estimateDecodeBytesPerToken(1));
+    try std.testing.expectEqual(@as(u32, 18 * 28), a.estimateMetalOpLaunchesPerDecodeToken());
 }
 
 /// Tiny architecture for Stage 11 CI tests (1 layer, f32 fixture artifact).

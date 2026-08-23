@@ -325,8 +325,8 @@ Stage 8 ledger: `bench/results/apple-stage8-dev-laptop.md`.
 
 | Item | Lands in |
 | --- | --- |
-| **Metal Qwen forward + generate** | **M0 (in progress)** — [`docs/stages/M0-metal-qwen-forward.md`](stages/M0-metal-qwen-forward.md) |
-| **Prefill/decode split on Qwen** | M1 (old 14) |
+| **Metal Qwen forward + generate** | **M0 (in progress)** — open checklist in [`docs/stages/M0-metal-qwen-forward.md`](stages/M0-metal-qwen-forward.md) |
+| **Prefill/decode split on Qwen** | **M1 (done)** — [`docs/stages/M1-prefill-vs-decode-qwen.md`](stages/M1-prefill-vs-decode-qwen.md) |
 | **Profile one token + roofline** | M2 (old 15) |
 | **Qwen-scale batched schedule / fusion** | M3 (old 16) |
 | **fp16 / quant / static decode / ANE** | M4–M7 |
@@ -353,7 +353,7 @@ Historical wait-bound writeup (pre-Stage 6):
 ### Still true
 
 - Tiny block is a synthetic residual stream, not Qwen3-0.6B.
-- Metal attention hard-caps `kv_len` at **256**; fixture `max_seq` is 32.
+- Metal attention hard-caps `kv_len` at **2048** (256 thread-local fast path); Qwen M0.
 - Energy/token is not claimed; `peak_rss_bytes` is reported when available.
 - Stage 6 Metal is still slower than scalar CPU on this tiny shape.
 

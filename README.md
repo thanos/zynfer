@@ -32,7 +32,9 @@ See [`docs/stages/12-tokenizer-sampling.md`](docs/stages/12-tokenizer-sampling.m
 See [`docs/stages/13-kv-cache.md`](docs/stages/13-kv-cache.md).
 **Phase M (Apple Qwen, fast path) — in progress** — see
 [`baoulo/prompts/fable-5-prompt.md`](baoulo/prompts/fable-5-prompt.md) and
-[`docs/roadmap.md`](docs/roadmap.md). **M0:** Metal Qwen blocks + `--backend apple`.
+[`docs/roadmap.md`](docs/roadmap.md). **M0:** Metal Qwen blocks + `--backend apple`
+(gate open — checklist in [`docs/stages/M0-metal-qwen-forward.md`](docs/stages/M0-metal-qwen-forward.md)).
+**M1 done:** `qwen-bench` prefill/decode split.
 **Phase R (AMD)** waits for hardware; **Phase S (serving)** after M8.
 
 The Zig repository, HIP device enumeration (when ROCm is present),

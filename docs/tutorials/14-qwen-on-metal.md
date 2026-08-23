@@ -59,8 +59,11 @@ zig build test -Dhip=off          # includes mini Metal vs CPU test
 
 ## 6. What comes next
 
-| Stage | Focus |
-| --- | --- |
-| M1 | Prefill vs decode metrics on Qwen |
-| M2 | Profile one decode token + roofline |
-| M3 | 28-layer one-CB schedule + fusion ledger |
+| Stage | Focus | Status |
+| --- | --- | --- |
+| M1 | Prefill vs decode metrics on Qwen | **done** — `qwen-bench` |
+| M2 | Profile one decode token + roofline | next |
+| M3 | 28-layer one-CB schedule + fusion ledger | later |
+
+M0 gate items still open (full-model parity, Metal TTFT ledger, …) —
+see [`docs/stages/M0-metal-qwen-forward.md`](../stages/M0-metal-qwen-forward.md).

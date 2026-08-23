@@ -133,6 +133,26 @@ pub fn build(b: *std.Build) void {
     const stageM0_step = b.step("stageM0", "Metal Qwen forward Stage M0 ledger");
     stageM0_step.dependOn(&stageM0_cmd.step);
 
+    const stageM1_cmd = b.addRunArtifact(exe);
+    stageM1_cmd.step.dependOn(b.getInstallStep());
+    stageM1_cmd.addArg("stageM1");
+    stageM1_cmd.expectStdOutMatch("Stage M1");
+    stageM1_cmd.expectExitCode(0);
+    const stageM1_step = b.step("stageM1", "Prefill/decode split Stage M1 ledger");
+    stageM1_step.dependOn(&stageM1_cmd.step);
+
+    const qwen_bench_cmd = b.addRunArtifact(exe);
+    qwen_bench_cmd.step.dependOn(b.getInstallStep());
+    qwen_bench_cmd.addArg("qwen-bench");
+    qwen_bench_cmd.addArg("--mini");
+    qwen_bench_cmd.addArg("--max-tokens");
+    qwen_bench_cmd.addArg("4");
+    qwen_bench_cmd.expectStdOutMatch("prefill vs decode");
+    qwen_bench_cmd.expectStdOutMatch("json");
+    qwen_bench_cmd.expectExitCode(0);
+    const qwen_bench_step = b.step("qwen-bench", "Qwen prefill/decode split (Stage M1)");
+    qwen_bench_step.dependOn(&qwen_bench_cmd.step);
+
     const kv_bench_cmd = b.addRunArtifact(exe);
     kv_bench_cmd.step.dependOn(b.getInstallStep());
     kv_bench_cmd.addArg("kv-bench");
@@ -335,6 +355,22 @@ pub fn build(b: *std.Build) void {
     stageM0_ok.expectStdOutMatch("Stage M0");
     stageM0_ok.expectExitCode(0);
     integration_step.dependOn(&stageM0_ok.step);
+
+    const stageM1_ok = b.addRunArtifact(exe);
+    stageM1_ok.addArg("stageM1");
+    stageM1_ok.expectStdOutMatch("Stage M1");
+    stageM1_ok.expectExitCode(0);
+    integration_step.dependOn(&stageM1_ok.step);
+
+    const qwen_bench_ok = b.addRunArtifact(exe);
+    qwen_bench_ok.addArg("qwen-bench");
+    qwen_bench_ok.addArg("--mini");
+    qwen_bench_ok.addArg("--max-tokens");
+    qwen_bench_ok.addArg("4");
+    qwen_bench_ok.expectStdOutMatch("prefill vs decode");
+    qwen_bench_ok.expectStdOutMatch("json");
+    qwen_bench_ok.expectExitCode(0);
+    integration_step.dependOn(&qwen_bench_ok.step);
 
     const kv_bench_ok = b.addRunArtifact(exe);
     kv_bench_ok.addArg("kv-bench");

@@ -21,8 +21,18 @@ commands:
 
 `forward-golden --tokens 2,3 --backend apple` matches CPU top logits within test tolerance (3e-3).
 
-Full Qwen3-0.6B Metal generate: local only; embed/LM head on CPU; blocks per-op Metal.
-Expect unimpressive tok/s until M3 batched schedule.
+## Open gate items (do not drop)
+
+Tracked also in [`docs/stages/M0-metal-qwen-forward.md`](../../docs/stages/M0-metal-qwen-forward.md):
+
+| # | Item | Status |
+| --- | --- | --- |
+| 1 | Full-model Metal greedy == CPU | OPEN |
+| 2 | Metal TTFT / decode tok/s in this ledger | OPEN — use `qwen-bench` on full model |
+| 3 | Per-layer dump ladder on Metal | OPEN |
+| 4 | LM-head GEMV path A/B | OPEN |
+| 5 | Attention parity at kv_len > 256 | OPEN |
+| 6 | Resident KV / one-CB | → M3 |
 
 ## Notes
 

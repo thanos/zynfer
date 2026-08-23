@@ -56,8 +56,8 @@ int8, ICB, extra fusions, Core ML/ANE — reopened at Qwen scale in M3–M7.
 
 | Stage | Title | Old # | Status |
 | --- | --- | --- | --- |
-| **M0** | Metal Qwen forward + generate (f32) | — | **in progress** |
-| **M1** | Prefill vs decode on Qwen | 14 | not started |
+| **M0** | Metal Qwen forward + generate (f32) | — | **in progress** (open checklist in stage doc) |
+| **M1** | Prefill vs decode on Qwen | 14 | **done** — [`docs/stages/M1-prefill-vs-decode-qwen.md`](stages/M1-prefill-vs-decode-qwen.md) |
 | **M2** | Profile one decode token | 15 | not started |
 | **M3** | Qwen-scale scheduling + fusion | 16 (Apple) | not started |
 | **M4** | fp16/bf16 Metal path | 8 reject reopen | not started |
@@ -66,8 +66,11 @@ int8, ICB, extra fusions, Core ML/ANE — reopened at Qwen scale in M3–M7.
 | **M7** | ANE / Core ML gated experiment | 7 reject reopen | not started |
 | **M8** | Capstone: quantized Qwen3-4B + matrix | 25 (Apple) | not started |
 
-**M0 gate:** Metal greedy tokens match CPU golden; `--backend apple` on
-`run` / `forward-golden`; first honest TTFT/decode tok/s baseline.
+**M0 gate (not closed):** full-model Metal token parity, Metal TTFT
+baseline, per-layer ladder, LM-head path A/B, `kv_len>256` parity — see
+[`docs/stages/M0-metal-qwen-forward.md`](stages/M0-metal-qwen-forward.md).
+
+**M1 gate:** `zynfer qwen-bench` split report on CPU + Apple.
 
 ---
 

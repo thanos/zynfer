@@ -68,14 +68,16 @@ Local captures that should not be committed:
 
 Vocabulary TTFT is reported by `zynfer run` (Stage 12) as `ttft_ms` /
 `decode_tok_s` on the CPU Qwen path. Stage 13 adds `zynfer kv-bench` for
-cached vs uncached decode. Tiny-block `block-bench` remains a synthetic
-fixture metric, not LLM TTFT.
+cached vs uncached decode. Stage M1 adds `zynfer qwen-bench` for
+**prefill vs decode** on CPU and Metal. Tiny-block `block-bench` remains a
+synthetic fixture metric, not LLM TTFT.
 
 | Metric | Status |
 | --- | --- |
 | Time to first token | `zynfer run` / `chat` → `ttft_ms` (local full model) |
-| Prefill tok/s | Derived from `prefill_ms` / prompt_tokens on `run` |
+| Prefill tok/s | `prefill_tok_s` on `run` / `qwen-bench` |
 | Decode tok/s | `decode_tok_s` |
+| Prefill vs decode split | `zynfer qwen-bench` (Stage M1) |
 | Cached vs uncached | `zynfer kv-bench` (`decode_speedup`) |
 | KV layout bake-off | `zynfer kv-bench --layout` / `zig build kv-layout` |
 | ITL p50/p95/p99 | `itl_ms p50=… p95=… p99=…` when ≥2 generated tokens |

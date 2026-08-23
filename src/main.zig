@@ -16,12 +16,14 @@ const usage =
     \\  zynfer stage12      Tokenizer + sampling Stage 12 ledger
     \\  zynfer stage13      KV cache Stage 13 ledger
     \\  zynfer stageM0      Metal Qwen forward Stage M0 ledger
+    \\  zynfer stageM1      Prefill/decode split Stage M1 ledger
     \\  zynfer inspect PATH Validate and print a .zynfer artifact
     \\  zynfer artifact-compile [--out PATH] [--mini]  Write fixture .zynfer
     \\  zynfer forward-golden ARTIFACT [--tokens IDS] [--golden PATH] [--dump DIR] [--backend cpu|apple]
     \\  zynfer run ARTIFACT --prompt TEXT [--tokenizer DIR] [sampling flags]
     \\  zynfer chat [ARTIFACT] "PROMPT"   Interactive-style generate (streams tokens)
     \\  zynfer kv-bench [ARTIFACT] [--mini] [--layout] [--prompt TEXT] [--max-tokens N]
+    \\  zynfer qwen-bench [ARTIFACT] [--mini] [--prompt TEXT] [--max-tokens N]
     \\  zynfer setup [--skip-golden] [--skip-pip]   Download Qwen3-0.6B + build .zynfer
     \\  zynfer backends     List selectable backends
     \\  zynfer ops-bench    CPU vs Apple op microbenchmarks
@@ -270,6 +272,8 @@ pub fn main(init: std.process.Init) !void {
         try printStage13(writer);
     } else if (std.mem.eql(u8, command, "stageM0") or std.mem.eql(u8, command, "stagem0")) {
         try printStageM0(writer);
+    } else if (std.mem.eql(u8, command, "stageM1") or std.mem.eql(u8, command, "stagem1")) {
+        try printStageM1(writer);
     } else if (std.mem.eql(u8, command, "inspect")) {
         if (n_pos < 1) {
             std.debug.print("usage: zynfer inspect PATH.zynfer\n", .{});
@@ -324,6 +328,20 @@ pub fn main(init: std.process.Init) !void {
             artifact_mini,
             tokens_arg,
             kv_layout_bench,
+        );
+    } else if (std.mem.eql(u8, command, "qwen-bench")) {
+        try runQwenBench(
+            allocator,
+            io,
+            writer,
+            if (n_pos >= 1) positionals[0] else null,
+            prompt_arg,
+            tokenizer_dir,
+            max_tokens,
+            seed,
+            raw_prompt,
+            artifact_mini,
+            tokens_arg,
         );
     } else if (std.mem.eql(u8, command, "chat")) {
         // zynfer chat "prompt"  OR  zynfer chat ARTIFACT "prompt"  OR  --prompt=
@@ -621,8 +639,9 @@ fn printStage13(writer: *std.Io.Writer) !void {
 fn printStageM0(writer: *std.Io.Writer) !void {
     try writer.print("zynfer Stage M0 — Metal Qwen forward + generate (f32)\n", .{});
     try writer.print("===================================================\n\n", .{});
-    try writer.print("In progress / Phase M capstone path (see baoulo/prompts/fable-5-prompt.md)\n\n", .{});
-    try writer.print("Done (M0 baseline)\n", .{});
+    try writer.print("Status: IN PROGRESS (baseline landed; gate not closed)\n", .{});
+    try writer.print("Plan:   baoulo/prompts/fable-5-prompt.md  Phase M\n\n", .{});
+    try writer.print("Done (baseline)\n", .{});
     try writer.print("  routing:          qwen_block → apple qwen_adapter (per-op Metal)\n", .{});
     try writer.print("  backend:          --backend cpu|apple on run / forward-golden / chat\n", .{});
     try writer.print("  attention cap:    kv_len ≤ {d} ({d} thread-local fast path)\n", .{
@@ -631,10 +650,29 @@ fn printStageM0(writer: *std.Io.Writer) !void {
     });
     try writer.print("  oracle:           CPU reference; embed/norm/lm_head on CPU (M0)\n", .{});
     try writer.print("  CI test:          mini artifact Metal logits vs CPU\n\n", .{});
-    try writer.print("Next (M1–M8)\n", .{});
-    try writer.print("  M1 prefill/decode split  M2 profile token  M3 batched 28-layer schedule\n", .{});
-    try writer.print("  M4 fp16  M5 quant  M6 static decode  M7 ANE experiment  M8 Qwen3-4B capstone\n\n", .{});
+    try writer.print("Open (must close before M0 = done)\n", .{});
+    try writer.print("  [ ] full-model Metal greedy tokens == CPU golden\n", .{});
+    try writer.print("  [ ] Metal TTFT / decode tok/s in stageM0 bench ledger\n", .{});
+    try writer.print("  [ ] per-layer dump ladder on Metal\n", .{});
+    try writer.print("  [ ] LM-head GEMV path A/B (naive / simdgroup / Accelerate)\n", .{});
+    try writer.print("  [ ] attention parity at kv_len > 256 (device scores)\n", .{});
+    try writer.print("  (Stage 6 resident-KV / one-CB → deferred to M3)\n\n", .{});
     try writer.print("See docs/stages/M0-metal-qwen-forward.md\n", .{});
+}
+
+fn printStageM1(writer: *std.Io.Writer) !void {
+    try writer.print("zynfer Stage M1 — Prefill vs decode on Qwen\n", .{});
+    try writer.print("===========================================\n\n", .{});
+    try writer.print("Done\n", .{});
+    try writer.print("  CLI:              qwen-bench [--mini] → CPU + Apple split report\n", .{});
+    try writer.print("  prefill:          latency_ms, prompt_tok_s, GEMM shapes\n", .{});
+    try writer.print("  decode:           tok_s, ms/token, bytes/token est., measured enc/wait per tok\n", .{});
+    try writer.print("  output:           human table + json line\n", .{});
+    try writer.print("  also:             run/chat footer prints prefill_tok_s separately\n\n", .{});
+    try writer.print("Not in Stage M1\n", .{});
+    try writer.print("  per-op decode profile / roofline — M2\n", .{});
+    try writer.print("  batched Metal schedule — M3\n\n", .{});
+    try writer.print("See docs/stages/M1-prefill-vs-decode-qwen.md\n", .{});
 }
 
 const StreamCtx = struct {
@@ -901,14 +939,21 @@ fn runGenerate(
     if (use_kv_cache) {
         try writer.print("kv_bytes_used={d} kv_bytes_cap={d}\n", .{ sess.kvBytesUsed(), sess.kvBytesCapacity() });
     }
-    try writer.print("ttft_ms={d:.3} prefill_ms={d:.3}", .{
-        @as(f64, @floatFromInt(stats.ttft_ns)) / 1e6,
-        @as(f64, @floatFromInt(stats.prefill_ns)) / 1e6,
-    });
+    // Stage M1: always report prefill and decode as separate regimes.
+    try writer.print("prefill_ms={d:.3}", .{@as(f64, @floatFromInt(stats.prefill_ns)) / 1e6});
+    if (stats.prompt_tokens > 0 and stats.prefill_ns > 0) {
+        const prefill_tok_s = @as(f64, @floatFromInt(stats.prompt_tokens)) /
+            (@as(f64, @floatFromInt(stats.prefill_ns)) / 1e9);
+        try writer.print(" prefill_tok_s={d:.3}", .{prefill_tok_s});
+    }
+    try writer.print(" ttft_ms={d:.3}", .{@as(f64, @floatFromInt(stats.ttft_ns)) / 1e6});
     if (stats.generated_tokens > 1 and stats.decode_ns > 0) {
         const decode_tokens = stats.generated_tokens - 1;
         const tok_s = @as(f64, @floatFromInt(decode_tokens)) / (@as(f64, @floatFromInt(stats.decode_ns)) / 1e9);
-        try writer.print(" decode_tok_s={d:.3}", .{tok_s});
+        const ms_tok = (@as(f64, @floatFromInt(stats.decode_ns)) / 1e6) / @as(f64, @floatFromInt(decode_tokens));
+        try writer.print(" decode_tok_s={d:.3} decode_ms_per_tok={d:.3}", .{ tok_s, ms_tok });
+    } else if (stats.generated_tokens == 1) {
+        try writer.print(" decode_tok_s=n/a (single token; decode interval after first)", .{});
     }
     if (stats.itl_count > 0) {
         const slice = itl_buf[0..stats.itl_count];
@@ -1135,6 +1180,288 @@ fn runKvLayoutBench(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Wr
         .{},
     );
     try writer.print("contiguous per-head prefixes beat strided seq-outer gathers.\n", .{});
+}
+
+/// Stage M1: prefill vs decode split report on CPU and (when available) Apple Metal.
+fn runQwenBench(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    writer: *std.Io.Writer,
+    artifact_path_opt: ?[]const u8,
+    prompt_opt: ?[]const u8,
+    tokenizer_dir_opt: ?[]const u8,
+    max_new_tokens_in: u32,
+    seed: u64,
+    raw_prompt: bool,
+    force_mini: bool,
+    tokens_arg: ?[]const u8,
+) !void {
+    const default_path = "models/qwen3-0.6b.zynfer";
+    const use_mini = force_mini or (artifact_path_opt == null and !zynfer.util.fileExists(io, default_path));
+    const max_new: u32 = if (max_new_tokens_in == 64 and use_mini) 4 else if (max_new_tokens_in == 64) 8 else max_new_tokens_in;
+
+    try writer.print("zynfer qwen-bench — prefill vs decode (Stage M1)\n", .{});
+    try writer.print("================================================\n\n", .{});
+
+    var art: zynfer.artifact.Artifact = undefined;
+    var prompt_ids: []u32 = undefined;
+    var free_prompt = false;
+    defer if (free_prompt) allocator.free(prompt_ids);
+    var arch: zynfer.qwen3.Arch = undefined;
+
+    if (use_mini) {
+        try writer.print("fixture: stage11-mini (in-memory)\n", .{});
+        const bytes = try zynfer.qwen_forward.buildMiniArtifact(allocator);
+        art = try zynfer.artifact.Artifact.loadOwned(allocator, bytes);
+        arch = zynfer.qwen3.stage11_mini;
+        if (tokens_arg) |s| {
+            prompt_ids = try parseCsvTokenIds(allocator, s);
+            free_prompt = true;
+        } else {
+            prompt_ids = try allocator.dupe(u32, &.{ 2, 3 });
+            free_prompt = true;
+        }
+    } else {
+        const path = artifact_path_opt orelse default_path;
+        try writer.print("artifact: {s}\n", .{path});
+        art = zynfer.artifact.Artifact.loadFile(allocator, io, path) catch |err| {
+            std.debug.print("qwen-bench: load failed ({s}): {s}\n", .{ path, @errorName(err) });
+            std.process.exit(2);
+        };
+        arch = try art.meta.toArch();
+        if (tokens_arg) |s| {
+            prompt_ids = try parseCsvTokenIds(allocator, s);
+            free_prompt = true;
+        } else {
+            const prompt = prompt_opt orelse "Explain gravity simply.";
+            const tok_dir = try resolveTokenizerDir(allocator, io, path, tokenizer_dir_opt);
+            defer allocator.free(tok_dir);
+            var tok = zynfer.tokenizer.Tokenizer.loadHfDir(allocator, io, tok_dir) catch |err| {
+                std.debug.print("qwen-bench: tokenizer load failed ({s}): {s}\n", .{ tok_dir, @errorName(err) });
+                std.process.exit(2);
+            };
+            defer tok.deinit();
+            const wrapped = if (raw_prompt)
+                try allocator.dupe(u8, prompt)
+            else
+                try tok.applyChatTemplate(allocator, prompt);
+            defer allocator.free(wrapped);
+            prompt_ids = tok.encode(allocator, wrapped) catch |err| {
+                std.debug.print("qwen-bench: encode failed: {s}\n", .{@errorName(err)});
+                std.process.exit(2);
+            };
+            free_prompt = true;
+        }
+    }
+    defer art.deinit();
+
+    const max_seq = prompt_ids.len + max_new;
+    if (max_seq == 0 or max_seq > arch.max_position_embeddings) {
+        std.debug.print("qwen-bench: sequence too long\n", .{});
+        std.process.exit(2);
+    }
+
+    var gemm_buf: [512]u8 = undefined;
+    const gemm_prefill = arch.describePrefillGemms(prompt_ids.len, &gemm_buf);
+    var gemm_dec_buf: [512]u8 = undefined;
+    const gemm_decode = arch.describeDecodeGemms(&gemm_dec_buf);
+
+    try writer.print("prompt_tokens={d} max_new={d} layers={d} hidden={d}\n", .{
+        prompt_ids.len,
+        max_new,
+        arch.num_layers,
+        arch.hidden_size,
+    });
+    try writer.print("prefill_gemms: {s}\n", .{gemm_prefill});
+    try writer.print("decode_gemms:  {s}\n\n", .{gemm_decode});
+
+    try writer.print("{s:<8} {s:>12} {s:>12} {s:>12} {s:>12} {s:>14} {s:>12} {s:>10} {s:>10}\n", .{
+        "backend",
+        "prefill_ms",
+        "prefill_t/s",
+        "ttft_ms",
+        "decode_t/s",
+        "decode_ms/tok",
+        "B/tok_est",
+        "enc/tok",
+        "wait/tok",
+    });
+    try writer.print("{s:-<8} {s:->12} {s:->12} {s:->12} {s:->12} {s:->14} {s:->12} {s:->10} {s:->10}\n", .{
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+    });
+
+    const Row = struct {
+        backend: []const u8,
+        prefill_ns: u64,
+        ttft_ns: u64,
+        decode_ns: u64,
+        prompt_tokens: usize,
+        generated_tokens: usize,
+        bytes_per_tok: u64,
+        encodes_per_tok: f64,
+        waits_per_tok: f64,
+        metal_encodes_prefill: u64,
+        metal_waits_prefill: u64,
+        metal_encodes_decode: u64,
+        metal_waits_decode: u64,
+        decode_steps: usize,
+    };
+
+    var rows: [2]Row = undefined;
+    var n_rows: usize = 0;
+
+    const kinds = [_]zynfer.BackendKind{ .cpu, .apple };
+    for (kinds) |kind| {
+        if (kind == .apple) {
+            if (!zynfer.backend.isBackendBuildable(.apple)) continue;
+            zynfer.backend.requireBackend(.apple) catch continue;
+        }
+
+        var out_ids: std.ArrayList(u32) = .empty;
+        defer out_ids.deinit(allocator);
+
+        var sess = zynfer.qwen_forward.Session.initWithBackend(allocator, &art, arch, max_seq, kind) catch |err| {
+            try writer.print("{s:<8}  SKIP ({s})\n", .{ kind.name(), @errorName(err) });
+            continue;
+        };
+        defer sess.deinit();
+
+        var rng = std.Random.DefaultPrng.init(seed);
+        const stats = sess.generate(io, prompt_ids, &out_ids, .{
+            .max_new_tokens = max_new,
+            .sample = .{ .temperature = 0, .seed = seed },
+            .use_kv_cache = true,
+        }, &rng) catch |err| {
+            try writer.print("{s:<8}  FAIL ({s})\n", .{ kind.name(), @errorName(err) });
+            continue;
+        };
+
+        const kv_len = prompt_ids.len + @max(stats.generated_tokens, 1);
+        const bytes_tok = arch.estimateDecodeBytesPerToken(kv_len);
+        const denom: f64 = @floatFromInt(@max(stats.decode_steps, 1));
+        const enc_tok: f64 = if (stats.decode_steps > 0)
+            @as(f64, @floatFromInt(stats.metal_encodes_decode)) / denom
+        else
+            0;
+        const wait_tok: f64 = if (stats.decode_steps > 0)
+            @as(f64, @floatFromInt(stats.metal_waits_decode)) / denom
+        else
+            0;
+
+        const prefill_ms = @as(f64, @floatFromInt(stats.prefill_ns)) / 1e6;
+        const ttft_ms = @as(f64, @floatFromInt(stats.ttft_ns)) / 1e6;
+        const prefill_tok_s: f64 = if (stats.prefill_ns > 0)
+            @as(f64, @floatFromInt(stats.prompt_tokens)) / (@as(f64, @floatFromInt(stats.prefill_ns)) / 1e9)
+        else
+            0;
+        var decode_tok_s: f64 = 0;
+        var decode_ms_tok: f64 = 0;
+        if (stats.generated_tokens > 1 and stats.decode_ns > 0) {
+            const n = stats.generated_tokens - 1;
+            decode_tok_s = @as(f64, @floatFromInt(n)) / (@as(f64, @floatFromInt(stats.decode_ns)) / 1e9);
+            decode_ms_tok = (@as(f64, @floatFromInt(stats.decode_ns)) / 1e6) / @as(f64, @floatFromInt(n));
+        }
+
+        try writer.print("{s:<8} {d:>12.3} {d:>12.3} {d:>12.3} {d:>12.3} {d:>14.3} {d:>12} {d:>10.1} {d:>10.1}\n", .{
+            kind.name(),
+            prefill_ms,
+            prefill_tok_s,
+            ttft_ms,
+            decode_tok_s,
+            decode_ms_tok,
+            bytes_tok,
+            enc_tok,
+            wait_tok,
+        });
+
+        rows[n_rows] = .{
+            .backend = kind.name(),
+            .prefill_ns = stats.prefill_ns,
+            .ttft_ns = stats.ttft_ns,
+            .decode_ns = stats.decode_ns,
+            .prompt_tokens = stats.prompt_tokens,
+            .generated_tokens = stats.generated_tokens,
+            .bytes_per_tok = bytes_tok,
+            .encodes_per_tok = enc_tok,
+            .waits_per_tok = wait_tok,
+            .metal_encodes_prefill = stats.metal_encodes_prefill,
+            .metal_waits_prefill = stats.metal_waits_prefill,
+            .metal_encodes_decode = stats.metal_encodes_decode,
+            .metal_waits_decode = stats.metal_waits_decode,
+            .decode_steps = stats.decode_steps,
+        };
+        n_rows += 1;
+    }
+
+    try writer.print("\nnotes:\n", .{});
+    try writer.print("  enc/tok + wait/tok = measured Metal launches / waits per decodeToken (M0 per-op path).\n", .{});
+    try writer.print("  CPU rows show 0 (no Metal). Prefill Metal totals printed below when present.\n", .{});
+    try writer.print("  B/tok_est = f32 weight reads + KV read at end-of-run kv_len (approx).\n", .{});
+    try writer.print("  decode_t/s uses generated_tokens-1 (intervals after first token).\n", .{});
+    var ri: usize = 0;
+    while (ri < n_rows) : (ri += 1) {
+        const r = rows[ri];
+        if (r.metal_encodes_prefill > 0 or r.metal_waits_prefill > 0) {
+            try writer.print(
+                "  {s} prefill measured: encodes={d} waits={d}; decode totals: encodes={d} waits={d} steps={d}\n",
+                .{
+                    r.backend,
+                    r.metal_encodes_prefill,
+                    r.metal_waits_prefill,
+                    r.metal_encodes_decode,
+                    r.metal_waits_decode,
+                    r.decode_steps,
+                },
+            );
+        }
+    }
+    try writer.print("\n", .{});
+
+    try writer.print("json\n", .{});
+    try writer.print("{{\"cmd\":\"qwen-bench\",\"prompt_tokens\":{d},\"max_new\":{d},\"layers\":{d},\"hidden\":{d},\"mini\":{},\"rows\":[", .{
+        prompt_ids.len,
+        max_new,
+        arch.num_layers,
+        arch.hidden_size,
+        use_mini,
+    });
+    var i: usize = 0;
+    while (i < n_rows) : (i += 1) {
+        if (i != 0) try writer.writeAll(",");
+        const r = rows[i];
+        try writer.print(
+            "{{\"backend\":\"{s}\",\"prefill_ns\":{d},\"ttft_ns\":{d},\"decode_ns\":{d},\"generated_tokens\":{d},\"bytes_per_tok_est\":{d},\"metal_encodes_prefill\":{d},\"metal_waits_prefill\":{d},\"metal_encodes_decode\":{d},\"metal_waits_decode\":{d},\"decode_steps\":{d},\"encodes_per_tok\":{d:.3},\"waits_per_tok\":{d:.3}}}",
+            .{
+                r.backend,
+                r.prefill_ns,
+                r.ttft_ns,
+                r.decode_ns,
+                r.generated_tokens,
+                r.bytes_per_tok,
+                r.metal_encodes_prefill,
+                r.metal_waits_prefill,
+                r.metal_encodes_decode,
+                r.metal_waits_decode,
+                r.decode_steps,
+                r.encodes_per_tok,
+                r.waits_per_tok,
+            },
+        );
+    }
+    try writer.print("]}}\n", .{});
+
+    if (n_rows == 0) {
+        try writer.flush();
+        std.process.exit(1);
+    }
 }
 
 fn parseCsvTokenIds(allocator: std.mem.Allocator, csv: []const u8) ![]u32 {

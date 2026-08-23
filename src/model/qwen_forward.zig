@@ -278,7 +278,24 @@ pub const Session = struct {
         /// Number of ITL samples written to `itl_ns_out` (generated_tokens - 1 when streaming intervals).
         itl_count: usize = 0,
         use_kv_cache: bool = true,
+        /// Measured Metal kernel encodes during prefill (0 on CPU).
+        metal_encodes_prefill: u64 = 0,
+        metal_waits_prefill: u64 = 0,
+        /// Measured Metal encodes/waits across all `decodeToken` calls.
+        metal_encodes_decode: u64 = 0,
+        metal_waits_decode: u64 = 0,
+        /// Number of `decodeToken` calls (usually generated_tokens - 1 when no early stop before last).
+        decode_steps: usize = 0,
     };
+
+    fn resetMetalLaunchCounters(self: *Session) void {
+        if (self.gpu) |g| g.resetLaunchCounters();
+    }
+
+    fn metalLaunchSnapshot(self: *const Session) struct { encodes: u64, waits: u64 } {
+        if (self.gpu) |g| return .{ .encodes = g.total_encodes, .waits = g.total_waits };
+        return .{ .encodes = 0, .waits = 0 };
+    }
 
     /// Prefill `prompt_ids`, then autoregressively sample up to `max_new_tokens`.
     /// Appends generated ids to `out_ids` (caller provides ArrayList).
@@ -319,14 +336,19 @@ pub const Session = struct {
         defer self.allocator.free(idx);
 
         const t0 = std.Io.Clock.awake.now(io);
+        self.resetMetalLaunchCounters();
         try self.prefillLastLogits(prompt_ids, logits);
         const t_prefill = std.Io.Clock.awake.now(io);
+        const metal_prefill = self.metalLaunchSnapshot();
 
         var generated: usize = 0;
         var decode_ns: u64 = 0;
         var ttft_ns: u64 = 0;
         var itl_count: usize = 0;
         var last_emit = t_prefill;
+        var decode_steps: usize = 0;
+        var metal_encodes_decode: u64 = 0;
+        var metal_waits_decode: u64 = 0;
 
         while (generated < cfg.max_new_tokens) {
             if (self.blocks[0].cache.used >= self.max_seq) break;
@@ -349,9 +371,14 @@ pub const Session = struct {
             if (cfg.on_token) |cb| cb(cfg.on_token_ctx, next);
             if (isStop(next, cfg.stop_ids)) break;
 
+            self.resetMetalLaunchCounters();
             const td0 = std.Io.Clock.awake.now(io);
             try self.decodeToken(next, logits);
             decode_ns += nsDelta(td0, std.Io.Clock.awake.now(io));
+            const snap = self.metalLaunchSnapshot();
+            metal_encodes_decode += snap.encodes;
+            metal_waits_decode += snap.waits;
+            decode_steps += 1;
         }
 
         if (ttft_ns == 0) ttft_ns = nsDelta(t0, std.Io.Clock.awake.now(io));
@@ -364,6 +391,11 @@ pub const Session = struct {
             .decode_ns = decode_ns,
             .itl_count = itl_count,
             .use_kv_cache = true,
+            .metal_encodes_prefill = metal_prefill.encodes,
+            .metal_waits_prefill = metal_prefill.waits,
+            .metal_encodes_decode = metal_encodes_decode,
+            .metal_waits_decode = metal_waits_decode,
+            .decode_steps = decode_steps,
         };
     }
 
@@ -712,4 +744,36 @@ test "Stage M0: mini Metal forward matches CPU logits" {
     try cpu_sess.prefillLastLogits(&token_ids, cpu_logits);
     try metal_sess.prefillLastLogits(&token_ids, metal_logits);
     try compare.expectClose(cpu_logits, metal_logits, 3e-3, 3e-3);
+}
+
+test "Stage M1: Metal generate reports measured encode/wait counts" {
+    if (apple_gpu.skipAppleGpuTests()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const bytes = try buildMiniArtifact(gpa);
+    defer gpa.free(bytes);
+    var art = try artifact.Artifact.loadOwned(gpa, try gpa.dupe(u8, bytes));
+    defer art.deinit();
+
+    const arch = qwen3.stage11_mini;
+    const prompt = [_]u32{ 2, 3 };
+    var out: std.ArrayList(u32) = .empty;
+    defer out.deinit(gpa);
+
+    var sess = try Session.initWithBackend(gpa, &art, arch, prompt.len + 3, .apple);
+    defer sess.deinit();
+    var rng = std.Random.DefaultPrng.init(0);
+    const stats = try sess.generate(io, &prompt, &out, .{
+        .max_new_tokens = 3,
+        .sample = .{ .temperature = 0 },
+        .use_kv_cache = true,
+    }, &rng);
+
+    try std.testing.expect(stats.metal_encodes_prefill > 0);
+    try std.testing.expect(stats.metal_waits_prefill > 0);
+    // M0 per-op path: every encode waits.
+    try std.testing.expectEqual(stats.metal_encodes_prefill, stats.metal_waits_prefill);
+    try std.testing.expect(stats.decode_steps >= 1);
+    try std.testing.expect(stats.metal_encodes_decode > 0);
+    try std.testing.expectEqual(stats.metal_encodes_decode, stats.metal_waits_decode);
 }

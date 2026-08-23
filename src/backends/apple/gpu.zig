@@ -143,6 +143,10 @@ pub const Gpu = struct {
     batch_active: bool = false,
     /// Dispatches encoded in the current (or last completed) batch.
     last_batch_encodes: u32 = 0,
+    /// Cumulative kernel encodes since last `resetLaunchCounters` (batch or wait path).
+    total_encodes: u64 = 0,
+    /// Cumulative GPU waits since last reset (`encode_and_wait` or `batchCommit`).
+    total_waits: u64 = 0,
 
     pub fn init() Error!Gpu {
         if (!have_apple) return error.AppleUnavailable;
@@ -233,6 +237,11 @@ pub const Gpu = struct {
         return caps;
     }
 
+    pub fn resetLaunchCounters(self: *Gpu) void {
+        self.total_encodes = 0;
+        self.total_waits = 0;
+    }
+
     /// Open a multi-dispatch command buffer. `launch`/`launchOpts` encode onto it
     /// until `batchCommit` (one wait) or `batchAbort`.
     pub fn batchBegin(self: *Gpu) Error!void {
@@ -256,6 +265,7 @@ pub const Gpu = struct {
             self.captureError();
             return statusToError(st);
         }
+        self.total_waits += 1;
     }
 
     pub fn batchAbort(self: *Gpu) void {
@@ -357,7 +367,12 @@ pub const Gpu = struct {
             if (self.batch_active) self.batchAbort();
             return statusToError(st);
         }
-        if (self.batch_active) self.last_batch_encodes += 1;
+        self.total_encodes += 1;
+        if (self.batch_active) {
+            self.last_batch_encodes += 1;
+        } else {
+            self.total_waits += 1;
+        }
     }
 
     pub fn threadgroup1d(self: *const Gpu) u32 {
