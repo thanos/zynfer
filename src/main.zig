@@ -20,6 +20,7 @@ const usage =
     \\  zynfer stageM2      Profile one decode token Stage M2 ledger
     \\  zynfer stageM3      Qwen-scale schedule + fusion Stage M3 ledger
     \\  zynfer stageM4      bf16/fp16 Metal weights+KV Stage M4 ledger
+    \\  zynfer stageM5      int8 weight quantization Stage M5 ledger
     \\  zynfer inspect PATH Validate and print a .zynfer artifact
     \\  zynfer artifact-compile [--out PATH] [--mini]  Write fixture .zynfer
     \\  zynfer forward-golden ARTIFACT [--tokens IDS] [--golden PATH] [--dump DIR] [--backend cpu|apple]
@@ -284,6 +285,8 @@ pub fn main(init: std.process.Init) !void {
         try printStageM3(writer);
     } else if (std.mem.eql(u8, command, "stageM4") or std.mem.eql(u8, command, "stagem4")) {
         try printStageM4(writer);
+    } else if (std.mem.eql(u8, command, "stageM5") or std.mem.eql(u8, command, "stagem5")) {
+        try printStageM5(writer);
     } else if (std.mem.eql(u8, command, "inspect")) {
         if (n_pos < 1) {
             std.debug.print("usage: zynfer inspect PATH.zynfer\n", .{});
@@ -743,9 +746,28 @@ fn printStageM4(writer: *std.Io.Writer) !void {
     try writer.print("  tolerance:        5e-3 atol vs CPU logits (dtype-justified)\n", .{});
     try writer.print("  bytes/token:      estimateDecodeBytesPerTokenHalf ≈ ½ f32 estimate\n\n", .{});
     try writer.print("Not in Stage M4\n", .{});
-    try writer.print("  int8 session weights — M5\n", .{});
+    try writer.print("  int8 session weights — M5 (done; see stageM5)\n", .{});
     try writer.print("  zero-allocation static decode — M6\n\n", .{});
     try writer.print("See docs/stages/M4-half-precision-metal.md\n", .{});
+}
+
+fn printStageM5(writer: *std.Io.Writer) !void {
+    try writer.print("zynfer Stage M5 — int8 weight quantization (Apple)\n", .{});
+    try writer.print("================================================\n\n", .{});
+    try writer.print("Done\n", .{});
+    try writer.print("  path:             batched_resident_kv_q8 (ZYNFER_QWEN_METAL=int8|q8)\n", .{});
+    try writer.print("  scheme:           per-row symmetric int8 (scale = max_abs/127, no ZP)\n", .{});
+    try writer.print("  layout:           HF [out,in]; pack at MetalStack.init from host f32\n", .{});
+    try writer.print("  kernels:          matmul_aq8_f32 (fused dequant) + matvec_q8_f32 (LM head)\n", .{});
+    try writer.print("  not quantized:    norms, embed gather, KV (f32), activations\n", .{});
+    try writer.print("  artifact:         dtype tag 3=i8; tools/checkpoint/quantize_zynfer_int8.py\n", .{});
+    try writer.print("  decoder:          qwen_quant.dequantRowQ8 (CPU round-trip tests)\n", .{});
+    try writer.print("  tolerance:        5e-2 atol vs CPU logits (packing-justified)\n", .{});
+    try writer.print("  bytes/token:      estimateDecodeBytesPerTokenQ8 (i8 weights + f32 scales + f32 KV)\n\n", .{});
+    try writer.print("Not in Stage M5\n", .{});
+    try writer.print("  4-bit weights — only if int8 decode wins and quality allows\n", .{});
+    try writer.print("  zero-allocation static decode — M6\n\n", .{});
+    try writer.print("See docs/stages/M5-weight-quantization-apple.md\n", .{});
 }
 
 const StreamCtx = struct {
@@ -1418,7 +1440,9 @@ fn runQwenBench(
         };
 
         const kv_len = prompt_ids.len + @max(stats.generated_tokens, 1);
-        const bytes_tok = if (kind == .apple and zynfer.apple.qwen_schedule.useHalfPath())
+        const bytes_tok = if (kind == .apple and zynfer.apple.qwen_schedule.useQ8Path())
+            arch.estimateDecodeBytesPerTokenQ8(kv_len)
+        else if (kind == .apple and zynfer.apple.qwen_schedule.useHalfPath())
             arch.estimateDecodeBytesPerTokenHalf(kv_len)
         else
             arch.estimateDecodeBytesPerToken(kv_len);
@@ -1737,7 +1761,9 @@ fn runQwenProfile(
         try writer.print("bandwidth_stream_triad: n/a (CPU backend)\n", .{});
     }
 
-    const bytes_tok = if (kind == .apple and zynfer.apple.qwen_schedule.useHalfPath())
+    const bytes_tok = if (kind == .apple and zynfer.apple.qwen_schedule.useQ8Path())
+        arch.estimateDecodeBytesPerTokenQ8(buckets.kv_len)
+    else if (kind == .apple and zynfer.apple.qwen_schedule.useHalfPath())
         arch.estimateDecodeBytesPerTokenHalf(buckets.kv_len)
     else
         arch.estimateDecodeBytesPerToken(buckets.kv_len);

@@ -114,6 +114,23 @@ pub const Arch = struct {
         return self.estimateDecodeBytesPerToken(kv_len) / 2;
     }
 
+    /// M5: int8 projections + per-row f32 scales; f32 KV (Q8 path keeps f32 KV).
+    pub fn estimateDecodeBytesPerTokenQ8(self: Arch, kv_len: usize) u64 {
+        const h: u64 = self.hidden_size;
+        const qd: u64 = self.qDim();
+        const kvd: u64 = self.kvDim();
+        const inter: u64 = self.intermediate_size;
+        const layers: u64 = self.num_layers;
+        const weight_elems = layers * ((h * qd) + (h * kvd) + (h * kvd) + (qd * h) +
+            (h * inter) + (h * inter) + (inter * h)) + (@as(u64, self.vocab_size) * h);
+        // Per-row scales: one f32 per output row of each projection + lm_head.
+        const scale_rows = layers * (qd + kvd + kvd + h + inter + inter + h) + @as(u64, self.vocab_size);
+        const weight_bytes = weight_elems * 1 + scale_rows * @sizeOf(f32);
+        const kv_bytes = layers * @as(u64, self.num_key_value_heads) * @as(u64, @intCast(kv_len)) *
+            @as(u64, self.head_dim) * 2 * @sizeOf(f32);
+        return weight_bytes + kv_bytes;
+    }
+
     /// M0 Metal path: measured ~17 encode+wait launches per layer (was rough 18).
     pub fn estimateMetalOpLaunchesPerDecodeToken(self: Arch) u32 {
         const ops_per_layer: u32 = 17;

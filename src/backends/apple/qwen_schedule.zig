@@ -14,6 +14,7 @@ const artifact = @import("../../model/artifact.zig");
 const gpu_mod = @import("gpu.zig");
 const apple_ops = @import("ops.zig");
 const bf16 = @import("../../runtime/bf16.zig");
+const qwen_quant = @import("../../model/qwen_quant.zig");
 
 const Gpu = gpu_mod.Gpu;
 const Buffer = gpu_mod.Buffer;
@@ -21,6 +22,7 @@ const Buffer = gpu_mod.Buffer;
 pub const path_baseline = "baseline_per_op";
 pub const path_batched = "batched_resident_kv_fused";
 pub const path_bf16 = "batched_resident_kv_bf16";
+pub const path_q8 = "batched_resident_kv_q8";
 
 pub var last_qwen_path: []const u8 = "unset";
 pub var last_qwen_encodes: u32 = 0;
@@ -30,6 +32,8 @@ pub var last_qwen_waits: u32 = 0;
 pub var force_baseline_path: ?bool = null;
 /// Test override for M4 half path.
 pub var force_half_path: ?bool = null;
+/// Test override for M5 int8 path.
+pub var force_q8_path: ?bool = null;
 
 pub fn useBaselinePath() bool {
     if (force_baseline_path) |forced| return forced;
@@ -39,10 +43,20 @@ pub fn useBaselinePath() bool {
     return std.mem.eql(u8, v, "baseline") or std.mem.eql(u8, v, "per-op");
 }
 
+/// Stage M5: per-row int8 projections (`ZYNFER_QWEN_METAL=int8|q8`).
+pub fn useQ8Path() bool {
+    if (force_q8_path) |forced| return forced;
+    if (useBaselinePath()) return false;
+    if (comptime !gpu_mod.have_apple) return false;
+    const raw = std.c.getenv("ZYNFER_QWEN_METAL") orelse return false;
+    const v = std.mem.span(raw);
+    return std.mem.eql(u8, v, "int8") or std.mem.eql(u8, v, "q8");
+}
+
 /// Stage M4: bf16 resident weights + bf16 KV (`ZYNFER_QWEN_METAL=bf16|half|fp16`).
 pub fn useHalfPath() bool {
     if (force_half_path) |forced| return forced;
-    if (useBaselinePath()) return false;
+    if (useBaselinePath() or useQ8Path()) return false;
     if (comptime !gpu_mod.have_apple) return false;
     const raw = std.c.getenv("ZYNFER_QWEN_METAL") orelse return false;
     const v = std.mem.span(raw);
@@ -165,6 +179,113 @@ const LayerDeviceWeights = struct {
         try copyTensorToBuf(self.wg, w.wg);
         try copyTensorToBuf(self.wu, w.wu);
         try copyTensorToBuf(self.wd, w.wd);
+    }
+};
+
+/// Stage M5: f32 norms + per-row int8 projections (HF [out,in] packing).
+const LayerQ8Weights = struct {
+    input_ln: Buffer,
+    q_norm: Buffer,
+    k_norm: Buffer,
+    post_attn_ln: Buffer,
+    wq: apple_ops.Q8DeviceWeights,
+    wk: apple_ops.Q8DeviceWeights,
+    wv: apple_ops.Q8DeviceWeights,
+    wo: apple_ops.Q8DeviceWeights,
+    wg: apple_ops.Q8DeviceWeights,
+    wu: apple_ops.Q8DeviceWeights,
+    wd: apple_ops.Q8DeviceWeights,
+
+    fn packUpload(
+        allocator: std.mem.Allocator,
+        gpu: *Gpu,
+        host: Tensor,
+        out_dim: usize,
+        in_dim: usize,
+    ) !apple_ops.Q8DeviceWeights {
+        const packed_w = try qwen_quant.packInOutToQ8(allocator, host, out_dim, in_dim);
+        defer allocator.free(packed_w.q);
+        defer allocator.free(packed_w.scale);
+        return apple_ops.Q8DeviceWeights.upload(gpu, packed_w.q, packed_w.scale, out_dim, in_dim, .per_row);
+    }
+
+    /// Pack HF-layout `[out, in]` (tied embed / untied lm_head after load checks).
+    fn packUploadOutIn(
+        allocator: std.mem.Allocator,
+        gpu: *Gpu,
+        host: Tensor,
+        out_dim: usize,
+        in_dim: usize,
+    ) !apple_ops.Q8DeviceWeights {
+        const packed_w = try qwen_quant.packOutInToQ8(allocator, host, out_dim, in_dim);
+        defer allocator.free(packed_w.q);
+        defer allocator.free(packed_w.scale);
+        return apple_ops.Q8DeviceWeights.upload(gpu, packed_w.q, packed_w.scale, out_dim, in_dim, .per_row);
+    }
+
+    fn init(allocator: std.mem.Allocator, gpu: *Gpu, arch: qwen3.Arch, w: qwen_weights.LayerWeights) !LayerQ8Weights {
+        const h: usize = @intCast(arch.hidden_size);
+        const qd: usize = @intCast(arch.qDim());
+        const kvd: usize = @intCast(arch.kvDim());
+        const inter: usize = @intCast(arch.intermediate_size);
+        const d: usize = @intCast(arch.head_dim);
+
+        var input_ln = try gpu.allocShared(f32Bytes(h));
+        errdefer input_ln.deinit();
+        var q_norm = try gpu.allocShared(f32Bytes(d));
+        errdefer q_norm.deinit();
+        var k_norm = try gpu.allocShared(f32Bytes(d));
+        errdefer k_norm.deinit();
+        var post_attn_ln = try gpu.allocShared(f32Bytes(h));
+        errdefer post_attn_ln.deinit();
+        try copyTensorToBuf(input_ln, w.input_ln);
+        try copyTensorToBuf(q_norm, w.q_norm);
+        try copyTensorToBuf(k_norm, w.k_norm);
+        try copyTensorToBuf(post_attn_ln, w.post_attn_ln);
+
+        var wq = try packUpload(allocator, gpu, w.wq, qd, h);
+        errdefer wq.deinit();
+        var wk = try packUpload(allocator, gpu, w.wk, kvd, h);
+        errdefer wk.deinit();
+        var wv = try packUpload(allocator, gpu, w.wv, kvd, h);
+        errdefer wv.deinit();
+        var wo = try packUpload(allocator, gpu, w.wo, h, qd);
+        errdefer wo.deinit();
+        var wg = try packUpload(allocator, gpu, w.wg, inter, h);
+        errdefer wg.deinit();
+        var wu = try packUpload(allocator, gpu, w.wu, inter, h);
+        errdefer wu.deinit();
+        var wd = try packUpload(allocator, gpu, w.wd, h, inter);
+        errdefer wd.deinit();
+
+        return .{
+            .input_ln = input_ln,
+            .q_norm = q_norm,
+            .k_norm = k_norm,
+            .post_attn_ln = post_attn_ln,
+            .wq = wq,
+            .wk = wk,
+            .wv = wv,
+            .wo = wo,
+            .wg = wg,
+            .wu = wu,
+            .wd = wd,
+        };
+    }
+
+    fn deinit(self: *LayerQ8Weights) void {
+        self.input_ln.deinit();
+        self.q_norm.deinit();
+        self.k_norm.deinit();
+        self.post_attn_ln.deinit();
+        self.wq.deinit();
+        self.wk.deinit();
+        self.wv.deinit();
+        self.wo.deinit();
+        self.wg.deinit();
+        self.wu.deinit();
+        self.wd.deinit();
+        self.* = undefined;
     }
 };
 
@@ -331,9 +452,12 @@ pub const MetalStack = struct {
     arch: qwen3.Arch,
     max_seq: usize,
     half_mode: bool,
+    q8_mode: bool,
     layers_w: []LayerDeviceWeights,
+    layers_q8: []LayerQ8Weights,
     layers_kv: []LayerKv,
     scratch: Scratch,
+    lm_head_q8: ?apple_ops.Q8DeviceWeights,
     allocator: std.mem.Allocator,
 
     pub fn init(
@@ -343,23 +467,48 @@ pub const MetalStack = struct {
         max_seq: usize,
         weights: *const qwen_weights.Weights,
         half: bool,
+        q8: bool,
         art: *const artifact.Artifact,
     ) !MetalStack {
         if (max_seq == 0 or max_seq > arch.max_position_embeddings) return error.InvalidShape;
         if (max_seq > apple_ops.max_attention_kv) return error.Unsupported;
+        if (half and q8) return error.Unsupported;
 
         const n_layers: usize = @intCast(arch.num_layers);
-        const layers_w = try allocator.alloc(LayerDeviceWeights, n_layers);
-        errdefer allocator.free(layers_w);
-        @memset(layers_w, undefined);
-        var i: usize = 0;
-        errdefer while (i > 0) {
-            i -= 1;
-            layers_w[i].deinit();
-        };
-        while (i < n_layers) : (i += 1) {
-            layers_w[i] = try LayerDeviceWeights.init(gpu, arch, half);
-            try layers_w[i].uploadFrom(weights.layers[i], half, art, @intCast(i));
+        var layers_w: []LayerDeviceWeights = &.{};
+        var layers_q8: []LayerQ8Weights = &.{};
+        var lm_head_q8: ?apple_ops.Q8DeviceWeights = null;
+
+        if (q8) {
+            layers_q8 = try allocator.alloc(LayerQ8Weights, n_layers);
+            errdefer allocator.free(layers_q8);
+            @memset(layers_q8, undefined);
+            var i: usize = 0;
+            errdefer while (i > 0) {
+                i -= 1;
+                layers_q8[i].deinit();
+            };
+            while (i < n_layers) : (i += 1) {
+                layers_q8[i] = try LayerQ8Weights.init(allocator, gpu, arch, weights.layers[i]);
+            }
+            const vocab: usize = @intCast(arch.vocab_size);
+            const h: usize = @intCast(arch.hidden_size);
+            // Tied embed and CPU lm_head are HF `[vocab, hidden]` (out, in).
+            lm_head_q8 = try LayerQ8Weights.packUploadOutIn(allocator, gpu, weights.lm_head, vocab, h);
+            errdefer if (lm_head_q8) |*lh| lh.deinit();
+        } else {
+            layers_w = try allocator.alloc(LayerDeviceWeights, n_layers);
+            errdefer allocator.free(layers_w);
+            @memset(layers_w, undefined);
+            var i: usize = 0;
+            errdefer while (i > 0) {
+                i -= 1;
+                layers_w[i].deinit();
+            };
+            while (i < n_layers) : (i += 1) {
+                layers_w[i] = try LayerDeviceWeights.init(gpu, arch, half);
+                try layers_w[i].uploadFrom(weights.layers[i], half, art, @intCast(i));
+            }
         }
 
         const layers_kv = try allocator.alloc(LayerKv, n_layers);
@@ -370,29 +519,36 @@ pub const MetalStack = struct {
             j -= 1;
             layers_kv[j].deinit();
         };
+        // Q8 path keeps f32 KV (isolate weight quantization).
         while (j < n_layers) : (j += 1) {
-            layers_kv[j] = try LayerKv.init(gpu, arch, max_seq, half);
+            layers_kv[j] = try LayerKv.init(gpu, arch, max_seq, half and !q8);
         }
 
-        const scratch = try Scratch.init(gpu, arch, max_seq, weights, half, art);
+        const scratch = try Scratch.init(gpu, arch, max_seq, weights, half and !q8, art);
         return .{
             .gpu = gpu,
             .arch = arch,
             .max_seq = max_seq,
-            .half_mode = half,
+            .half_mode = half and !q8,
+            .q8_mode = q8,
             .layers_w = layers_w,
+            .layers_q8 = layers_q8,
             .layers_kv = layers_kv,
             .scratch = scratch,
+            .lm_head_q8 = lm_head_q8,
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *MetalStack) void {
+        if (self.lm_head_q8) |*lh| lh.deinit();
         self.scratch.deinit();
         for (self.layers_kv) |*kv| kv.deinit();
         self.allocator.free(self.layers_kv);
+        for (self.layers_q8) |*w| w.deinit();
+        if (self.layers_q8.len != 0) self.allocator.free(self.layers_q8);
         for (self.layers_w) |*w| w.deinit();
-        self.allocator.free(self.layers_w);
+        if (self.layers_w.len != 0) self.allocator.free(self.layers_w);
         self.* = undefined;
     }
 
@@ -413,7 +569,6 @@ pub const MetalStack = struct {
         if (pos0 + t > self.max_seq) return error.InvalidShape;
         if (pos0 + t > apple_ops.max_attention_kv) return error.Unsupported;
 
-        // Sanity: all layers share the same used count.
         for (self.layers_kv) |kv| {
             if (kv.used != pos0) return error.InvalidShape;
         }
@@ -427,45 +582,46 @@ pub const MetalStack = struct {
         var out_buf = self.scratch.act_b;
         var layer: u32 = 0;
         while (layer < arch.num_layers) : (layer += 1) {
-            try encodeLayer(
-                self.gpu,
-                &self.layers_w[layer],
-                &self.layers_kv[layer],
-                &self.scratch,
-                arch,
-                in_buf,
-                out_buf,
-                t,
-                pos0,
-                self.half_mode,
-            );
+            if (self.q8_mode) {
+                try encodeLayerQ8(
+                    self.gpu,
+                    &self.layers_q8[layer],
+                    &self.layers_kv[layer],
+                    &self.scratch,
+                    arch,
+                    in_buf,
+                    out_buf,
+                    t,
+                    pos0,
+                );
+            } else {
+                try encodeLayer(
+                    self.gpu,
+                    &self.layers_w[layer],
+                    &self.layers_kv[layer],
+                    &self.scratch,
+                    arch,
+                    in_buf,
+                    out_buf,
+                    t,
+                    pos0,
+                    self.half_mode,
+                );
+            }
             const tmp = in_buf;
             in_buf = out_buf;
             out_buf = tmp;
         }
 
-        // Final RMSNorm on last token row + LM head (Metal matvec).
-        const last_row_offset = (t - 1) * h;
-        // Copy last row into normed via a 1-row rmsnorm: use a tiny view by
-        // encoding rmsnorm with rows=1 over a contiguous last-row alias.
-        // act buffers are [t, H] row-major — last row starts at last_row_offset.
-        // We don't have buffer views; use encodeRmsNorm on full `t` then read
-        // last row, OR copy last row to `normed` on host after wait.
-        // Prefer GPU: matmul/rmsnorm on 1 row — upload last row into `xn` slot.
-        // Simplest correct approach inside the same CB: rmsnorm with rows=t,
-        // then matvec from a dedicated 1×H buffer filled by… we need a gather.
-        // Host path after commit for final norm+lm was M0; for M3 we download
-        // last hidden, then a second tiny batch for norm+lm head.
-
         try self.gpu.batchCommit();
 
-        last_qwen_path = if (self.half_mode) path_bf16 else path_batched;
+        last_qwen_path = if (self.q8_mode) path_q8 else if (self.half_mode) path_bf16 else path_batched;
         last_qwen_encodes = self.gpu.last_batch_encodes;
         last_qwen_waits = 1;
 
         for (self.layers_kv) |*kv| kv.used = pos0 + t;
 
-        // Final norm + LM head: second CB (1 wait) — still ≪ 476 waits.
+        const last_row_offset = (t - 1) * h;
         const last_hidden = in_buf.f32s()[last_row_offset..][0..h];
         @memcpy(self.scratch.xn.f32s()[0..h], last_hidden);
 
@@ -473,7 +629,11 @@ pub const MetalStack = struct {
         errdefer self.gpu.batchAbort();
         const hu: u32 = @intCast(h);
         const vu: u32 = @intCast(arch.vocab_size);
-        if (self.half_mode) {
+        if (self.q8_mode) {
+            try apple_ops.encodeRmsNorm(self.gpu, self.scratch.normed, self.scratch.xn, self.scratch.final_norm, 1, hu, arch.rms_norm_eps);
+            const lh = self.lm_head_q8.?;
+            try apple_ops.encodeMatvecQ8(self.gpu, self.scratch.logits, lh.q, lh.scale, self.scratch.normed, vu, hu);
+        } else if (self.half_mode) {
             try apple_ops.encodeRmsNormBf16(self.gpu, self.scratch.normed, self.scratch.xn, self.scratch.final_norm, 1, hu, arch.rms_norm_eps);
             try apple_ops.encodeMatvecBf16(self.gpu, self.scratch.logits, self.scratch.lm_head, self.scratch.normed, vu, hu);
         } else {
@@ -487,6 +647,73 @@ pub const MetalStack = struct {
         @memcpy(logits_out, self.scratch.logits.f32s()[0..logits_out.len]);
     }
 };
+
+fn encodeLayerQ8(
+    gpu: *Gpu,
+    w: *const LayerQ8Weights,
+    kv: *LayerKv,
+    s: *Scratch,
+    arch: qwen3.Arch,
+    x: Buffer,
+    out: Buffer,
+    t: usize,
+    pos0: usize,
+) !void {
+    const tu: u32 = @intCast(t);
+    const hu: u32 = @intCast(arch.hidden_size);
+    const n_q: u32 = @intCast(arch.num_attention_heads);
+    const n_kv: u32 = @intCast(arch.num_key_value_heads);
+    const d: u32 = @intCast(arch.head_dim);
+    const qd: u32 = @intCast(arch.qDim());
+    const kvd: u32 = @intCast(arch.kvDim());
+    const inter: u32 = @intCast(arch.intermediate_size);
+    const max_seq: u32 = @intCast(kv.max_seq);
+    const used_u: u32 = @intCast(pos0);
+    const eps = arch.rms_norm_eps;
+    const theta = arch.rope_theta;
+
+    try apple_ops.encodeRmsNorm(gpu, s.xn, x, w.input_ln, tu, hu, eps);
+    try apple_ops.encodeMatmulAq8(gpu, s.q_lin, s.xn, w.wq.q, w.wq.scale, tu, qd, hu);
+    try apple_ops.encodeMatmulAq8(gpu, s.k_lin, s.xn, w.wk.q, w.wk.scale, tu, kvd, hu);
+    try apple_ops.encodeMatmulAq8(gpu, s.v_lin, s.xn, w.wv.q, w.wv.scale, tu, kvd, hu);
+
+    try apple_ops.encodeRmsNorm(gpu, s.q_lin, s.q_lin, w.q_norm, tu * n_q, d, eps);
+    try apple_ops.encodeRmsNorm(gpu, s.k_lin, s.k_lin, w.k_norm, tu * n_kv, d, eps);
+
+    try apple_ops.encodeRope(gpu, s.q_lin, tu, n_q, d, used_u, theta);
+    try apple_ops.encodeRope(gpu, s.k_lin, tu, n_kv, d, used_u, theta);
+
+    try apple_ops.encodePermuteTokensHeads(gpu, s.q_htd, s.q_lin, tu, n_q, d);
+    try apple_ops.encodePermuteTokensHeads(gpu, s.k_htd, s.k_lin, tu, n_kv, d);
+    try apple_ops.encodePermuteTokensHeads(gpu, s.v_htd, s.v_lin, tu, n_kv, d);
+    try apple_ops.encodeKvAppend(gpu, s.k_htd, s.v_htd, kv.k_cache, kv.v_cache, n_kv, tu, d, max_seq, used_u);
+
+    const kv_len: u32 = used_u + tu;
+    try apple_ops.encodeAttention(
+        gpu,
+        s.attn_htd,
+        s.q_htd,
+        kv.k_cache,
+        kv.v_cache,
+        n_q,
+        n_kv,
+        tu,
+        kv_len,
+        max_seq,
+        d,
+        s.scores,
+    );
+    try apple_ops.encodePermuteHeadsTokens(gpu, s.attn_lin, s.attn_htd, tu, n_q, d);
+    try apple_ops.encodeMatmulAq8(gpu, s.ao, s.attn_lin, w.wo.q, w.wo.scale, tu, hu, qd);
+
+    try apple_ops.encodeAddRmsNorm(gpu, s.x1, s.mlp_n, x, s.ao, w.post_attn_ln, tu, hu, eps);
+
+    try apple_ops.encodeMatmulAq8(gpu, s.gate, s.mlp_n, w.wg.q, w.wg.scale, tu, inter, hu);
+    try apple_ops.encodeMatmulAq8(gpu, s.up, s.mlp_n, w.wu.q, w.wu.scale, tu, inter, hu);
+    try apple_ops.encodeSiluMul(gpu, s.hidden_act, s.gate, s.up, tu * inter);
+    try apple_ops.encodeMatmulAq8(gpu, s.down, s.hidden_act, w.wd.q, w.wd.scale, tu, hu, inter);
+    try apple_ops.encodeAdd(gpu, out, s.x1, s.down, tu * hu);
+}
 
 fn encodeLayer(
     gpu: *Gpu,

@@ -259,6 +259,30 @@ kernel void matvec_q8_f32(
     y[gid] = acc * scale[gid];
 }
 
+// Stage M5: C[m,n] = A[m,k] @ dequant(W_q[n,k])^T
+// W_q is row-major [out,in] = [n,k] with per-row (per-output) scale[n].
+// Matches Qwen schedule right-multiply after packRowQ8 on HF [out,in].
+kernel void matmul_aq8_f32(
+    device const float *a [[buffer(0)]],
+    device const char *wq [[buffer(1)]],
+    device const float *scale [[buffer(2)]],
+    device float *c [[buffer(3)]],
+    constant MatmulParams &p [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint row = gid.y;
+    uint col = gid.x;
+    if (row >= p.m || col >= p.n) {
+        return;
+    }
+    device const char *wrow = wq + col * p.k;
+    float acc = 0.0f;
+    for (uint t = 0; t < p.k; t++) {
+        acc += a[row * p.k + t] * float(wrow[t]);
+    }
+    c[row * p.n + col] = acc * scale[col];
+}
+
 struct MatmulQ8Params {
     uint m;
     uint n;

@@ -165,6 +165,14 @@ pub fn build(b: *std.Build) void {
     const stageM4_step = b.step("stageM4", "bf16/fp16 Metal Stage M4 ledger");
     stageM4_step.dependOn(&stageM4_cmd.step);
 
+    const stageM5_cmd = b.addRunArtifact(exe);
+    stageM5_cmd.step.dependOn(b.getInstallStep());
+    stageM5_cmd.addArg("stageM5");
+    stageM5_cmd.expectStdOutMatch("Stage M5");
+    stageM5_cmd.expectExitCode(0);
+    const stageM5_step = b.step("stageM5", "int8 quantization Stage M5 ledger");
+    stageM5_step.dependOn(&stageM5_cmd.step);
+
     const qwen_bench_cmd = b.addRunArtifact(exe);
     qwen_bench_cmd.step.dependOn(b.getInstallStep());
     qwen_bench_cmd.addArg("qwen-bench");
@@ -414,6 +422,12 @@ pub fn build(b: *std.Build) void {
     stageM4_ok.expectStdOutMatch("Stage M4");
     stageM4_ok.expectExitCode(0);
     integration_step.dependOn(&stageM4_ok.step);
+
+    const stageM5_ok = b.addRunArtifact(exe);
+    stageM5_ok.addArg("stageM5");
+    stageM5_ok.expectStdOutMatch("Stage M5");
+    stageM5_ok.expectExitCode(0);
+    integration_step.dependOn(&stageM5_ok.step);
 
     const qwen_bench_ok = b.addRunArtifact(exe);
     qwen_bench_ok.addArg("qwen-bench");

@@ -641,6 +641,22 @@ pub fn encodeMatmulQ8(
     try launchBufs(gpu, "matmul_q8_f32", n, m, 1, tg, tg, 1, &.{ w_q, scale, b, c_buf }, std.mem.asBytes(&params));
 }
 
+/// Stage M5: C[m,n] = A[m,k] @ dequant(W_q[n,k])^T (per-row scale on output dim).
+pub fn encodeMatmulAq8(
+    gpu: *Gpu,
+    c_buf: Buffer,
+    a: Buffer,
+    w_q: Buffer,
+    scale: Buffer,
+    m: u32,
+    n: u32,
+    k: u32,
+) Error!void {
+    const params = MatmulParams{ .m = m, .n = n, .k = k };
+    const tg: u32 = 16;
+    try launchBufs(gpu, "matmul_aq8_f32", n, m, 1, tg, tg, 1, &.{ a, w_q, scale, c_buf }, std.mem.asBytes(&params));
+}
+
 pub fn encodeMatmulNaive(gpu: *Gpu, c_buf: Buffer, a: Buffer, b: Buffer, m: u32, n: u32, k: u32) Error!void {
     const params = MatmulParams{ .m = m, .n = n, .k = k };
     const tg: u32 = 16;

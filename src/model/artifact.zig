@@ -152,6 +152,7 @@ pub const TensorEntry = extern struct {
             0 => .f32,
             1 => .f16,
             2 => .bf16,
+            3 => .i8,
             else => error.InvalidDtype,
         };
     }
@@ -162,6 +163,7 @@ pub fn dtypeToTag(dt: dtype_mod.DType) u8 {
         .f32 => 0,
         .f16 => 1,
         .bf16 => 2,
+        .i8 => 3,
     };
 }
 

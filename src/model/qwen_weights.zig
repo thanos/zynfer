@@ -233,6 +233,7 @@ fn decodeWeights(dst: []f32, dt: DType, raw: []const u8) Error!void {
             if (raw.len != dst.len * 2) return error.ShapeMismatch;
             float16.decodeIntoF32(dst, raw);
         },
+        .i8 => return error.InvalidDtype,
     }
 }
 
@@ -309,6 +310,7 @@ pub fn copyArtifactToBf16(
             }
             return true;
         },
+        .i8 => return false,
     }
 }
 

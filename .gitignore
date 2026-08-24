@@ -32,3 +32,5 @@ bench/results/local/
 .tool-versions
 /models/
 ref_logits.*
+/__pycache__/
+tools/checkpoint/__pycache__/

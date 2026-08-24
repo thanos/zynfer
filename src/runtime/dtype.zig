@@ -8,11 +8,14 @@ pub const DType = enum(u8) {
     f32,
     f16,
     bf16,
+    /// Packed signed int8 (Stage M5 weight quantization).
+    i8,
 
     pub fn sizeOf(self: DType) usize {
         return switch (self) {
             .f32 => 4,
             .f16, .bf16 => 2,
+            .i8 => 1,
         };
     }
 
@@ -21,6 +24,7 @@ pub const DType = enum(u8) {
             .f32 => "f32",
             .f16 => "f16",
             .bf16 => "bf16",
+            .i8 => "i8",
         };
     }
 };

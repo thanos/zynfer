@@ -318,7 +318,7 @@ Apple Stage 7/8 or curriculum Stages 10–12 / 16 land.
 | **fp16 / bf16 Metal** | **retained (M4)** — see `docs/stages/M4-half-precision-metal.md` |
 | **Reusable execution encoding** (ICB) | **rejected** — see stage8 results |
 | **Further MSL fusions** | **rejected** for tiny-block; → Stage 16 |
-| **Int8 weights in tiny-block Session** | **rejected** for now; ops path keeps `Q8DeviceWeights` |
+| **Int8 weights in tiny-block Session** | **rejected** for tiny-block; **retained at Qwen scale (M5)** |
 | **Benchmark matrix TTFT/tok/s fill-in** | After Stages 10–12 produce tokens |
 | **Energy/token** | N/A — not measured |
 
@@ -333,7 +333,8 @@ Stage 8 ledger: `bench/results/apple-stage8-dev-laptop.md`.
 | **Profile one token + roofline** | **done** — M2 (`qwen-profile`) |
 | **Qwen-scale batched schedule / fusion** | **done** — M3 (`qwen_schedule`) |
 | **fp16 Metal path + native half artifact upload** | **done** — M4 (`ZYNFER_QWEN_METAL=bf16`) |
-| **quant / static decode / ANE** | M5–M7 |
+| **int8 session weights** | **done** — M5 (`ZYNFER_QWEN_METAL=int8`) |
+| **static decode / ANE** | M6–M7 |
 | **Qwen3-4B Apple capstone** | M8 (old 25 slice) |
 
 See [`docs/roadmap.md`](roadmap.md) and [`baoulo/prompts/fable-5-prompt.md`](../baoulo/prompts/fable-5-prompt.md).
