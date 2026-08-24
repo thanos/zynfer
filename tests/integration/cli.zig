@@ -103,7 +103,8 @@ test "stage8 prints hardening ledger" {
     defer out.deinit(std.testing.allocator);
     try expectExited(out, 0);
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "Stage 8") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "256") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "attention kv_len cap") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "2048") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "REJECT") != null);
 }
 
