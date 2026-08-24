@@ -129,7 +129,8 @@ pub const BlockSession = struct {
     arch: qwen3.Arch,
     weights: *const qwen_weights.LayerWeights,
     cache: KvCache,
-    scratch: Scratch,
+    /// Null when Metal owns layer compute (Stage M6 host mirror).
+    scratch: ?Scratch,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -137,22 +138,42 @@ pub const BlockSession = struct {
         weights: *const qwen_weights.LayerWeights,
         max_seq: usize,
     ) Error!BlockSession {
+        return initWithHostCompute(allocator, arch, weights, max_seq, true);
+    }
+
+    /// `host_compute=false`: KV used-counter only + no host scratch (Metal path).
+    pub fn initWithHostCompute(
+        allocator: std.mem.Allocator,
+        arch: qwen3.Arch,
+        weights: *const qwen_weights.LayerWeights,
+        max_seq: usize,
+        host_compute: bool,
+    ) Error!BlockSession {
         if (arch.num_attention_heads % arch.num_key_value_heads != 0) return error.InvalidShape;
+        const n_kv: usize = @intCast(arch.num_key_value_heads);
+        const d: usize = @intCast(arch.head_dim);
+        const cache = if (host_compute)
+            try KvCache.init(allocator, n_kv, max_seq, d)
+        else
+            try KvCache.initMirror(n_kv, max_seq, d);
+        errdefer {
+            var c = cache;
+            c.deinit();
+        }
+        const scratch: ?Scratch = if (host_compute)
+            try Scratch.init(allocator, arch, max_seq)
+        else
+            null;
         return .{
             .arch = arch,
             .weights = weights,
-            .cache = try KvCache.init(
-                allocator,
-                @intCast(arch.num_key_value_heads),
-                max_seq,
-                @intCast(arch.head_dim),
-            ),
-            .scratch = try Scratch.init(allocator, arch, max_seq),
+            .cache = cache,
+            .scratch = scratch,
         };
     }
 
     pub fn deinit(self: *BlockSession) void {
-        self.scratch.deinit();
+        if (self.scratch) |*s| s.deinit();
         self.cache.deinit();
         self.* = undefined;
     }
@@ -247,6 +268,7 @@ pub const ProfilingCpuAdapter = struct {
 
 /// Forward one block. `pos0` must equal `sess.cache.used` on entry.
 pub fn forward(ops: anytype, sess: *BlockSession, x: Tensor, pos0: usize, out: Tensor) Error!void {
+    const scratch = &(sess.scratch orelse return error.InvalidShape);
     const arch = sess.arch;
     const w = sess.weights;
     const hidden: usize = @intCast(arch.hidden_size);
@@ -263,7 +285,7 @@ pub fn forward(ops: anytype, sess: *BlockSession, x: Tensor, pos0: usize, out: T
     if (t == 0 or pos0 != sess.cache.used) return error.InvalidShape;
     if (t > sess.cache.remaining()) return error.InvalidShape;
 
-    const xn = try sess.scratch.xn.viewAs(&.{ t, hidden });
+    const xn = try scratch.xn.viewAs(&.{ t, hidden });
     {
         const sid = profileBegin(ops, "qwen.rmsnorm");
         const t0 = markStart(ops);
@@ -272,9 +294,9 @@ pub fn forward(ops: anytype, sess: *BlockSession, x: Tensor, pos0: usize, out: T
         profileAdd(ops, .rmsnorm, markElapsed(ops, t0));
     }
 
-    const q_lin = try sess.scratch.q_lin.viewAs(&.{ t, qd });
-    const k_lin = try sess.scratch.k_lin.viewAs(&.{ t, kvd });
-    const v_lin = try sess.scratch.v_lin.viewAs(&.{ t, kvd });
+    const q_lin = try scratch.q_lin.viewAs(&.{ t, qd });
+    const k_lin = try scratch.k_lin.viewAs(&.{ t, kvd });
+    const v_lin = try scratch.v_lin.viewAs(&.{ t, kvd });
     {
         const sid = profileBegin(ops, "qwen.qkv");
         const t0 = markStart(ops);
@@ -305,9 +327,9 @@ pub fn forward(ops: anytype, sess: *BlockSession, x: Tensor, pos0: usize, out: T
         profileAdd(ops, .rope, markElapsed(ops, t0));
     }
 
-    const q_htd = try sess.scratch.q_htd.viewAs(&.{ n_q, t, d });
-    const k_htd = try sess.scratch.k_htd.viewAs(&.{ n_kv, t, d });
-    const v_htd = try sess.scratch.v_htd.viewAs(&.{ n_kv, t, d });
+    const q_htd = try scratch.q_htd.viewAs(&.{ n_q, t, d });
+    const k_htd = try scratch.k_htd.viewAs(&.{ n_kv, t, d });
+    const v_htd = try scratch.v_htd.viewAs(&.{ n_kv, t, d });
     {
         const sid = profileBegin(ops, "qwen.host_layout");
         const t0 = markStart(ops);
@@ -319,7 +341,7 @@ pub fn forward(ops: anytype, sess: *BlockSession, x: Tensor, pos0: usize, out: T
         profileAdd(ops, .host_layout, markElapsed(ops, t0));
     }
 
-    const attn_htd = try sess.scratch.attn_htd.viewAs(&.{ n_q, t, d });
+    const attn_htd = try scratch.attn_htd.viewAs(&.{ n_q, t, d });
     {
         const sid = profileBegin(ops, "qwen.attention");
         const t0 = markStart(ops);
@@ -330,13 +352,13 @@ pub fn forward(ops: anytype, sess: *BlockSession, x: Tensor, pos0: usize, out: T
             sess.cache.v,
             sess.cache.used,
             sess.cache.max_seq,
-            sess.scratch.scores,
+            scratch.scores,
         );
         profileEnd(ops, sid, "qwen.attention");
         profileAdd(ops, .attention, markElapsed(ops, t0));
     }
 
-    const attn_thd = try sess.scratch.attn_lin.viewAs(&.{ t, n_q, d });
+    const attn_thd = try scratch.attn_lin.viewAs(&.{ t, n_q, d });
     {
         const sid = profileBegin(ops, "qwen.host_layout");
         const t0 = markStart(ops);
@@ -346,8 +368,8 @@ pub fn forward(ops: anytype, sess: *BlockSession, x: Tensor, pos0: usize, out: T
     }
     const attn_flat = try attn_thd.viewAs(&.{ t, qd });
 
-    const ao = try sess.scratch.ao.viewAs(&.{ t, hidden });
-    const x1 = try sess.scratch.x1.viewAs(&.{ t, hidden });
+    const ao = try scratch.ao.viewAs(&.{ t, hidden });
+    const x1 = try scratch.x1.viewAs(&.{ t, hidden });
     {
         const sid = profileBegin(ops, "qwen.o_proj");
         const t0 = markStart(ops);
@@ -357,7 +379,7 @@ pub fn forward(ops: anytype, sess: *BlockSession, x: Tensor, pos0: usize, out: T
         profileAdd(ops, .o_proj, markElapsed(ops, t0));
     }
 
-    const mlp_n = try sess.scratch.mlp_n.viewAs(&.{ t, hidden });
+    const mlp_n = try scratch.mlp_n.viewAs(&.{ t, hidden });
     {
         const sid = profileBegin(ops, "qwen.rmsnorm");
         const t0 = markStart(ops);
@@ -365,10 +387,10 @@ pub fn forward(ops: anytype, sess: *BlockSession, x: Tensor, pos0: usize, out: T
         profileEnd(ops, sid, "qwen.rmsnorm");
         profileAdd(ops, .rmsnorm, markElapsed(ops, t0));
     }
-    const gate = try sess.scratch.gate.viewAs(&.{ t, inter });
-    const up = try sess.scratch.up.viewAs(&.{ t, inter });
-    const hidden_act = try sess.scratch.hidden_act.viewAs(&.{ t, inter });
-    const down = try sess.scratch.down.viewAs(&.{ t, hidden });
+    const gate = try scratch.gate.viewAs(&.{ t, inter });
+    const up = try scratch.up.viewAs(&.{ t, inter });
+    const hidden_act = try scratch.hidden_act.viewAs(&.{ t, inter });
+    const down = try scratch.down.viewAs(&.{ t, hidden });
     {
         const sid = profileBegin(ops, "qwen.mlp");
         const t0 = markStart(ops);

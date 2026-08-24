@@ -65,4 +65,4 @@ deferred until there is a measured need beyond int8 footprint/quality.
 ## Next
 
 **M6** — static decode plan: resident weights, fixed scratch, zero
-per-token heap allocation.
+per-token heap allocation — **done** (`docs/tutorials/20-static-decode-plan.md`).

@@ -32,6 +32,8 @@ pub const KvCache = struct {
     used: usize,
     k: Tensor,
     v: Tensor,
+    /// When false, only `used` is tracked (Metal owns the real KV buffers).
+    owned: bool = true,
 
     pub fn init(allocator: std.mem.Allocator, n_kv: usize, max_seq: usize, head_dim: usize) TensorError!KvCache {
         if (n_kv == 0 or max_seq == 0 or head_dim == 0) return error.InvalidShape;
@@ -42,12 +44,29 @@ pub const KvCache = struct {
             .used = 0,
             .k = try Tensor.alloc(allocator, .f32, &.{ n_kv, max_seq, head_dim }),
             .v = try Tensor.alloc(allocator, .f32, &.{ n_kv, max_seq, head_dim }),
+            .owned = true,
+        };
+    }
+
+    /// Stage M6: host mirror for Metal-resident KV — no tensor storage.
+    pub fn initMirror(n_kv: usize, max_seq: usize, head_dim: usize) TensorError!KvCache {
+        if (n_kv == 0 or max_seq == 0 or head_dim == 0) return error.InvalidShape;
+        return .{
+            .n_kv = n_kv,
+            .max_seq = max_seq,
+            .head_dim = head_dim,
+            .used = 0,
+            .k = undefined,
+            .v = undefined,
+            .owned = false,
         };
     }
 
     pub fn deinit(self: *KvCache) void {
-        self.k.deinit();
-        self.v.deinit();
+        if (self.owned) {
+            self.k.deinit();
+            self.v.deinit();
+        }
         self.* = undefined;
     }
 
@@ -59,18 +78,21 @@ pub const KvCache = struct {
         return self.max_seq - self.used;
     }
 
-    /// Allocated K+V bytes for one layer (full capacity, f32).
+    /// Allocated K+V bytes for one layer (full capacity, f32). Mirror → 0.
     pub fn bytesCapacity(self: KvCache) u64 {
+        if (!self.owned) return 0;
         return estimateLayerBytes(self.n_kv, self.max_seq, self.head_dim);
     }
 
-    /// Bytes of the used K+V prefix (f32), not counting unused capacity.
+    /// Bytes of the used K+V prefix (f32), not counting unused capacity. Mirror → 0.
     pub fn bytesUsed(self: KvCache) u64 {
+        if (!self.owned) return 0;
         return estimateLayerBytes(self.n_kv, self.used, self.head_dim);
     }
 
     /// `k_new`/`v_new` are `[n_kv, t, head_dim]`.
     pub fn append(self: *KvCache, k_new: Tensor, v_new: Tensor) TensorError!void {
+        if (!self.owned) return error.InvalidShape;
         if (k_new.rank != 3 or v_new.rank != 3) return error.InvalidShape;
         if (k_new.shape[0] != self.n_kv or v_new.shape[0] != self.n_kv) return error.ShapeMismatch;
         if (k_new.shape[2] != self.head_dim or v_new.shape[2] != self.head_dim) return error.ShapeMismatch;

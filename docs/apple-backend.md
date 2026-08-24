@@ -334,7 +334,7 @@ Stage 8 ledger: `bench/results/apple-stage8-dev-laptop.md`.
 | **Qwen-scale batched schedule / fusion** | **done** — M3 (`qwen_schedule`) |
 | **fp16 Metal path + native half artifact upload** | **done** — M4 (`ZYNFER_QWEN_METAL=bf16`) |
 | **int8 session weights** | **done** — M5 (`ZYNFER_QWEN_METAL=int8`) |
-| **static decode / ANE** | M6–M7 |
+| **static decode / ANE** | M6 **done** / M7 |
 | **Qwen3-4B Apple capstone** | M8 (old 25 slice) |
 
 See [`docs/roadmap.md`](roadmap.md) and [`baoulo/prompts/fable-5-prompt.md`](../baoulo/prompts/fable-5-prompt.md).

@@ -173,6 +173,14 @@ pub fn build(b: *std.Build) void {
     const stageM5_step = b.step("stageM5", "int8 quantization Stage M5 ledger");
     stageM5_step.dependOn(&stageM5_cmd.step);
 
+    const stageM6_cmd = b.addRunArtifact(exe);
+    stageM6_cmd.step.dependOn(b.getInstallStep());
+    stageM6_cmd.addArg("stageM6");
+    stageM6_cmd.expectStdOutMatch("Stage M6");
+    stageM6_cmd.expectExitCode(0);
+    const stageM6_step = b.step("stageM6", "static decode plan Stage M6 ledger");
+    stageM6_step.dependOn(&stageM6_cmd.step);
+
     const qwen_bench_cmd = b.addRunArtifact(exe);
     qwen_bench_cmd.step.dependOn(b.getInstallStep());
     qwen_bench_cmd.addArg("qwen-bench");
@@ -428,6 +436,20 @@ pub fn build(b: *std.Build) void {
     stageM5_ok.expectStdOutMatch("Stage M5");
     stageM5_ok.expectExitCode(0);
     integration_step.dependOn(&stageM5_ok.step);
+
+    const stageM6_ok = b.addRunArtifact(exe);
+    stageM6_ok.addArg("stageM6");
+    stageM6_ok.expectStdOutMatch("Stage M6");
+    stageM6_ok.expectExitCode(0);
+    integration_step.dependOn(&stageM6_ok.step);
+
+    const mem_report_ok = b.addRunArtifact(exe);
+    mem_report_ok.addArg("mem-report");
+    mem_report_ok.addArg("--mini");
+    mem_report_ok.expectStdOutMatch("mem-report");
+    mem_report_ok.expectStdOutMatch("json");
+    mem_report_ok.expectExitCode(0);
+    integration_step.dependOn(&mem_report_ok.step);
 
     const qwen_bench_ok = b.addRunArtifact(exe);
     qwen_bench_ok.addArg("qwen-bench");

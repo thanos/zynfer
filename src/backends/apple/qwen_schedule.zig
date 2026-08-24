@@ -75,6 +75,20 @@ fn weightBytes(n: usize, half: bool) usize {
     return if (half) bf16Bytes(n) else f32Bytes(n);
 }
 
+fn bufLen(b: Buffer) u64 {
+    return @intCast(b.bytes.len);
+}
+
+fn q8Len(w: apple_ops.Q8DeviceWeights) u64 {
+    return bufLen(w.q) + bufLen(w.scale);
+}
+
+pub const MetalResidentBytes = struct {
+    weights: u64 = 0,
+    kv: u64 = 0,
+    scratch: u64 = 0,
+};
+
 fn copyTensorToBuf(buf: Buffer, t: Tensor) !void {
     const src = try t.f32s();
     @memcpy(buf.f32s()[0..src.len], src);
@@ -554,6 +568,55 @@ pub const MetalStack = struct {
 
     pub fn reset(self: *MetalStack) void {
         for (self.layers_kv) |*kv| kv.reset();
+    }
+
+    pub fn kvBytesCapacity(self: *const MetalStack) u64 {
+        var n: u64 = 0;
+        for (self.layers_kv) |kv| n += @as(u64, @intCast(kv.k_cache.bytes.len + kv.v_cache.bytes.len));
+        return n;
+    }
+
+    pub fn kvBytesUsed(self: *const MetalStack, used: usize) u64 {
+        if (self.max_seq == 0 or used == 0) return 0;
+        const cap = self.kvBytesCapacity();
+        return cap * @as(u64, @intCast(used)) / @as(u64, @intCast(self.max_seq));
+    }
+
+    pub fn residentBytes(self: *const MetalStack) MetalResidentBytes {
+        var weights: u64 = 0;
+        for (self.layers_w) |w| {
+            weights += bufLen(w.input_ln) + bufLen(w.q_norm) + bufLen(w.k_norm) + bufLen(w.post_attn_ln);
+            weights += bufLen(w.wq) + bufLen(w.wk) + bufLen(w.wv) + bufLen(w.wo);
+            weights += bufLen(w.wg) + bufLen(w.wu) + bufLen(w.wd);
+        }
+        for (self.layers_q8) |w| {
+            weights += bufLen(w.input_ln) + bufLen(w.q_norm) + bufLen(w.k_norm) + bufLen(w.post_attn_ln);
+            weights += q8Len(w.wq) + q8Len(w.wk) + q8Len(w.wv) + q8Len(w.wo);
+            weights += q8Len(w.wg) + q8Len(w.wu) + q8Len(w.wd);
+        }
+        if (self.lm_head_q8) |lh| weights += q8Len(lh);
+
+        const s = self.scratch;
+        var scratch: u64 = 0;
+        scratch += bufLen(s.act_a) + bufLen(s.act_b) + bufLen(s.xn);
+        scratch += bufLen(s.q_lin) + bufLen(s.k_lin) + bufLen(s.v_lin);
+        scratch += bufLen(s.q_htd) + bufLen(s.k_htd) + bufLen(s.v_htd) + bufLen(s.attn_htd);
+        scratch += bufLen(s.attn_lin) + bufLen(s.ao) + bufLen(s.x1) + bufLen(s.mlp_n);
+        scratch += bufLen(s.gate) + bufLen(s.up) + bufLen(s.hidden_act) + bufLen(s.down);
+        scratch += bufLen(s.normed) + bufLen(s.logits) + bufLen(s.scores);
+        scratch += bufLen(s.embed) + bufLen(s.final_norm);
+        if (!s.lm_head_tied) scratch += bufLen(s.lm_head);
+        // Embed/final_norm/(lm_head) are weight residents sitting in scratch struct.
+        weights += bufLen(s.embed) + bufLen(s.final_norm);
+        if (!s.lm_head_tied) weights += bufLen(s.lm_head);
+        scratch -= bufLen(s.embed) + bufLen(s.final_norm);
+        if (!s.lm_head_tied) scratch -= bufLen(s.lm_head);
+
+        return .{
+            .weights = weights,
+            .kv = self.kvBytesCapacity(),
+            .scratch = scratch,
+        };
     }
 
     /// Prefill or decode: `x_host` is `[t, hidden]` embeddings; writes last-token logits.

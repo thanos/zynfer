@@ -37,6 +37,9 @@ pub const Session = struct {
     hidden_b: Tensor,
     normed: Tensor,
     logits: Tensor,
+    /// Stage M6: sampling scratch owned by Session (no per-generate heap).
+    sample_probs: []f32,
+    sample_idx: []u32,
     allocator: std.mem.Allocator,
     backend: BackendKind,
     gpu: ?*apple_gpu.Gpu,
@@ -64,23 +67,32 @@ pub const Session = struct {
         var weights = try qwen_weights.Weights.load(allocator, art, arch);
         errdefer weights.deinit();
 
+        // Batched Metal owns KV + layer scratch; host keeps used-counters only.
+        const host_compute = !(kind == .apple and !apple_schedule.useBaselinePath());
+
         const blocks = try allocator.alloc(qwen_block.BlockSession, arch.num_layers);
         errdefer allocator.free(blocks);
         @memset(blocks, undefined);
 
         var layer: u32 = 0;
         while (layer < arch.num_layers) : (layer += 1) {
-            blocks[layer] = try qwen_block.BlockSession.init(
+            blocks[layer] = try qwen_block.BlockSession.initWithHostCompute(
                 allocator,
                 arch,
                 &weights.layers[layer],
                 max_seq,
+                host_compute,
             );
             errdefer blocks[layer].deinit();
         }
 
         const hidden: usize = @intCast(arch.hidden_size);
         const vocab: usize = @intCast(arch.vocab_size);
+
+        const sample_probs = try allocator.alloc(f32, vocab);
+        errdefer allocator.free(sample_probs);
+        const sample_idx = try allocator.alloc(u32, vocab);
+        errdefer allocator.free(sample_idx);
 
         var gpu: ?*apple_gpu.Gpu = null;
         var metal_stack: ?*apple_schedule.MetalStack = null;
@@ -115,6 +127,8 @@ pub const Session = struct {
             .hidden_b = try Tensor.alloc(allocator, .f32, &.{ max_seq, hidden }),
             .normed = try Tensor.alloc(allocator, .f32, &.{ max_seq, hidden }),
             .logits = try Tensor.alloc(allocator, .f32, &.{vocab}),
+            .sample_probs = sample_probs,
+            .sample_idx = sample_idx,
             .allocator = allocator,
             .backend = kind,
             .gpu = gpu,
@@ -135,6 +149,8 @@ pub const Session = struct {
         self.hidden_b.deinit();
         self.normed.deinit();
         self.logits.deinit();
+        self.allocator.free(self.sample_probs);
+        self.allocator.free(self.sample_idx);
         for (self.blocks) |*b| b.deinit();
         self.allocator.free(self.blocks);
         self.weights.deinit();
@@ -364,12 +380,8 @@ pub const Session = struct {
             buckets.kv_len = self.blocks[0].cache.used;
             var sampled: u32 = 0;
             if (do_sample) {
-                const probs = try self.allocator.alloc(f32, self.arch.vocab_size);
-                defer self.allocator.free(probs);
-                const idx = try self.allocator.alloc(u32, self.arch.vocab_size);
-                defer self.allocator.free(idx);
                 const t0 = std.Io.Clock.awake.now(io);
-                sampled = try sample_mod.sampleWithScratch(logits_out, sample_cfg, probs, idx, rng);
+                sampled = try sample_mod.sampleWithScratch(logits_out, sample_cfg, self.sample_probs, self.sample_idx, rng);
                 buckets.add(.sampling, nsDelta(t0, std.Io.Clock.awake.now(io)));
             }
             return sampled;
@@ -420,12 +432,8 @@ pub const Session = struct {
 
         var sampled: u32 = 0;
         if (do_sample) {
-            const probs = try self.allocator.alloc(f32, self.arch.vocab_size);
-            defer self.allocator.free(probs);
-            const idx = try self.allocator.alloc(u32, self.arch.vocab_size);
-            defer self.allocator.free(idx);
             const t0 = std.Io.Clock.awake.now(io);
-            sampled = try sample_mod.sampleWithScratch(logits_out, sample_cfg, probs, idx, rng);
+            sampled = try sample_mod.sampleWithScratch(logits_out, sample_cfg, self.sample_probs, self.sample_idx, rng);
             buckets.add(.sampling, nsDelta(t0, std.Io.Clock.awake.now(io)));
         }
 
@@ -510,12 +518,10 @@ pub const Session = struct {
     ) Error!GenerateStats {
         if (prompt_ids.len == 0) return error.InvalidShape;
 
-        const logits = try self.allocator.alloc(f32, self.arch.vocab_size);
-        defer self.allocator.free(logits);
-        const probs = try self.allocator.alloc(f32, self.arch.vocab_size);
-        defer self.allocator.free(probs);
-        const idx = try self.allocator.alloc(u32, self.arch.vocab_size);
-        defer self.allocator.free(idx);
+        const logits = try self.logits.f32s();
+        const probs = self.sample_probs;
+        const idx = self.sample_idx;
+        try out_ids.ensureTotalCapacity(self.allocator, out_ids.items.len + cfg.max_new_tokens);
 
         const t0 = std.Io.Clock.awake.now(io);
         self.resetMetalLaunchCounters();
@@ -536,7 +542,7 @@ pub const Session = struct {
             if (self.blocks[0].cache.used >= self.max_seq) break;
 
             const next = try sample_mod.sampleWithScratch(logits, cfg.sample, probs, idx, rng);
-            try out_ids.append(self.allocator, next);
+            out_ids.appendAssumeCapacity(next);
             generated += 1;
 
             const t_emit = std.Io.Clock.awake.now(io);
@@ -592,15 +598,14 @@ pub const Session = struct {
     ) Error!GenerateStats {
         if (prompt_ids.len == 0) return error.InvalidShape;
 
-        const logits = try self.allocator.alloc(f32, self.arch.vocab_size);
-        defer self.allocator.free(logits);
-        const probs = try self.allocator.alloc(f32, self.arch.vocab_size);
-        defer self.allocator.free(probs);
-        const idx = try self.allocator.alloc(u32, self.arch.vocab_size);
-        defer self.allocator.free(idx);
+        const logits = try self.logits.f32s();
+        const probs = self.sample_probs;
+        const idx = self.sample_idx;
+        try out_ids.ensureTotalCapacity(self.allocator, out_ids.items.len + cfg.max_new_tokens);
 
         var prefix: std.ArrayList(u32) = .empty;
         defer prefix.deinit(self.allocator);
+        try prefix.ensureTotalCapacity(self.allocator, prompt_ids.len + cfg.max_new_tokens);
         try prefix.appendSlice(self.allocator, prompt_ids);
 
         const t0 = std.Io.Clock.awake.now(io);
@@ -617,8 +622,8 @@ pub const Session = struct {
             if (prefix.items.len >= self.max_seq) break;
 
             const next = try sample_mod.sampleWithScratch(logits, cfg.sample, probs, idx, rng);
-            try out_ids.append(self.allocator, next);
-            try prefix.append(self.allocator, next);
+            out_ids.appendAssumeCapacity(next);
+            prefix.appendAssumeCapacity(next);
             generated += 1;
 
             const t_emit = std.Io.Clock.awake.now(io);
@@ -653,18 +658,93 @@ pub const Session = struct {
         };
     }
 
-    /// Total allocated KV capacity across all layers (f32 K+V).
+    /// Total allocated KV capacity across all layers.
+    /// On batched Metal, reports GPU KV (host mirror is counter-only).
     pub fn kvBytesCapacity(self: *const Session) u64 {
+        if (self.metal_stack) |ms| return ms.kvBytesCapacity();
         if (self.blocks.len == 0) return 0;
         return @as(u64, @intCast(self.blocks.len)) * self.blocks[0].cache.bytesCapacity();
     }
 
     pub fn kvBytesUsed(self: *const Session) u64 {
+        if (self.metal_stack) |ms| {
+            const used = self.blocks[0].cache.used;
+            return ms.kvBytesUsed(used);
+        }
         var sum: u64 = 0;
         for (self.blocks) |b| sum += b.cache.bytesUsed();
         return sum;
     }
+
+    /// Stage M6 memory breakdown (host + Metal residents).
+    pub fn memoryReport(self: *const Session) MemoryReport {
+        var host_weights: u64 = 0;
+        host_weights += tensorBytes(self.weights.embed);
+        host_weights += tensorBytes(self.weights.final_norm);
+        if (!self.weights.lm_head_tied) host_weights += tensorBytes(self.weights.lm_head);
+        for (self.weights.layers) |lw| {
+            host_weights += tensorBytes(lw.input_ln) + tensorBytes(lw.q_norm) + tensorBytes(lw.k_norm);
+            host_weights += tensorBytes(lw.wq) + tensorBytes(lw.wk) + tensorBytes(lw.wv) + tensorBytes(lw.wo);
+            host_weights += tensorBytes(lw.post_attn_ln);
+            host_weights += tensorBytes(lw.wg) + tensorBytes(lw.wu) + tensorBytes(lw.wd);
+        }
+
+        var host_kv: u64 = 0;
+        var host_scratch: u64 = 0;
+        for (self.blocks) |b| {
+            host_kv += b.cache.bytesCapacity();
+            if (b.scratch) |s| host_scratch += hostScratchBytes(s);
+        }
+        host_scratch += tensorBytes(self.hidden_a) + tensorBytes(self.hidden_b) + tensorBytes(self.normed) + tensorBytes(self.logits);
+        host_scratch += @as(u64, @intCast(self.sample_probs.len * @sizeOf(f32) + self.sample_idx.len * @sizeOf(u32)));
+
+        var metal = apple_schedule.MetalResidentBytes{};
+        if (self.metal_stack) |ms| metal = ms.residentBytes();
+
+        return .{
+            .max_seq = self.max_seq,
+            .backend = self.backendName(),
+            .host_weights_bytes = host_weights,
+            .host_kv_cap_bytes = host_kv,
+            .host_scratch_bytes = host_scratch,
+            .metal_weights_bytes = metal.weights,
+            .metal_kv_cap_bytes = metal.kv,
+            .metal_scratch_bytes = metal.scratch,
+            .peak_rss_bytes = @import("../util.zig").peakRssBytes(),
+        };
+    }
 };
+
+pub const MemoryReport = struct {
+    max_seq: usize,
+    backend: []const u8,
+    host_weights_bytes: u64,
+    host_kv_cap_bytes: u64,
+    host_scratch_bytes: u64,
+    metal_weights_bytes: u64,
+    metal_kv_cap_bytes: u64,
+    metal_scratch_bytes: u64,
+    peak_rss_bytes: ?u64,
+
+    pub fn totalAccounted(self: MemoryReport) u64 {
+        return self.host_weights_bytes + self.host_kv_cap_bytes + self.host_scratch_bytes +
+            self.metal_weights_bytes + self.metal_kv_cap_bytes + self.metal_scratch_bytes;
+    }
+};
+
+fn tensorBytes(t: Tensor) u64 {
+    return @intCast(t.data.len);
+}
+
+fn hostScratchBytes(s: qwen_block.Scratch) u64 {
+    var n: u64 = 0;
+    n += tensorBytes(s.xn) + tensorBytes(s.q_lin) + tensorBytes(s.k_lin) + tensorBytes(s.v_lin);
+    n += tensorBytes(s.q_htd) + tensorBytes(s.k_htd) + tensorBytes(s.v_htd) + tensorBytes(s.attn_htd);
+    n += tensorBytes(s.attn_lin) + tensorBytes(s.ao) + tensorBytes(s.x1) + tensorBytes(s.mlp_n);
+    n += tensorBytes(s.gate) + tensorBytes(s.up) + tensorBytes(s.hidden_act) + tensorBytes(s.down);
+    n += @as(u64, @intCast(s.scores.len * @sizeOf(f32)));
+    return n;
+}
 
 fn isStop(id: u32, stop_ids: []const u32) bool {
     for (stop_ids) |s| if (s == id) return true;
@@ -1291,4 +1371,202 @@ test "Stage M5: greedy tokens match CPU (full model when artifact present)" {
 
     try std.testing.expectEqualSlices(u32, cpu_ids.items, q8_ids.items);
     try std.testing.expectEqualStrings(apple_schedule.path_q8, apple_schedule.last_qwen_path);
+}
+
+test "Stage M6: Metal decodeToken does not allocate after warm-up" {
+    if (apple_gpu.skipAppleGpuTests()) return error.SkipZigTest;
+    defer apple_schedule.force_baseline_path = null;
+    defer apple_schedule.force_half_path = null;
+    defer apple_schedule.force_q8_path = null;
+
+    const gpa = std.testing.allocator;
+    const bytes = try buildMiniArtifact(gpa);
+    defer gpa.free(bytes);
+    var art = try artifact.Artifact.loadOwned(gpa, try gpa.dupe(u8, bytes));
+    defer art.deinit();
+    const arch = qwen3.stage11_mini;
+
+    var fa = std.testing.FailingAllocator.init(gpa, .{});
+    apple_schedule.force_baseline_path = false;
+    apple_schedule.force_half_path = false;
+    apple_schedule.force_q8_path = false;
+    var sess = try Session.initWithBackend(fa.allocator(), &art, arch, 16, .apple);
+    defer sess.deinit();
+    try std.testing.expect(sess.metal_stack != null);
+    try std.testing.expect(sess.blocks[0].scratch == null);
+
+    const prompt = [_]u32{ 2, 3 };
+    const logits = try sess.logits.f32s();
+    try sess.prefillLastLogits(&prompt, logits); // warm-up: PSO + first CB
+
+    const before = fa.allocations;
+    var step: u32 = 0;
+    while (step < 8) : (step += 1) {
+        try sess.decodeToken(2, logits);
+    }
+    try std.testing.expectEqual(before, fa.allocations);
+
+    const rep = sess.memoryReport();
+    try std.testing.expect(rep.metal_weights_bytes > 0);
+    try std.testing.expect(rep.metal_kv_cap_bytes > 0);
+    try std.testing.expect(rep.metal_scratch_bytes > 0);
+    try std.testing.expectEqual(@as(u64, 0), rep.host_kv_cap_bytes);
+}
+
+test "Stage M6: generateCached decode loop does not allocate after capacity reserve" {
+    if (apple_gpu.skipAppleGpuTests()) return error.SkipZigTest;
+    defer apple_schedule.force_baseline_path = null;
+
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const bytes = try buildMiniArtifact(gpa);
+    defer gpa.free(bytes);
+    var art = try artifact.Artifact.loadOwned(gpa, try gpa.dupe(u8, bytes));
+    defer art.deinit();
+    const arch = qwen3.stage11_mini;
+
+    var fa = std.testing.FailingAllocator.init(gpa, .{});
+    apple_schedule.force_baseline_path = false;
+    var sess = try Session.initWithBackend(fa.allocator(), &art, arch, 32, .apple);
+    defer sess.deinit();
+
+    const prompt = [_]u32{ 2, 3 };
+    const max_new: u32 = 12;
+    var out_ids: std.ArrayList(u32) = .empty;
+    defer out_ids.deinit(fa.allocator());
+    try out_ids.ensureTotalCapacity(fa.allocator(), max_new);
+
+    // Warm-up one short generate so pipelines are hot.
+    var warm: std.ArrayList(u32) = .empty;
+    defer warm.deinit(fa.allocator());
+    try warm.ensureTotalCapacity(fa.allocator(), 2);
+    var rng0 = std.Random.DefaultPrng.init(1);
+    _ = try sess.generate(io, &prompt, &warm, .{
+        .max_new_tokens = 2,
+        .sample = .{ .temperature = 0 },
+        .use_kv_cache = true,
+    }, &rng0);
+    sess.reset();
+
+    const before = fa.allocations;
+    var rng = std.Random.DefaultPrng.init(2);
+    const stats = try sess.generate(io, &prompt, &out_ids, .{
+        .max_new_tokens = max_new,
+        .sample = .{ .temperature = 0 },
+        .use_kv_cache = true,
+    }, &rng);
+    try std.testing.expectEqual(before, fa.allocations);
+    try std.testing.expect(stats.generated_tokens > 0);
+    try std.testing.expect(stats.decode_steps >= 1);
+}
+
+test "Stage M6: generateCached long run does not allocate (mini max_seq)" {
+    if (apple_gpu.skipAppleGpuTests()) return error.SkipZigTest;
+    defer apple_schedule.force_baseline_path = null;
+
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const bytes = try buildMiniArtifact(gpa);
+    defer gpa.free(bytes);
+    var art = try artifact.Artifact.loadOwned(gpa, try gpa.dupe(u8, bytes));
+    defer art.deinit();
+    const arch = qwen3.stage11_mini;
+    const max_seq: usize = @intCast(arch.max_position_embeddings);
+
+    var fa = std.testing.FailingAllocator.init(gpa, .{});
+    apple_schedule.force_baseline_path = false;
+    var sess = try Session.initWithBackend(fa.allocator(), &art, arch, max_seq, .apple);
+    defer sess.deinit();
+
+    const prompt = [_]u32{ 2, 3 };
+    const max_new: u32 = @intCast(max_seq - prompt.len);
+    var out_ids: std.ArrayList(u32) = .empty;
+    defer out_ids.deinit(fa.allocator());
+    try out_ids.ensureTotalCapacity(fa.allocator(), max_new);
+
+    var warm: std.ArrayList(u32) = .empty;
+    defer warm.deinit(fa.allocator());
+    try warm.ensureTotalCapacity(fa.allocator(), 2);
+    var rng0 = std.Random.DefaultPrng.init(0);
+    _ = try sess.generate(io, &prompt, &warm, .{
+        .max_new_tokens = 2,
+        .sample = .{ .temperature = 0 },
+        .use_kv_cache = true,
+    }, &rng0);
+    sess.reset();
+
+    const before = fa.allocations;
+    var rng = std.Random.DefaultPrng.init(3);
+    const stats = try sess.generate(io, &prompt, &out_ids, .{
+        .max_new_tokens = max_new,
+        .sample = .{ .temperature = 0 },
+        .use_kv_cache = true,
+    }, &rng);
+    try std.testing.expectEqual(before, fa.allocations);
+    try std.testing.expectEqual(max_new, stats.generated_tokens);
+    try std.testing.expectEqual(max_new, stats.decode_steps);
+}
+
+test "Stage M6: long generate does not allocate (full model when artifact present)" {
+    if (apple_gpu.skipAppleGpuTests()) return error.SkipZigTest;
+    const full = std.process.Environ.getPosix(std.testing.environ, "ZYNFER_FULL_MODEL_TESTS") orelse "";
+    if (!(std.mem.eql(u8, full, "1") or std.mem.eql(u8, full, "true"))) return error.SkipZigTest;
+    defer apple_schedule.force_baseline_path = null;
+    defer apple_schedule.force_half_path = null;
+    defer apple_schedule.force_q8_path = null;
+
+    const path = "models/qwen3-0.6b.zynfer";
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    std.Io.Dir.cwd().access(io, path, .{}) catch return error.SkipZigTest;
+
+    var art = try artifact.Artifact.loadFile(gpa, io, path);
+    defer art.deinit();
+    const arch = try art.meta.toArch();
+
+    var tok = try tokenizer.Tokenizer.loadHfDir(gpa, io, "models/Qwen3-0.6B");
+    defer tok.deinit();
+    const prompt_text = "Explain gravity simply.";
+    const wrapped = try tok.applyChatTemplate(gpa, prompt_text);
+    defer gpa.free(wrapped);
+    const prompt_ids = try tok.encode(gpa, wrapped);
+    defer gpa.free(prompt_ids);
+
+    const max_new: u32 = 32;
+    const max_seq = prompt_ids.len + max_new;
+    if (max_seq > arch.max_position_embeddings) return error.SkipZigTest;
+
+    var fa = std.testing.FailingAllocator.init(gpa, .{});
+    apple_schedule.force_baseline_path = false;
+    apple_schedule.force_half_path = false;
+    apple_schedule.force_q8_path = false;
+    var sess = try Session.initWithBackend(fa.allocator(), &art, arch, max_seq, .apple);
+    defer sess.deinit();
+
+    var out_ids: std.ArrayList(u32) = .empty;
+    defer out_ids.deinit(fa.allocator());
+    try out_ids.ensureTotalCapacity(fa.allocator(), max_new);
+
+    // Warm-up: one short greedy generate (alloc allowed).
+    var warm: std.ArrayList(u32) = .empty;
+    defer warm.deinit(fa.allocator());
+    try warm.ensureTotalCapacity(fa.allocator(), 2);
+    var rng_w = std.Random.DefaultPrng.init(0);
+    _ = try sess.generate(io, prompt_ids, &warm, .{
+        .max_new_tokens = 2,
+        .sample = .{ .temperature = 0 },
+        .use_kv_cache = true,
+    }, &rng_w);
+    sess.reset();
+
+    const before = fa.allocations;
+    var rng = std.Random.DefaultPrng.init(1);
+    const stats = try sess.generate(io, prompt_ids, &out_ids, .{
+        .max_new_tokens = max_new,
+        .sample = .{ .temperature = 0 },
+        .use_kv_cache = true,
+    }, &rng);
+    try std.testing.expectEqual(before, fa.allocations);
+    try std.testing.expect(stats.generated_tokens >= 2);
+    try std.testing.expect(stats.decode_steps >= 1);
 }

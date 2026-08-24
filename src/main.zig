@@ -21,6 +21,8 @@ const usage =
     \\  zynfer stageM3      Qwen-scale schedule + fusion Stage M3 ledger
     \\  zynfer stageM4      bf16/fp16 Metal weights+KV Stage M4 ledger
     \\  zynfer stageM5      int8 weight quantization Stage M5 ledger
+    \\  zynfer stageM6      static decode plan Stage M6 ledger
+    \\  zynfer mem-report   weights / KV / scratch / peak RSS (Stage M6)
     \\  zynfer inspect PATH Validate and print a .zynfer artifact
     \\  zynfer artifact-compile [--out PATH] [--mini]  Write fixture .zynfer
     \\  zynfer forward-golden ARTIFACT [--tokens IDS] [--golden PATH] [--dump DIR] [--backend cpu|apple]
@@ -287,6 +289,15 @@ pub fn main(init: std.process.Init) !void {
         try printStageM4(writer);
     } else if (std.mem.eql(u8, command, "stageM5") or std.mem.eql(u8, command, "stagem5")) {
         try printStageM5(writer);
+    } else if (std.mem.eql(u8, command, "stageM6") or std.mem.eql(u8, command, "stagem6")) {
+        try printStageM6(writer);
+    } else if (std.mem.eql(u8, command, "mem-report") or std.mem.eql(u8, command, "memreport")) {
+        const backend: zynfer.BackendKind = blk: {
+            if (forced_backend) |fb| break :blk try zynfer.backend.parseBackendKind(fb);
+            break :blk .apple;
+        };
+        const path = if (n_pos >= 1) positionals[0] else null;
+        try cmdMemReport(host, writer, path, artifact_mini, max_tokens, backend);
     } else if (std.mem.eql(u8, command, "inspect")) {
         if (n_pos < 1) {
             std.debug.print("usage: zynfer inspect PATH.zynfer\n", .{});
@@ -747,7 +758,7 @@ fn printStageM4(writer: *std.Io.Writer) !void {
     try writer.print("  bytes/token:      estimateDecodeBytesPerTokenHalf ≈ ½ f32 estimate\n\n", .{});
     try writer.print("Not in Stage M4\n", .{});
     try writer.print("  int8 session weights — M5 (done; see stageM5)\n", .{});
-    try writer.print("  zero-allocation static decode — M6\n\n", .{});
+    try writer.print("  zero-allocation static decode — M6 (done; see stageM6)\n\n", .{});
     try writer.print("See docs/stages/M4-half-precision-metal.md\n", .{});
 }
 
@@ -766,8 +777,113 @@ fn printStageM5(writer: *std.Io.Writer) !void {
     try writer.print("  bytes/token:      estimateDecodeBytesPerTokenQ8 (i8 weights + f32 scales + f32 KV)\n\n", .{});
     try writer.print("Not in Stage M5\n", .{});
     try writer.print("  4-bit weights — only if int8 decode wins and quality allows\n", .{});
-    try writer.print("  zero-allocation static decode — M6\n\n", .{});
+    try writer.print("  zero-allocation static decode — M6 (done; see stageM6)\n\n", .{});
     try writer.print("See docs/stages/M5-weight-quantization-apple.md\n", .{});
+}
+
+fn printStageM6(writer: *std.Io.Writer) !void {
+    try writer.print("zynfer Stage M6 — static decode plan (Apple)\n", .{});
+    try writer.print("===========================================\n\n", .{});
+    try writer.print("Done\n", .{});
+    try writer.print("  after warm-up:    weights resident, KV to max_seq, fixed GPU scratch\n", .{});
+    try writer.print("  host mirror:      batched Metal skips host per-layer KV/scratch twin\n", .{});
+    try writer.print("  sample scratch:   Session-owned probs/idx; reuse Session.logits\n", .{});
+    try writer.print("  out_ids:          ensureTotalCapacity + appendAssumeCapacity\n", .{});
+    try writer.print("  asserted:         FailingAllocator flat over decode / generateCached\n", .{});
+    try writer.print("  encode/submit:    2 waits/forward (M3); ICB/replay — REJECT (finalize)\n", .{});
+    try writer.print("  memory report:    zynfer mem-report [--mini | ARTIFACT] [--max-tokens N]\n", .{});
+    try writer.print("  ITL variance:     run / qwen-bench print itl_ms p50/p95/p99\n\n", .{});
+    try writer.print("ICB decision (final)\n", .{});
+    try writer.print("  REJECT — KV/q_len change each decode; cite Stage 8 + M3 ledgers.\n", .{});
+    try writer.print("  Encode count still high; waits already minimal (2). No ICB path.\n\n", .{});
+    try writer.print("See docs/stages/M6-static-decode-plan.md\n", .{});
+}
+
+fn cmdMemReport(
+    host: zynfer.util.Host,
+    writer: *std.Io.Writer,
+    artifact_path: ?[]const u8,
+    force_mini: bool,
+    max_seq_in: u32,
+    backend: zynfer.BackendKind,
+) !void {
+    const allocator = host.gpa;
+    const io = host.io;
+
+    try writer.print("zynfer mem-report — Stage M6 static plan\n", .{});
+    try writer.print("=======================================\n\n", .{});
+
+    const use_mini = force_mini or artifact_path == null;
+    if (use_mini) {
+        const bytes = try zynfer.qwen_forward.buildMiniArtifact(allocator);
+        defer allocator.free(bytes);
+        var art = try zynfer.artifact.Artifact.loadOwned(allocator, try allocator.dupe(u8, bytes));
+        defer art.deinit();
+        const arch = zynfer.qwen3.stage11_mini;
+        const max_seq: usize = if (max_seq_in == 64)
+            @intCast(arch.max_position_embeddings)
+        else
+            @min(@as(usize, max_seq_in), @as(usize, @intCast(arch.max_position_embeddings)));
+        var sess = try zynfer.qwen_forward.Session.initWithBackend(allocator, &art, arch, max_seq, backend);
+        defer sess.deinit();
+        if (backend == .apple and sess.metal_stack != null) {
+            const logits = try sess.logits.f32s();
+            const prompt = [_]u32{ 2, 3 };
+            try sess.prefillLastLogits(&prompt, logits);
+        }
+        try printMemoryReport(writer, "stage11-mini", sess.memoryReport());
+        return;
+    }
+
+    const path = artifact_path.?;
+    var art = try zynfer.artifact.Artifact.loadFile(allocator, io, path);
+    defer art.deinit();
+    const arch = try art.meta.toArch();
+    const max_seq: usize = if (max_seq_in == 64)
+        @min(@as(usize, @intCast(arch.max_position_embeddings)), 2048)
+    else
+        max_seq_in;
+    var sess = try zynfer.qwen_forward.Session.initWithBackend(allocator, &art, arch, max_seq, backend);
+    defer sess.deinit();
+    try printMemoryReport(writer, path, sess.memoryReport());
+}
+
+fn printMemoryReport(writer: *std.Io.Writer, label: []const u8, r: zynfer.qwen_forward.MemoryReport) !void {
+    try writer.print("fixture/model:  {s}\n", .{label});
+    try writer.print("backend:        {s}\n", .{r.backend});
+    try writer.print("max_seq:        {d}\n\n", .{r.max_seq});
+    try writer.print("  host_weights      {d}\n", .{r.host_weights_bytes});
+    try writer.print("  host_kv_cap       {d}\n", .{r.host_kv_cap_bytes});
+    try writer.print("  host_scratch      {d}\n", .{r.host_scratch_bytes});
+    try writer.print("  metal_weights     {d}\n", .{r.metal_weights_bytes});
+    try writer.print("  metal_kv_cap      {d}\n", .{r.metal_kv_cap_bytes});
+    try writer.print("  metal_scratch     {d}\n", .{r.metal_scratch_bytes});
+    try writer.print("  accounted_total   {d}\n", .{r.totalAccounted()});
+    if (r.peak_rss_bytes) |rss| {
+        try writer.print("  peak_rss          {d}\n", .{rss});
+    } else {
+        try writer.print("  peak_rss          (unavailable)\n", .{});
+    }
+    try writer.print("\njson\n", .{});
+    try writer.print(
+        "{{\"cmd\":\"mem-report\",\"backend\":\"{s}\",\"max_seq\":{d},\"host_weights\":{d},\"host_kv_cap\":{d},\"host_scratch\":{d},\"metal_weights\":{d},\"metal_kv_cap\":{d},\"metal_scratch\":{d},\"accounted\":{d}",
+        .{
+            r.backend,
+            r.max_seq,
+            r.host_weights_bytes,
+            r.host_kv_cap_bytes,
+            r.host_scratch_bytes,
+            r.metal_weights_bytes,
+            r.metal_kv_cap_bytes,
+            r.metal_scratch_bytes,
+            r.totalAccounted(),
+        },
+    );
+    if (r.peak_rss_bytes) |rss| {
+        try writer.print(",\"peak_rss\":{d}}}\n", .{rss});
+    } else {
+        try writer.print(",\"peak_rss\":null}}\n", .{});
+    }
 }
 
 const StreamCtx = struct {
@@ -917,6 +1033,25 @@ fn percentileNs(sorted: []u64, pct: f64) u64 {
     return @intFromFloat(a + (b - a) * frac);
 }
 
+const ItlStats = struct {
+    n: usize = 0,
+    p50_ns: u64 = 0,
+    p95_ns: u64 = 0,
+    p99_ns: u64 = 0,
+
+    fn fromSlice(buf: []u64, count: usize) ItlStats {
+        if (count == 0) return .{};
+        const scratch = buf[0..count];
+        std.mem.sort(u64, scratch, {}, std.sort.asc(u64));
+        return .{
+            .n = count,
+            .p50_ns = percentileNs(scratch, 50),
+            .p95_ns = percentileNs(scratch, 95),
+            .p99_ns = percentileNs(scratch, 99),
+        };
+    }
+};
+
 fn runGenerate(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -980,6 +1115,7 @@ fn runGenerate(
     const stop_ids = [_]u32{ tok.eos_token_id, tok.endoftext_id, tok.im_end_id };
     var out_ids: std.ArrayList(u32) = .empty;
     defer out_ids.deinit(allocator);
+    try out_ids.ensureTotalCapacity(allocator, max_new_tokens);
 
     const itl_buf = try allocator.alloc(u64, max_new_tokens);
     defer allocator.free(itl_buf);
@@ -993,6 +1129,10 @@ fn runGenerate(
         .stop_ids = &stop_ids,
     };
     defer stream_ctx.pending.deinit(allocator);
+    if (stream) {
+        // UTF-8 streaming: reserve ~8 bytes per token to avoid per-token realloc.
+        try stream_ctx.pending.ensureTotalCapacity(allocator, @as(usize, max_new_tokens) * 8);
+    }
 
     var rng = std.Random.DefaultPrng.init(seed);
     const stats = sess.generate(io, prompt_ids, &out_ids, .{
@@ -1051,18 +1191,14 @@ fn runGenerate(
         try writer.print(" decode_tok_s=n/a (single token; decode interval after first)", .{});
     }
     if (stats.itl_count > 0) {
-        const slice = itl_buf[0..stats.itl_count];
-        std.mem.sort(u64, slice, {}, std.sort.asc(u64));
-        const p50 = percentileNs(slice, 50);
-        const p95 = percentileNs(slice, 95);
-        const p99 = percentileNs(slice, 99);
+        const itl = ItlStats.fromSlice(itl_buf, stats.itl_count);
         try writer.print(
             "\nitl_ms p50={d:.3} p95={d:.3} p99={d:.3} (n={d})",
             .{
-                @as(f64, @floatFromInt(p50)) / 1e6,
-                @as(f64, @floatFromInt(p95)) / 1e6,
-                @as(f64, @floatFromInt(p99)) / 1e6,
-                stats.itl_count,
+                @as(f64, @floatFromInt(itl.p50_ns)) / 1e6,
+                @as(f64, @floatFromInt(itl.p95_ns)) / 1e6,
+                @as(f64, @floatFromInt(itl.p99_ns)) / 1e6,
+                itl.n,
             },
         );
     }
@@ -1293,7 +1429,7 @@ fn runQwenBench(
 ) !void {
     const default_path = "models/qwen3-0.6b.zynfer";
     const use_mini = force_mini or (artifact_path_opt == null and !zynfer.util.fileExists(io, default_path));
-    const max_new: u32 = if (max_new_tokens_in == 64 and use_mini) 4 else if (max_new_tokens_in == 64) 8 else max_new_tokens_in;
+    const max_new: u32 = if (max_new_tokens_in == 64 and use_mini) 4 else if (max_new_tokens_in == 64) 16 else max_new_tokens_in;
 
     try writer.print("zynfer qwen-bench — prefill vs decode (Stage M1)\n", .{});
     try writer.print("================================================\n\n", .{});
@@ -1408,6 +1544,10 @@ fn runQwenBench(
         metal_encodes_decode: u64,
         metal_waits_decode: u64,
         decode_steps: usize,
+        itl_n: usize,
+        itl_p50_ns: u64,
+        itl_p95_ns: u64,
+        itl_p99_ns: u64,
     };
 
     var rows: [2]Row = undefined;
@@ -1422,6 +1562,10 @@ fn runQwenBench(
 
         var out_ids: std.ArrayList(u32) = .empty;
         defer out_ids.deinit(allocator);
+        try out_ids.ensureTotalCapacity(allocator, max_new);
+
+        const itl_buf = try allocator.alloc(u64, max_new);
+        defer allocator.free(itl_buf);
 
         var sess = zynfer.qwen_forward.Session.initWithBackend(allocator, &art, arch, max_seq, kind) catch |err| {
             try writer.print("{s:<8}  SKIP ({s})\n", .{ kind.name(), @errorName(err) });
@@ -1434,6 +1578,7 @@ fn runQwenBench(
             .max_new_tokens = max_new,
             .sample = .{ .temperature = 0, .seed = seed },
             .use_kv_cache = true,
+            .itl_ns_out = itl_buf,
         }, &rng) catch |err| {
             try writer.print("{s:<8}  FAIL ({s})\n", .{ kind.name(), @errorName(err) });
             continue;
@@ -1470,6 +1615,8 @@ fn runQwenBench(
             decode_ms_tok = (@as(f64, @floatFromInt(stats.decode_ns)) / 1e6) / @as(f64, @floatFromInt(n));
         }
 
+        const itl = ItlStats.fromSlice(itl_buf, stats.itl_count);
+
         try writer.print("{s:<8} {d:>12.3} {d:>12.3} {d:>12.3} {d:>12.3} {d:>14.3} {d:>12} {d:>10.1} {d:>10.1}\n", .{
             kind.name(),
             prefill_ms,
@@ -1481,6 +1628,17 @@ fn runQwenBench(
             enc_tok,
             wait_tok,
         });
+        if (itl.n > 0) {
+            try writer.print(
+                "         itl_ms p50={d:.3} p95={d:.3} p99={d:.3} (n={d})\n",
+                .{
+                    @as(f64, @floatFromInt(itl.p50_ns)) / 1e6,
+                    @as(f64, @floatFromInt(itl.p95_ns)) / 1e6,
+                    @as(f64, @floatFromInt(itl.p99_ns)) / 1e6,
+                    itl.n,
+                },
+            );
+        }
 
         rows[n_rows] = .{
             .backend = kind.name(),
@@ -1497,6 +1655,10 @@ fn runQwenBench(
             .metal_encodes_decode = stats.metal_encodes_decode,
             .metal_waits_decode = stats.metal_waits_decode,
             .decode_steps = stats.decode_steps,
+            .itl_n = itl.n,
+            .itl_p50_ns = itl.p50_ns,
+            .itl_p95_ns = itl.p95_ns,
+            .itl_p99_ns = itl.p99_ns,
         };
         n_rows += 1;
     }
@@ -1507,6 +1669,7 @@ fn runQwenBench(
     try writer.print("  Force baseline with ZYNFER_QWEN_METAL=baseline. CPU rows show 0.\n", .{});
     try writer.print("  B/tok_est = f32 weight reads + KV read at end-of-run kv_len (approx).\n", .{});
     try writer.print("  decode_t/s uses generated_tokens-1 (intervals after first token).\n", .{});
+    try writer.print("  ITL p50/p95/p99 (Stage M6): inter-token latency after first token; apple row when n≥2.\n", .{});
     var ri: usize = 0;
     while (ri < n_rows) : (ri += 1) {
         const r = rows[ri];
@@ -1539,7 +1702,7 @@ fn runQwenBench(
         if (i != 0) try writer.writeAll(",");
         const r = rows[i];
         try writer.print(
-            "{{\"backend\":\"{s}\",\"prefill_ns\":{d},\"ttft_ns\":{d},\"decode_ns\":{d},\"generated_tokens\":{d},\"bytes_per_tok_est\":{d},\"metal_encodes_prefill\":{d},\"metal_waits_prefill\":{d},\"metal_encodes_decode\":{d},\"metal_waits_decode\":{d},\"decode_steps\":{d},\"encodes_per_tok\":{d:.3},\"waits_per_tok\":{d:.3}}}",
+            "{{\"backend\":\"{s}\",\"prefill_ns\":{d},\"ttft_ns\":{d},\"decode_ns\":{d},\"generated_tokens\":{d},\"bytes_per_tok_est\":{d},\"metal_encodes_prefill\":{d},\"metal_waits_prefill\":{d},\"metal_encodes_decode\":{d},\"metal_waits_decode\":{d},\"decode_steps\":{d},\"encodes_per_tok\":{d:.3},\"waits_per_tok\":{d:.3},\"itl_n\":{d},\"itl_p50_ns\":{d},\"itl_p95_ns\":{d},\"itl_p99_ns\":{d}}}",
             .{
                 r.backend,
                 r.prefill_ns,
@@ -1554,6 +1717,10 @@ fn runQwenBench(
                 r.decode_steps,
                 r.encodes_per_tok,
                 r.waits_per_tok,
+                r.itl_n,
+                r.itl_p50_ns,
+                r.itl_p95_ns,
+                r.itl_p99_ns,
             },
         );
     }
