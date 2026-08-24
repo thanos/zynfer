@@ -277,7 +277,7 @@ Stage 6 A/B: `bench/results/apple-stage6-dev-laptop.md`.
 | Metal attention long context | Stage M0: `kv_len` ≤ **2048** (256 thread-local fast path) |
 | SME / SME2 | hardware probed (`FEAT_SME`); kernels **rejected** (Stage 7) |
 | Core ML / ANE | framework probed; inference path **rejected** (no verified subgraph) |
-| fp16 / bf16 Metal | **rejected** Stage 8 (`Unsupported`); kernels remain f32 |
+| fp16 / bf16 Metal | **retained (M4)** — bf16 weights+KV; f32 activations; opt-in `ZYNFER_QWEN_METAL=bf16` |
 | HIP transformer ops | not implemented (probe only) |
 
 `zig build run -- caps` and `zynfer stage7` print the Stage 7 ledger.
@@ -315,7 +315,7 @@ Apple Stage 7/8 or curriculum Stages 10–12 / 16 land.
 | **Signposts** | **done** — `ZYNFER_SIGNPOSTS=1` (`prefill`/`decode`/`weights_upload` + encode/batch + M2 `qwen.*` families) |
 | **Peak RSS** | **done** — `peak_rss_bytes` in block-bench JSON; Peak memory in `docs/benchmarks.md` |
 | **Stress / cancel paths** | **done** — repeated Session + batch abort + dual-`Gpu` concurrency |
-| **fp16 / bf16 Metal** | **rejected** — `Unsupported` stubs |
+| **fp16 / bf16 Metal** | **retained (M4)** — see `docs/stages/M4-half-precision-metal.md` |
 | **Reusable execution encoding** (ICB) | **rejected** — see stage8 results |
 | **Further MSL fusions** | **rejected** for tiny-block; → Stage 16 |
 | **Int8 weights in tiny-block Session** | **rejected** for now; ops path keeps `Q8DeviceWeights` |
@@ -332,7 +332,8 @@ Stage 8 ledger: `bench/results/apple-stage8-dev-laptop.md`.
 | **Prefill/decode split on Qwen** | **M1 (done)** — [`docs/stages/M1-prefill-vs-decode-qwen.md`](stages/M1-prefill-vs-decode-qwen.md) |
 | **Profile one token + roofline** | **done** — M2 (`qwen-profile`) |
 | **Qwen-scale batched schedule / fusion** | **done** — M3 (`qwen_schedule`) |
-| **fp16 / quant / static decode / ANE** | M4–M7 |
+| **fp16 Metal path + native half artifact upload** | **done** — M4 (`ZYNFER_QWEN_METAL=bf16`) |
+| **quant / static decode / ANE** | M5–M7 |
 | **Qwen3-4B Apple capstone** | M8 (old 25 slice) |
 
 See [`docs/roadmap.md`](roadmap.md) and [`baoulo/prompts/fable-5-prompt.md`](../baoulo/prompts/fable-5-prompt.md).

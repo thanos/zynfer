@@ -1,0 +1,38 @@
+//! IEEE fp16 ↔ f32 for `.zynfer` dtype tag 1 (`f16`).
+
+const std = @import("std");
+
+/// Widen a little-endian IEEE fp16 bit pattern to f32.
+pub fn toF32(w: u16) f32 {
+    const h: f16 = @bitCast(w);
+    return @floatCast(h);
+}
+
+/// Decode little-endian fp16 bytes into f32.
+pub fn decodeIntoF32(dst: []f32, src: []const u8) void {
+    std.debug.assert(dst.len * 2 <= src.len);
+    var i: usize = 0;
+    while (i < dst.len) : (i += 1) {
+        const w = std.mem.readInt(u16, src[i * 2 ..][0..2], .little);
+        dst[i] = toF32(w);
+    }
+}
+
+/// Narrow f32 values to little-endian IEEE fp16 bytes.
+pub fn encodeFromF32(dst: []u8, src: []const f32) void {
+    std.debug.assert(dst.len >= src.len * 2);
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) {
+        const h: f16 = @floatCast(src[i]);
+        const bits: u16 = @bitCast(h);
+        std.mem.writeInt(u16, dst[i * 2 ..][0..2], bits, .little);
+    }
+}
+
+test "f16 decode round-trip known values" {
+    var buf: [2]u8 = undefined;
+    std.mem.writeInt(u16, &buf, 0x3c00, .little); // 1.0 in f16
+    var out: [1]f32 = undefined;
+    decodeIntoF32(&out, &buf);
+    try std.testing.expect(@abs(out[0] - 1.0) < 1e-3);
+}

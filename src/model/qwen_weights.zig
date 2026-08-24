@@ -7,6 +7,7 @@ const std = @import("std");
 const artifact = @import("artifact.zig");
 const qwen3 = @import("qwen3.zig");
 const bf16 = @import("../runtime/bf16.zig");
+const float16 = @import("../runtime/float16.zig");
 const Tensor = @import("../runtime/tensor.zig").Tensor;
 const DType = @import("../runtime/dtype.zig").DType;
 pub const Error = artifact.Error || @import("../runtime/tensor.zig").TensorError;
@@ -228,7 +229,86 @@ fn decodeWeights(dst: []f32, dt: DType, raw: []const u8) Error!void {
             if (raw.len != dst.len * 2) return error.ShapeMismatch;
             bf16.decodeIntoF32(dst, raw);
         },
-        .f16 => return error.InvalidDtype,
+        .f16 => {
+            if (raw.len != dst.len * 2) return error.ShapeMismatch;
+            float16.decodeIntoF32(dst, raw);
+        },
+    }
+}
+
+fn numelFromEntry(entry: *const artifact.TensorEntry) Error!usize {
+    var n: usize = 1;
+    var i: u8 = 0;
+    while (i < entry.rank) : (i += 1) {
+        n = std.math.mul(usize, n, entry.shape[i]) catch return error.Overflow;
+    }
+    return n;
+}
+
+fn transpose2dBf16Bytes(dst: []u8, src: []const u8, rows: usize, cols: usize) void {
+    var r: usize = 0;
+    while (r < rows) : (r += 1) {
+        var c: usize = 0;
+        while (c < cols) : (c += 1) {
+            const src_i = (r * cols + c) * 2;
+            const dst_i = (c * rows + r) * 2;
+            @memcpy(dst[dst_i..][0..2], src[src_i..][0..2]);
+        }
+    }
+}
+
+/// Copy artifact payload into a GPU-sized bf16 buffer.
+/// Returns `true` when the artifact stored f16/bf16 (native half, no f32 host round-trip).
+/// Returns `false` for f32 payloads so the caller can narrow from host f32 tensors.
+pub fn copyArtifactToBf16(
+    dst: []u8,
+    art: *const artifact.Artifact,
+    name: []const u8,
+    transpose: bool,
+) Error!bool {
+    const entry = try art.findByName(name);
+    const raw = try art.tensorBytesByName(name);
+    const dt = try entry.dtypeTag();
+    const n = try numelFromEntry(entry);
+    if (dst.len != n * 2) return error.ShapeMismatch;
+
+    switch (dt) {
+        .f32 => return false,
+        .bf16 => {
+            if (raw.len != n * 2) return error.ShapeMismatch;
+            if (!transpose) {
+                @memcpy(dst, raw);
+                return true;
+            }
+            if (entry.rank != 2) return error.InvalidShape;
+            transpose2dBf16Bytes(dst, raw, entry.shape[0], entry.shape[1]);
+            return true;
+        },
+        .f16 => {
+            if (raw.len != n * 2) return error.ShapeMismatch;
+            if (!transpose) {
+                var i: usize = 0;
+                while (i < n) : (i += 1) {
+                    const w = std.mem.readInt(u16, raw[i * 2 ..][0..2], .little);
+                    std.mem.writeInt(u16, dst[i * 2 ..][0..2], bf16.fromF32(float16.toF32(w)), .little);
+                }
+                return true;
+            }
+            if (entry.rank != 2) return error.InvalidShape;
+            const rows = entry.shape[0];
+            const cols = entry.shape[1];
+            var r: usize = 0;
+            while (r < rows) : (r += 1) {
+                var c: usize = 0;
+                while (c < cols) : (c += 1) {
+                    const src_i = (r * cols + c) * 2;
+                    const w = std.mem.readInt(u16, raw[src_i..][0..2], .little);
+                    const dst_i = (c * rows + r) * 2;
+                    std.mem.writeInt(u16, dst[dst_i..][0..2], bf16.fromF32(float16.toF32(w)), .little);
+                }
+            }
+            return true;
+        },
     }
 }
 
@@ -258,6 +338,51 @@ pub fn loadTensorNamedForTest(
     transpose: bool,
 ) Error!Tensor {
     return loadNamed(allocator, art, name, transpose);
+}
+
+test "copyArtifactToBf16 preserves bf16 payload from real checkpoint" {
+    const path = "models/qwen3-0.6b.zynfer";
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    std.Io.Dir.cwd().access(io, path, .{}) catch return error.SkipZigTest;
+
+    var art = try artifact.Artifact.loadFile(gpa, io, path);
+    defer art.deinit();
+
+    const raw = try art.tensorBytesByName(qwen3.embed_tokens_name);
+    var gpu_buf = try gpa.alloc(u8, raw.len);
+    defer gpa.free(gpu_buf);
+    try std.testing.expect(try copyArtifactToBf16(gpu_buf, &art, qwen3.embed_tokens_name, false));
+    try std.testing.expectEqualSlices(u8, raw[0..4096], gpu_buf[0..4096]);
+}
+
+test "f16 artifact decode via load path" {
+    const gpa = std.testing.allocator;
+    const meta = artifact.Meta.fromArch(qwen3.stage11_mini);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const data_f32 = [_]f32{ 1.0, -2.0, 3.5 };
+    var f16_bytes: [6]u8 = undefined;
+    float16.encodeFromF32(&f16_bytes, &data_f32);
+    const shape = try a.dupe(u32, &.{3});
+    const owned = try a.dupe(u8, "test.vec");
+    var specs: [1]artifact.TensorSpec = .{.{
+        .name = owned,
+        .tensor_id = 1,
+        .dtype = .f16,
+        .shape = shape,
+        .bytes = &f16_bytes,
+    }};
+    const bytes = try artifact.build(gpa, meta, &specs);
+    defer gpa.free(bytes);
+    var art = try artifact.Artifact.loadOwned(gpa, try gpa.dupe(u8, bytes));
+    defer art.deinit();
+    var t = try loadNamed(gpa, &art, "test.vec", false);
+    defer t.deinit();
+    const s = try t.f32s();
+    try std.testing.expect(@abs(s[0] - 1.0) < 1e-3);
+    try std.testing.expect(@abs(s[1] - (-2.0)) < 1e-2);
 }
 
 test "real qwen q_proj load matches safetensors transpose layout" {

@@ -15,6 +15,7 @@ const apple_schedule = @import("../backends/apple/qwen_schedule.zig");
 const Tensor = @import("../runtime/tensor.zig").Tensor;
 const compare = @import("../runtime/compare.zig");
 const sample_mod = @import("../runtime/sample.zig");
+const tokenizer = @import("tokenizer.zig");
 
 pub const BackendKind = backend_mod.BackendKind;
 
@@ -98,6 +99,7 @@ pub const Session = struct {
                     max_seq,
                     &weights,
                     apple_schedule.useHalfPath(),
+                    art,
                 );
                 metal_stack = ms;
             }
@@ -1087,4 +1089,104 @@ test "Stage M4: batched Metal bf16 matches CPU logits within half tolerance" {
     try compare.expectClose(cpu_logits, half_logits, 5e-3, 5e-3);
     try compare.expectClose(cpu_logits, f32_logits, 3e-3, 3e-3);
     try std.testing.expectEqual(@as(u32, 2), apple_schedule.last_qwen_waits);
+}
+
+test "Stage M4: greedy tokens match CPU (mini, bf16 batched)" {
+    if (apple_gpu.skipAppleGpuTests()) return error.SkipZigTest;
+    defer apple_schedule.force_baseline_path = null;
+    defer apple_schedule.force_half_path = null;
+
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const bytes = try buildMiniArtifact(gpa);
+    defer gpa.free(bytes);
+    var art = try artifact.Artifact.loadOwned(gpa, try gpa.dupe(u8, bytes));
+    defer art.deinit();
+
+    const arch = qwen3.stage11_mini;
+    const prompt = [_]u32{ 2, 3 };
+    const max_new: u32 = 4;
+
+    var cpu_ids: std.ArrayList(u32) = .empty;
+    defer cpu_ids.deinit(gpa);
+    var half_ids: std.ArrayList(u32) = .empty;
+    defer half_ids.deinit(gpa);
+
+    var cpu_sess = try Session.init(gpa, &art, arch, prompt.len + max_new);
+    defer cpu_sess.deinit();
+    var rng_cpu = std.Random.DefaultPrng.init(42);
+    _ = try cpu_sess.generate(io, &prompt, &cpu_ids, .{
+        .max_new_tokens = max_new,
+        .sample = .{ .temperature = 0 },
+        .use_kv_cache = true,
+    }, &rng_cpu);
+
+    apple_schedule.force_baseline_path = false;
+    apple_schedule.force_half_path = true;
+    var half_sess = try Session.initWithBackend(gpa, &art, arch, prompt.len + max_new, .apple);
+    defer half_sess.deinit();
+    var rng_half = std.Random.DefaultPrng.init(42);
+    _ = try half_sess.generate(io, &prompt, &half_ids, .{
+        .max_new_tokens = max_new,
+        .sample = .{ .temperature = 0 },
+        .use_kv_cache = true,
+    }, &rng_half);
+
+    try std.testing.expectEqualSlices(u32, cpu_ids.items, half_ids.items);
+}
+
+test "Stage M4: greedy tokens match CPU (full model when artifact present)" {
+    if (apple_gpu.skipAppleGpuTests()) return error.SkipZigTest;
+    const full = std.process.Environ.getPosix(std.testing.environ, "ZYNFER_FULL_MODEL_TESTS") orelse "";
+    if (!(std.mem.eql(u8, full, "1") or std.mem.eql(u8, full, "true"))) return error.SkipZigTest;
+    defer apple_schedule.force_baseline_path = null;
+    defer apple_schedule.force_half_path = null;
+
+    const path = "models/qwen3-0.6b.zynfer";
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    std.Io.Dir.cwd().access(io, path, .{}) catch return error.SkipZigTest;
+
+    var art = try artifact.Artifact.loadFile(gpa, io, path);
+    defer art.deinit();
+    const arch = try art.meta.toArch();
+
+    var tok = try tokenizer.Tokenizer.loadHfDir(gpa, io, "models/Qwen3-0.6B");
+    defer tok.deinit();
+    const prompt_text = "Explain gravity simply.";
+    const wrapped = try tok.applyChatTemplate(gpa, prompt_text);
+    defer gpa.free(wrapped);
+    const prompt_ids = try tok.encode(gpa, wrapped);
+    defer gpa.free(prompt_ids);
+
+    const max_new: u32 = 2;
+    const max_seq = prompt_ids.len + max_new;
+    if (max_seq > arch.max_position_embeddings) return error.SkipZigTest;
+
+    var cpu_ids: std.ArrayList(u32) = .empty;
+    defer cpu_ids.deinit(gpa);
+    var half_ids: std.ArrayList(u32) = .empty;
+    defer half_ids.deinit(gpa);
+
+    var cpu_sess = try Session.init(gpa, &art, arch, max_seq);
+    defer cpu_sess.deinit();
+    var rng_cpu = std.Random.DefaultPrng.init(0);
+    _ = try cpu_sess.generate(io, prompt_ids, &cpu_ids, .{
+        .max_new_tokens = max_new,
+        .sample = .{ .temperature = 0 },
+        .use_kv_cache = true,
+    }, &rng_cpu);
+
+    apple_schedule.force_baseline_path = false;
+    apple_schedule.force_half_path = true;
+    var half_sess = try Session.initWithBackend(gpa, &art, arch, max_seq, .apple);
+    defer half_sess.deinit();
+    var rng_half = std.Random.DefaultPrng.init(0);
+    _ = try half_sess.generate(io, prompt_ids, &half_ids, .{
+        .max_new_tokens = max_new,
+        .sample = .{ .temperature = 0 },
+        .use_kv_cache = true,
+    }, &rng_half);
+
+    try std.testing.expectEqualSlices(u32, cpu_ids.items, half_ids.items);
 }

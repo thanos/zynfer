@@ -74,7 +74,9 @@ zig build -Dhip=off
 
 `--weights` may be a file, a directory (shards / `model.safetensors.index.json`),
 or multiple shard paths. The converter copies raw Safetensors bytes
-(including BF16) without NumPy.
+(including BF16 and F16) without NumPy and reports a dtype summary on
+stderr. Stage M4’s Metal half path can upload those half payloads to the
+GPU without re-promoting through host f32.
 
 ### Tensor ids
 

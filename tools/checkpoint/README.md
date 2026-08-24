@@ -76,17 +76,20 @@ python3 tools/checkpoint/safetensors_to_zynfer.py \
   --out models/qwen3-0.6b.zynfer
 ```
 
+Qwen weights are **BF16**. The converter copies raw Safetensors bytes (no
+NumPy / `ml_dtypes`) and prints a dtype summary, e.g.
+`dtypes: bf16=311`. Stage M4 Metal half path uploads those bytes to the
+GPU without an f32 promote on the weight upload (CPU oracle still loads
+f32 for differential tests).
+
 Successful stderr looks like:
 
 ```text
 loading 1 safetensors file(s)
-wrote models/qwen3-0.6b.zynfer (… bytes, 311 tensors, ids 1..311)
+wrote models/qwen3-0.6b.zynfer (… bytes, 311 tensors, ids 1..311, dtypes: bf16=311)
 ```
 
 Tensor **ids are 1..N in sorted name order** (stable for `Artifact.findById`).
-
-Qwen weights are **BF16**. The converter copies raw Safetensors bytes (no
-NumPy / `ml_dtypes`).
 
 ### 3. Validate with Zig
 

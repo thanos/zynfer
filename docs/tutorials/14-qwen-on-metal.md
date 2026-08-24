@@ -64,7 +64,7 @@ zig build test -Dhip=off          # includes mini Metal vs CPU test
 | M1 | Prefill vs decode metrics on Qwen | **done** — `qwen-bench` |
 | M2 | Profile one decode token + roofline | **done** — `qwen-profile` |
 | M3 | 28-layer one-CB schedule + fusion ledger | **done** — `qwen_schedule` |
-| M4 | fp16/bf16 Metal path | next |
+| M4 | fp16/bf16 Metal path | **done** — `ZYNFER_QWEN_METAL=bf16` |
 
 M0 gate items still open (full-model parity, Metal TTFT ledger, …) —
 see [`docs/stages/M0-metal-qwen-forward.md`](../stages/M0-metal-qwen-forward.md).

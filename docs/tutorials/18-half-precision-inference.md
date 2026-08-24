@@ -47,16 +47,17 @@ top-logit gaps before loosening bounds.
 
 ## Roofline
 
-If decode was purely bandwidth-limited and half precision halved bytes moved,
-ideal speedup is **2×**. Real speedup is lower (activations still f32,
-softmax scores f32, command encoding unchanged). Compare:
+If decode were purely bandwidth-limited, ideal speedup would be **2×**.
+On the current naive Metal schedule, **prefill** improves (~1.5× measured)
+while **decode** stays roughly flat — still encode/compute bound
+(~590 encodes/tok). Ideal tok/s doubles; measured fraction drops until
+kernels catch the bandwidth. See `bench/results/stageM4-dev-laptop.md`.
 
 ```bash
-ZYNFER_QWEN_METAL=baseline ...   # M0 — do not use for roofline
-ZYNFER_QWEN_METAL=bf16 ...       # M4
+./zig-out/bin/zynfer qwen-bench models/qwen3-0.6b.zynfer --max-tokens 2
+ZYNFER_QWEN_METAL=bf16 ./zig-out/bin/zynfer qwen-bench \
+  models/qwen3-0.6b.zynfer --max-tokens 2
 ```
-
-See `bench/results/stageM4-dev-laptop.md` for measured fractions.
 
 ## Next
 

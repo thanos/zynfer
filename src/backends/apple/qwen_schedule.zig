@@ -10,6 +10,7 @@ const std = @import("std");
 const Tensor = @import("../../runtime/tensor.zig").Tensor;
 const qwen3 = @import("../../model/qwen3.zig");
 const qwen_weights = @import("../../model/qwen_weights.zig");
+const artifact = @import("../../model/artifact.zig");
 const gpu_mod = @import("gpu.zig");
 const apple_ops = @import("ops.zig");
 const bf16 = @import("../../runtime/bf16.zig");
@@ -70,6 +71,18 @@ fn copyTensorToBufBf16(buf: Buffer, t: Tensor) !void {
     bf16.encodeFromF32(buf.bytes[0 .. src.len * 2], src);
 }
 
+/// Prefer native f16/bf16 artifact bytes; fall back to narrowing host f32.
+fn copyWeightHalf(
+    buf: Buffer,
+    art: *const artifact.Artifact,
+    name: []const u8,
+    transpose: bool,
+    host: Tensor,
+) !void {
+    if (try qwen_weights.copyArtifactToBf16(buf.bytes, art, name, transpose)) return;
+    try copyTensorToBufBf16(buf, host);
+}
+
 const LayerDeviceWeights = struct {
     input_ln: Buffer,
     q_norm: Buffer,
@@ -119,19 +132,26 @@ const LayerDeviceWeights = struct {
         self.* = undefined;
     }
 
-    fn uploadFrom(self: *LayerDeviceWeights, w: qwen_weights.LayerWeights, half: bool) !void {
+    fn uploadFrom(
+        self: *LayerDeviceWeights,
+        w: qwen_weights.LayerWeights,
+        half: bool,
+        art: *const artifact.Artifact,
+        layer: u32,
+    ) !void {
+        var name_buf: [96]u8 = undefined;
         if (half) {
-            try copyTensorToBufBf16(self.input_ln, w.input_ln);
-            try copyTensorToBufBf16(self.q_norm, w.q_norm);
-            try copyTensorToBufBf16(self.k_norm, w.k_norm);
-            try copyTensorToBufBf16(self.wq, w.wq);
-            try copyTensorToBufBf16(self.wk, w.wk);
-            try copyTensorToBufBf16(self.wv, w.wv);
-            try copyTensorToBufBf16(self.wo, w.wo);
-            try copyTensorToBufBf16(self.post_attn_ln, w.post_attn_ln);
-            try copyTensorToBufBf16(self.wg, w.wg);
-            try copyTensorToBufBf16(self.wu, w.wu);
-            try copyTensorToBufBf16(self.wd, w.wd);
+            try copyWeightHalf(self.input_ln, art, qwen3.layerInputNormName(layer, &name_buf), false, w.input_ln);
+            try copyWeightHalf(self.q_norm, art, qwen3.layerQNormName(layer, &name_buf), false, w.q_norm);
+            try copyWeightHalf(self.k_norm, art, qwen3.layerKNormName(layer, &name_buf), false, w.k_norm);
+            try copyWeightHalf(self.wq, art, qwen3.layerQProjName(layer, &name_buf), true, w.wq);
+            try copyWeightHalf(self.wk, art, qwen3.layerKProjName(layer, &name_buf), true, w.wk);
+            try copyWeightHalf(self.wv, art, qwen3.layerVProjName(layer, &name_buf), true, w.wv);
+            try copyWeightHalf(self.wo, art, qwen3.layerOProjName(layer, &name_buf), true, w.wo);
+            try copyWeightHalf(self.post_attn_ln, art, qwen3.layerPostAttnNormName(layer, &name_buf), false, w.post_attn_ln);
+            try copyWeightHalf(self.wg, art, qwen3.layerGateProjName(layer, &name_buf), true, w.wg);
+            try copyWeightHalf(self.wu, art, qwen3.layerUpProjName(layer, &name_buf), true, w.wu);
+            try copyWeightHalf(self.wd, art, qwen3.layerDownProjName(layer, &name_buf), true, w.wd);
             return;
         }
         try copyTensorToBuf(self.input_ln, w.input_ln);
@@ -206,7 +226,14 @@ const Scratch = struct {
     lm_head: Buffer,
     lm_head_tied: bool,
 
-    fn init(gpu: *Gpu, arch: qwen3.Arch, max_seq: usize, weights: *const qwen_weights.Weights, half: bool) !Scratch {
+    fn init(
+        gpu: *Gpu,
+        arch: qwen3.Arch,
+        max_seq: usize,
+        weights: *const qwen_weights.Weights,
+        half: bool,
+        art: *const artifact.Artifact,
+    ) !Scratch {
         const h: usize = @intCast(arch.hidden_size);
         const qd: usize = @intCast(arch.qDim());
         const kvd: usize = @intCast(arch.kvDim());
@@ -247,8 +274,8 @@ const Scratch = struct {
         };
         errdefer s.deinitPartialBeforeLmHead();
         if (half) {
-            try copyTensorToBufBf16(s.embed, weights.embed);
-            try copyTensorToBufBf16(s.final_norm, weights.final_norm);
+            try copyWeightHalf(s.embed, art, qwen3.embed_tokens_name, false, weights.embed);
+            try copyWeightHalf(s.final_norm, art, qwen3.final_norm_name, false, weights.final_norm);
         } else {
             try copyTensorToBuf(s.embed, weights.embed);
             try copyTensorToBuf(s.final_norm, weights.final_norm);
@@ -258,7 +285,7 @@ const Scratch = struct {
         } else {
             s.lm_head = try gpu.allocShared(weightBytes(vocab * h, half));
             if (half) {
-                try copyTensorToBufBf16(s.lm_head, weights.lm_head);
+                try copyWeightHalf(s.lm_head, art, qwen3.lm_head_name, true, weights.lm_head);
             } else {
                 try copyTensorToBuf(s.lm_head, weights.lm_head);
             }
@@ -316,6 +343,7 @@ pub const MetalStack = struct {
         max_seq: usize,
         weights: *const qwen_weights.Weights,
         half: bool,
+        art: *const artifact.Artifact,
     ) !MetalStack {
         if (max_seq == 0 or max_seq > arch.max_position_embeddings) return error.InvalidShape;
         if (max_seq > apple_ops.max_attention_kv) return error.Unsupported;
@@ -331,7 +359,7 @@ pub const MetalStack = struct {
         };
         while (i < n_layers) : (i += 1) {
             layers_w[i] = try LayerDeviceWeights.init(gpu, arch, half);
-            try layers_w[i].uploadFrom(weights.layers[i], half);
+            try layers_w[i].uploadFrom(weights.layers[i], half, art, @intCast(i));
         }
 
         const layers_kv = try allocator.alloc(LayerKv, n_layers);
@@ -346,7 +374,7 @@ pub const MetalStack = struct {
             layers_kv[j] = try LayerKv.init(gpu, arch, max_seq, half);
         }
 
-        const scratch = try Scratch.init(gpu, arch, max_seq, weights, half);
+        const scratch = try Scratch.init(gpu, arch, max_seq, weights, half, art);
         return .{
             .gpu = gpu,
             .arch = arch,

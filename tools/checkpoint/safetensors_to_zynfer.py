@@ -235,6 +235,15 @@ def build_artifact(meta: bytes, tensors: list[tuple[str, int, list[int], bytes]]
     return bytes(body)
 
 
+def dtype_summary(tensors: list[tuple[str, int, list[int], bytes]]) -> str:
+    counts: dict[int, int] = {}
+    for _name, tag, _shape, _raw in tensors:
+        counts[tag] = counts.get(tag, 0) + 1
+    labels = {0: "f32", 1: "f16", 2: "bf16"}
+    parts = [f"{labels.get(k, k)}={v}" for k, v in sorted(counts.items())]
+    return ", ".join(parts)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", type=Path, required=True, help="HF config.json")
@@ -255,7 +264,7 @@ def main() -> None:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_bytes(blob)
     print(
-        f"wrote {args.out} ({len(blob)} bytes, {len(tensors)} tensors, ids 1..{len(tensors)})",
+        f"wrote {args.out} ({len(blob)} bytes, {len(tensors)} tensors, ids 1..{len(tensors)}, dtypes: {dtype_summary(tensors)})",
         file=sys.stderr,
     )
 

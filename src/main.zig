@@ -739,7 +739,7 @@ fn printStageM4(writer: *std.Io.Writer) !void {
     try writer.print("  storage:          bf16 resident weights + bf16 KV on GPU\n", .{});
     try writer.print("  compute:          f32 activations; f32 accum in GEMM/attention/softmax\n", .{});
     try writer.print("  artifact:         .zynfer dtype tags 1=f16 2=bf16 (converter preserves bytes)\n", .{});
-    try writer.print("  load:             CPU oracle still f32; GPU upload narrows to bf16\n", .{});
+    try writer.print("  load:             CPU oracle f32; GPU half path copies artifact f16/bf16 bytes\n", .{});
     try writer.print("  tolerance:        5e-3 atol vs CPU logits (dtype-justified)\n", .{});
     try writer.print("  bytes/token:      estimateDecodeBytesPerTokenHalf ≈ ½ f32 estimate\n\n", .{});
     try writer.print("Not in Stage M4\n", .{});
