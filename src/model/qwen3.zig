@@ -109,6 +109,11 @@ pub const Arch = struct {
         return weight_bytes + kv_bytes;
     }
 
+    /// M4: same model traffic estimate with bf16 weights + bf16 KV (activations still f32 on GPU).
+    pub fn estimateDecodeBytesPerTokenHalf(self: Arch, kv_len: usize) u64 {
+        return self.estimateDecodeBytesPerToken(kv_len) / 2;
+    }
+
     /// M0 Metal path: measured ~17 encode+wait launches per layer (was rough 18).
     pub fn estimateMetalOpLaunchesPerDecodeToken(self: Arch) u32 {
         const ops_per_layer: u32 = 17;

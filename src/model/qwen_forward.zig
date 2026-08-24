@@ -91,7 +91,14 @@ pub const Session = struct {
             if (!apple_schedule.useBaselinePath()) {
                 const ms = try allocator.create(apple_schedule.MetalStack);
                 errdefer allocator.destroy(ms);
-                ms.* = try apple_schedule.MetalStack.init(allocator, g, arch, max_seq, &weights);
+                ms.* = try apple_schedule.MetalStack.init(
+                    allocator,
+                    g,
+                    arch,
+                    max_seq,
+                    &weights,
+                    apple_schedule.useHalfPath(),
+                );
                 metal_stack = ms;
             }
         }
@@ -1034,4 +1041,50 @@ test "Stage M3: batched Metal mini matches CPU logits and collapses waits" {
     try std.testing.expectEqualStrings(apple_schedule.path_batched, apple_schedule.last_qwen_path);
     try std.testing.expectEqual(@as(u32, 2), apple_schedule.last_qwen_waits);
     try std.testing.expect(apple_schedule.last_qwen_encodes > 10);
+}
+
+test "Stage M4: batched Metal bf16 matches CPU logits within half tolerance" {
+    if (apple_gpu.skipAppleGpuTests()) return error.SkipZigTest;
+    defer apple_schedule.force_baseline_path = null;
+    defer apple_schedule.force_half_path = null;
+
+    const gpa = std.testing.allocator;
+    const bytes = try buildMiniArtifact(gpa);
+    defer gpa.free(bytes);
+    var art = try artifact.Artifact.loadOwned(gpa, try gpa.dupe(u8, bytes));
+    defer art.deinit();
+
+    const arch = qwen3.stage11_mini;
+    const token_ids = [_]u32{ 2, 3 };
+
+    apple_schedule.force_baseline_path = false;
+    apple_schedule.force_half_path = true;
+    var half = try Session.initWithBackend(gpa, &art, arch, 8, .apple);
+    defer half.deinit();
+    try std.testing.expect(half.metal_stack != null);
+    try std.testing.expect(half.metal_stack.?.half_mode);
+
+    apple_schedule.force_half_path = false;
+    var f32_stack = try Session.initWithBackend(gpa, &art, arch, 8, .apple);
+    defer f32_stack.deinit();
+
+    var cpu_sess = try Session.init(gpa, &art, arch, 8);
+    defer cpu_sess.deinit();
+
+    const cpu_logits = try gpa.alloc(f32, arch.vocab_size);
+    defer gpa.free(cpu_logits);
+    const half_logits = try gpa.alloc(f32, arch.vocab_size);
+    defer gpa.free(half_logits);
+    const f32_logits = try gpa.alloc(f32, arch.vocab_size);
+    defer gpa.free(f32_logits);
+
+    try cpu_sess.prefillLastLogits(&token_ids, cpu_logits);
+    try half.prefillLastLogits(&token_ids, half_logits);
+    try std.testing.expectEqualStrings(apple_schedule.path_bf16, apple_schedule.last_qwen_path);
+    try f32_stack.prefillLastLogits(&token_ids, f32_logits);
+
+    // BF16 weights+KV: ~3–4 decimal digits; 5e-3 atol is dtype-justified vs f32 CPU oracle.
+    try compare.expectClose(cpu_logits, half_logits, 5e-3, 5e-3);
+    try compare.expectClose(cpu_logits, f32_logits, 3e-3, 3e-3);
+    try std.testing.expectEqual(@as(u32, 2), apple_schedule.last_qwen_waits);
 }

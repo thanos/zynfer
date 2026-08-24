@@ -157,6 +157,14 @@ pub fn build(b: *std.Build) void {
     const stageM3_step = b.step("stageM3", "Qwen schedule/fusion Stage M3 ledger");
     stageM3_step.dependOn(&stageM3_cmd.step);
 
+    const stageM4_cmd = b.addRunArtifact(exe);
+    stageM4_cmd.step.dependOn(b.getInstallStep());
+    stageM4_cmd.addArg("stageM4");
+    stageM4_cmd.expectStdOutMatch("Stage M4");
+    stageM4_cmd.expectExitCode(0);
+    const stageM4_step = b.step("stageM4", "bf16/fp16 Metal Stage M4 ledger");
+    stageM4_step.dependOn(&stageM4_cmd.step);
+
     const qwen_bench_cmd = b.addRunArtifact(exe);
     qwen_bench_cmd.step.dependOn(b.getInstallStep());
     qwen_bench_cmd.addArg("qwen-bench");
@@ -400,6 +408,12 @@ pub fn build(b: *std.Build) void {
     stageM3_ok.expectStdOutMatch("Stage M3");
     stageM3_ok.expectExitCode(0);
     integration_step.dependOn(&stageM3_ok.step);
+
+    const stageM4_ok = b.addRunArtifact(exe);
+    stageM4_ok.addArg("stageM4");
+    stageM4_ok.expectStdOutMatch("Stage M4");
+    stageM4_ok.expectExitCode(0);
+    integration_step.dependOn(&stageM4_ok.step);
 
     const qwen_bench_ok = b.addRunArtifact(exe);
     qwen_bench_ok.addArg("qwen-bench");

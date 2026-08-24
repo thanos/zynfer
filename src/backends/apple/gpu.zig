@@ -214,14 +214,13 @@ pub const Gpu = struct {
             .arch = .{ .apple_m = self.features },
             .unified_memory = self.features.unified_memory,
             .fp32 = true,
-            .fp16 = false,
-            .bf16 = false,
+            .fp16 = true,
+            .bf16 = true,
             .simdgroup_matrix = self.features.simdgroup_matrix_available,
             .accelerate = self.features.accelerate_available,
             .core_ml = cm_p.path_retained,
             .sme = sme_p.path_retained,
         };
-        caps.addDisabled("fp16/bf16 Metal kernels not implemented");
         caps.addDisabled(sme_p.detail);
         caps.addDisabled(cm_p.detail);
         caps.addDisabled("Core ML/ANE inference path not retained (Stage 7: no measured end-to-end subgraph)");

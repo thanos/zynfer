@@ -60,7 +60,7 @@ int8, ICB, extra fusions, Core ML/ANE — reopened at Qwen scale in M3–M7.
 | **M1** | Prefill vs decode on Qwen | 14 | **done** — [`docs/stages/M1-prefill-vs-decode-qwen.md`](stages/M1-prefill-vs-decode-qwen.md) |
 | **M2** | Profile one decode token | 15 | **done** — [`docs/stages/M2-profile-one-decode-token.md`](stages/M2-profile-one-decode-token.md) |
 | **M3** | Qwen-scale scheduling + fusion | 16 (Apple) | **done** — [`docs/stages/M3-qwen-schedule-fusion.md`](stages/M3-qwen-schedule-fusion.md) |
-| **M4** | fp16/bf16 Metal path | 8 reject reopen | not started |
+| **M4** | fp16/bf16 Metal path | 8 reject reopen | **done** |
 | **M5** | Weight quantization (Apple) | 18 (Apple) | not started |
 | **M6** | Static decode plan (Apple) | 20 (Apple) | not started |
 | **M7** | ANE / Core ML gated experiment | 7 reject reopen | not started |

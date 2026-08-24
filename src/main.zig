@@ -19,6 +19,7 @@ const usage =
     \\  zynfer stageM1      Prefill/decode split Stage M1 ledger
     \\  zynfer stageM2      Profile one decode token Stage M2 ledger
     \\  zynfer stageM3      Qwen-scale schedule + fusion Stage M3 ledger
+    \\  zynfer stageM4      bf16/fp16 Metal weights+KV Stage M4 ledger
     \\  zynfer inspect PATH Validate and print a .zynfer artifact
     \\  zynfer artifact-compile [--out PATH] [--mini]  Write fixture .zynfer
     \\  zynfer forward-golden ARTIFACT [--tokens IDS] [--golden PATH] [--dump DIR] [--backend cpu|apple]
@@ -281,6 +282,8 @@ pub fn main(init: std.process.Init) !void {
         try printStageM2(writer);
     } else if (std.mem.eql(u8, command, "stageM3") or std.mem.eql(u8, command, "stagem3")) {
         try printStageM3(writer);
+    } else if (std.mem.eql(u8, command, "stageM4") or std.mem.eql(u8, command, "stagem4")) {
+        try printStageM4(writer);
     } else if (std.mem.eql(u8, command, "inspect")) {
         if (n_pos < 1) {
             std.debug.print("usage: zynfer inspect PATH.zynfer\n", .{});
@@ -537,7 +540,7 @@ fn printStage8(writer: *std.Io.Writer) !void {
     try writer.print("  peak_rss_bytes:           block-bench JSON + docs/benchmarks.md matrix Peak memory\n", .{});
     try writer.print("  energy_per_token:         null (not measured)\n", .{});
     try writer.print("  stress tests:             Session init×3 + full max_seq; batch abort; dual-Gpu concurrency\n", .{});
-    try writer.print("  fp16/bf16 Metal:          Unsupported stubs (matmulF16/matvecF16)\n\n", .{});
+    try writer.print("  fp16/bf16 Metal:          RETAINED (M4) — bf16 weights+KV, f32 activations/softmax\n\n", .{});
 
     try writer.print("Rejected / deferred with reasons\n", .{});
     try writer.print("  ICB / encode-once replay: REJECT — KV/q_len change every decode step;\n", .{});
@@ -726,6 +729,23 @@ fn printStageM3(writer: *std.Io.Writer) !void {
     try writer.print("  fp16/bf16 weights+KV — M4\n", .{});
     try writer.print("  int8 session weights — M5\n\n", .{});
     try writer.print("See docs/stages/M3-qwen-schedule-fusion.md\n", .{});
+}
+
+fn printStageM4(writer: *std.Io.Writer) !void {
+    try writer.print("zynfer Stage M4 — bf16/fp16 Metal weights + KV\n", .{});
+    try writer.print("============================================\n\n", .{});
+    try writer.print("Done\n", .{});
+    try writer.print("  path:             batched_resident_kv_bf16 (ZYNFER_QWEN_METAL=bf16|half|fp16)\n", .{});
+    try writer.print("  storage:          bf16 resident weights + bf16 KV on GPU\n", .{});
+    try writer.print("  compute:          f32 activations; f32 accum in GEMM/attention/softmax\n", .{});
+    try writer.print("  artifact:         .zynfer dtype tags 1=f16 2=bf16 (converter preserves bytes)\n", .{});
+    try writer.print("  load:             CPU oracle still f32; GPU upload narrows to bf16\n", .{});
+    try writer.print("  tolerance:        5e-3 atol vs CPU logits (dtype-justified)\n", .{});
+    try writer.print("  bytes/token:      estimateDecodeBytesPerTokenHalf ≈ ½ f32 estimate\n\n", .{});
+    try writer.print("Not in Stage M4\n", .{});
+    try writer.print("  int8 session weights — M5\n", .{});
+    try writer.print("  zero-allocation static decode — M6\n\n", .{});
+    try writer.print("See docs/stages/M4-half-precision-metal.md\n", .{});
 }
 
 const StreamCtx = struct {
@@ -1398,7 +1418,10 @@ fn runQwenBench(
         };
 
         const kv_len = prompt_ids.len + @max(stats.generated_tokens, 1);
-        const bytes_tok = arch.estimateDecodeBytesPerToken(kv_len);
+        const bytes_tok = if (kind == .apple and zynfer.apple.qwen_schedule.useHalfPath())
+            arch.estimateDecodeBytesPerTokenHalf(kv_len)
+        else
+            arch.estimateDecodeBytesPerToken(kv_len);
         const denom: f64 = @floatFromInt(@max(stats.decode_steps, 1));
         const enc_tok: f64 = if (stats.decode_steps > 0)
             @as(f64, @floatFromInt(stats.metal_encodes_decode)) / denom
@@ -1714,7 +1737,10 @@ fn runQwenProfile(
         try writer.print("bandwidth_stream_triad: n/a (CPU backend)\n", .{});
     }
 
-    const bytes_tok = arch.estimateDecodeBytesPerToken(buckets.kv_len);
+    const bytes_tok = if (kind == .apple and zynfer.apple.qwen_schedule.useHalfPath())
+        arch.estimateDecodeBytesPerTokenHalf(buckets.kv_len)
+    else
+        arch.estimateDecodeBytesPerToken(buckets.kv_len);
     const roof = zynfer.decode_profile.roofline(bytes_tok, bw_gbps, buckets.wall_ns);
     try writer.print("bytes_per_tok_est={d}\n", .{bytes_tok});
     if (bw_gbps > 0) {

@@ -18,6 +18,17 @@ pub fn decodeIntoF32(dst: []f32, src: []const u8) void {
     }
 }
 
+/// Narrow f32 values to little-endian BF16 bytes (round-to-nearest even).
+pub fn encodeFromF32(dst: []u8, src: []const f32) void {
+    std.debug.assert(dst.len >= src.len * 2);
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) {
+        const bits: u32 = @bitCast(src[i]);
+        const w: u16 = @truncate(bits >> 16);
+        std.mem.writeInt(u16, dst[i * 2 ..][0..2], w, .little);
+    }
+}
+
 test "bf16 decode round-trip known values" {
     var buf: [2]u8 = undefined;
     std.mem.writeInt(u16, &buf, 0x3f80, .little); // 1.0 in bf16

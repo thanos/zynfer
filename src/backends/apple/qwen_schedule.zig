@@ -12,12 +12,14 @@ const qwen3 = @import("../../model/qwen3.zig");
 const qwen_weights = @import("../../model/qwen_weights.zig");
 const gpu_mod = @import("gpu.zig");
 const apple_ops = @import("ops.zig");
+const bf16 = @import("../../runtime/bf16.zig");
 
 const Gpu = gpu_mod.Gpu;
 const Buffer = gpu_mod.Buffer;
 
 pub const path_baseline = "baseline_per_op";
 pub const path_batched = "batched_resident_kv_fused";
+pub const path_bf16 = "batched_resident_kv_bf16";
 
 pub var last_qwen_path: []const u8 = "unset";
 pub var last_qwen_encodes: u32 = 0;
@@ -25,6 +27,8 @@ pub var last_qwen_waits: u32 = 0;
 
 /// Test override. `null` honors `ZYNFER_QWEN_METAL`. `true` → baseline.
 pub var force_baseline_path: ?bool = null;
+/// Test override for M4 half path.
+pub var force_half_path: ?bool = null;
 
 pub fn useBaselinePath() bool {
     if (force_baseline_path) |forced| return forced;
@@ -34,13 +38,36 @@ pub fn useBaselinePath() bool {
     return std.mem.eql(u8, v, "baseline") or std.mem.eql(u8, v, "per-op");
 }
 
+/// Stage M4: bf16 resident weights + bf16 KV (`ZYNFER_QWEN_METAL=bf16|half|fp16`).
+pub fn useHalfPath() bool {
+    if (force_half_path) |forced| return forced;
+    if (useBaselinePath()) return false;
+    if (comptime !gpu_mod.have_apple) return false;
+    const raw = std.c.getenv("ZYNFER_QWEN_METAL") orelse return false;
+    const v = std.mem.span(raw);
+    return std.mem.eql(u8, v, "bf16") or std.mem.eql(u8, v, "half") or std.mem.eql(u8, v, "fp16");
+}
+
 fn f32Bytes(n: usize) usize {
     return n * @sizeOf(f32);
+}
+
+fn bf16Bytes(n: usize) usize {
+    return n * 2;
+}
+
+fn weightBytes(n: usize, half: bool) usize {
+    return if (half) bf16Bytes(n) else f32Bytes(n);
 }
 
 fn copyTensorToBuf(buf: Buffer, t: Tensor) !void {
     const src = try t.f32s();
     @memcpy(buf.f32s()[0..src.len], src);
+}
+
+fn copyTensorToBufBf16(buf: Buffer, t: Tensor) !void {
+    const src = try t.f32s();
+    bf16.encodeFromF32(buf.bytes[0 .. src.len * 2], src);
 }
 
 const LayerDeviceWeights = struct {
@@ -56,24 +83,24 @@ const LayerDeviceWeights = struct {
     wu: Buffer,
     wd: Buffer,
 
-    fn init(gpu: *Gpu, arch: qwen3.Arch) !LayerDeviceWeights {
+    fn init(gpu: *Gpu, arch: qwen3.Arch, half: bool) !LayerDeviceWeights {
         const h: usize = @intCast(arch.hidden_size);
         const qd: usize = @intCast(arch.qDim());
         const kvd: usize = @intCast(arch.kvDim());
         const inter: usize = @intCast(arch.intermediate_size);
         const d: usize = @intCast(arch.head_dim);
         return .{
-            .input_ln = try gpu.allocShared(f32Bytes(h)),
-            .q_norm = try gpu.allocShared(f32Bytes(d)),
-            .k_norm = try gpu.allocShared(f32Bytes(d)),
-            .wq = try gpu.allocShared(f32Bytes(h * qd)),
-            .wk = try gpu.allocShared(f32Bytes(h * kvd)),
-            .wv = try gpu.allocShared(f32Bytes(h * kvd)),
-            .wo = try gpu.allocShared(f32Bytes(qd * h)),
-            .post_attn_ln = try gpu.allocShared(f32Bytes(h)),
-            .wg = try gpu.allocShared(f32Bytes(h * inter)),
-            .wu = try gpu.allocShared(f32Bytes(h * inter)),
-            .wd = try gpu.allocShared(f32Bytes(inter * h)),
+            .input_ln = try gpu.allocShared(weightBytes(h, half)),
+            .q_norm = try gpu.allocShared(weightBytes(d, half)),
+            .k_norm = try gpu.allocShared(weightBytes(d, half)),
+            .wq = try gpu.allocShared(weightBytes(h * qd, half)),
+            .wk = try gpu.allocShared(weightBytes(h * kvd, half)),
+            .wv = try gpu.allocShared(weightBytes(h * kvd, half)),
+            .wo = try gpu.allocShared(weightBytes(qd * h, half)),
+            .post_attn_ln = try gpu.allocShared(weightBytes(h, half)),
+            .wg = try gpu.allocShared(weightBytes(h * inter, half)),
+            .wu = try gpu.allocShared(weightBytes(h * inter, half)),
+            .wd = try gpu.allocShared(weightBytes(inter * h, half)),
         };
     }
 
@@ -92,7 +119,21 @@ const LayerDeviceWeights = struct {
         self.* = undefined;
     }
 
-    fn uploadFrom(self: *LayerDeviceWeights, w: qwen_weights.LayerWeights) !void {
+    fn uploadFrom(self: *LayerDeviceWeights, w: qwen_weights.LayerWeights, half: bool) !void {
+        if (half) {
+            try copyTensorToBufBf16(self.input_ln, w.input_ln);
+            try copyTensorToBufBf16(self.q_norm, w.q_norm);
+            try copyTensorToBufBf16(self.k_norm, w.k_norm);
+            try copyTensorToBufBf16(self.wq, w.wq);
+            try copyTensorToBufBf16(self.wk, w.wk);
+            try copyTensorToBufBf16(self.wv, w.wv);
+            try copyTensorToBufBf16(self.wo, w.wo);
+            try copyTensorToBufBf16(self.post_attn_ln, w.post_attn_ln);
+            try copyTensorToBufBf16(self.wg, w.wg);
+            try copyTensorToBufBf16(self.wu, w.wu);
+            try copyTensorToBufBf16(self.wd, w.wd);
+            return;
+        }
         try copyTensorToBuf(self.input_ln, w.input_ln);
         try copyTensorToBuf(self.q_norm, w.q_norm);
         try copyTensorToBuf(self.k_norm, w.k_norm);
@@ -113,12 +154,13 @@ const LayerKv = struct {
     max_seq: usize,
     used: usize = 0,
 
-    fn init(gpu: *Gpu, arch: qwen3.Arch, max_seq: usize) !LayerKv {
+    fn init(gpu: *Gpu, arch: qwen3.Arch, max_seq: usize, half: bool) !LayerKv {
         const n_kv: usize = @intCast(arch.num_key_value_heads);
         const d: usize = @intCast(arch.head_dim);
+        const kb = weightBytes(n_kv * max_seq * d, half);
         return .{
-            .k_cache = try gpu.allocShared(f32Bytes(n_kv * max_seq * d)),
-            .v_cache = try gpu.allocShared(f32Bytes(n_kv * max_seq * d)),
+            .k_cache = try gpu.allocShared(kb),
+            .v_cache = try gpu.allocShared(kb),
             .max_seq = max_seq,
         };
     }
@@ -164,7 +206,7 @@ const Scratch = struct {
     lm_head: Buffer,
     lm_head_tied: bool,
 
-    fn init(gpu: *Gpu, arch: qwen3.Arch, max_seq: usize, weights: *const qwen_weights.Weights) !Scratch {
+    fn init(gpu: *Gpu, arch: qwen3.Arch, max_seq: usize, weights: *const qwen_weights.Weights, half: bool) !Scratch {
         const h: usize = @intCast(arch.hidden_size);
         const qd: usize = @intCast(arch.qDim());
         const kvd: usize = @intCast(arch.kvDim());
@@ -198,19 +240,28 @@ const Scratch = struct {
             .normed = try gpu.allocShared(f32Bytes(h)),
             .logits = try gpu.allocShared(f32Bytes(vocab)),
             .scores = try gpu.allocShared(f32Bytes(scores_n)),
-            .embed = try gpu.allocShared(f32Bytes(vocab * h)),
-            .final_norm = try gpu.allocShared(f32Bytes(h)),
+            .embed = try gpu.allocShared(weightBytes(vocab * h, half)),
+            .final_norm = try gpu.allocShared(weightBytes(h, half)),
             .lm_head = undefined,
             .lm_head_tied = weights.lm_head_tied,
         };
         errdefer s.deinitPartialBeforeLmHead();
-        try copyTensorToBuf(s.embed, weights.embed);
-        try copyTensorToBuf(s.final_norm, weights.final_norm);
+        if (half) {
+            try copyTensorToBufBf16(s.embed, weights.embed);
+            try copyTensorToBufBf16(s.final_norm, weights.final_norm);
+        } else {
+            try copyTensorToBuf(s.embed, weights.embed);
+            try copyTensorToBuf(s.final_norm, weights.final_norm);
+        }
         if (weights.lm_head_tied) {
             s.lm_head = s.embed;
         } else {
-            s.lm_head = try gpu.allocShared(f32Bytes(vocab * h));
-            try copyTensorToBuf(s.lm_head, weights.lm_head);
+            s.lm_head = try gpu.allocShared(weightBytes(vocab * h, half));
+            if (half) {
+                try copyTensorToBufBf16(s.lm_head, weights.lm_head);
+            } else {
+                try copyTensorToBuf(s.lm_head, weights.lm_head);
+            }
         }
         return s;
     }
@@ -252,6 +303,7 @@ pub const MetalStack = struct {
     gpu: *Gpu,
     arch: qwen3.Arch,
     max_seq: usize,
+    half_mode: bool,
     layers_w: []LayerDeviceWeights,
     layers_kv: []LayerKv,
     scratch: Scratch,
@@ -263,6 +315,7 @@ pub const MetalStack = struct {
         arch: qwen3.Arch,
         max_seq: usize,
         weights: *const qwen_weights.Weights,
+        half: bool,
     ) !MetalStack {
         if (max_seq == 0 or max_seq > arch.max_position_embeddings) return error.InvalidShape;
         if (max_seq > apple_ops.max_attention_kv) return error.Unsupported;
@@ -277,8 +330,8 @@ pub const MetalStack = struct {
             layers_w[i].deinit();
         };
         while (i < n_layers) : (i += 1) {
-            layers_w[i] = try LayerDeviceWeights.init(gpu, arch);
-            try layers_w[i].uploadFrom(weights.layers[i]);
+            layers_w[i] = try LayerDeviceWeights.init(gpu, arch, half);
+            try layers_w[i].uploadFrom(weights.layers[i], half);
         }
 
         const layers_kv = try allocator.alloc(LayerKv, n_layers);
@@ -290,14 +343,15 @@ pub const MetalStack = struct {
             layers_kv[j].deinit();
         };
         while (j < n_layers) : (j += 1) {
-            layers_kv[j] = try LayerKv.init(gpu, arch, max_seq);
+            layers_kv[j] = try LayerKv.init(gpu, arch, max_seq, half);
         }
 
-        const scratch = try Scratch.init(gpu, arch, max_seq, weights);
+        const scratch = try Scratch.init(gpu, arch, max_seq, weights, half);
         return .{
             .gpu = gpu,
             .arch = arch,
             .max_seq = max_seq,
+            .half_mode = half,
             .layers_w = layers_w,
             .layers_kv = layers_kv,
             .scratch = scratch,
@@ -355,6 +409,7 @@ pub const MetalStack = struct {
                 out_buf,
                 t,
                 pos0,
+                self.half_mode,
             );
             const tmp = in_buf;
             in_buf = out_buf;
@@ -376,7 +431,7 @@ pub const MetalStack = struct {
 
         try self.gpu.batchCommit();
 
-        last_qwen_path = path_batched;
+        last_qwen_path = if (self.half_mode) path_bf16 else path_batched;
         last_qwen_encodes = self.gpu.last_batch_encodes;
         last_qwen_waits = 1;
 
@@ -390,8 +445,13 @@ pub const MetalStack = struct {
         errdefer self.gpu.batchAbort();
         const hu: u32 = @intCast(h);
         const vu: u32 = @intCast(arch.vocab_size);
-        try apple_ops.encodeRmsNorm(self.gpu, self.scratch.normed, self.scratch.xn, self.scratch.final_norm, 1, hu, arch.rms_norm_eps);
-        try apple_ops.encodeMatvec(self.gpu, self.scratch.logits, self.scratch.lm_head, self.scratch.normed, vu, hu);
+        if (self.half_mode) {
+            try apple_ops.encodeRmsNormBf16(self.gpu, self.scratch.normed, self.scratch.xn, self.scratch.final_norm, 1, hu, arch.rms_norm_eps);
+            try apple_ops.encodeMatvecBf16(self.gpu, self.scratch.logits, self.scratch.lm_head, self.scratch.normed, vu, hu);
+        } else {
+            try apple_ops.encodeRmsNorm(self.gpu, self.scratch.normed, self.scratch.xn, self.scratch.final_norm, 1, hu, arch.rms_norm_eps);
+            try apple_ops.encodeMatvec(self.gpu, self.scratch.logits, self.scratch.lm_head, self.scratch.normed, vu, hu);
+        }
         try self.gpu.batchCommit();
         last_qwen_encodes += self.gpu.last_batch_encodes;
         last_qwen_waits += 1;
@@ -410,6 +470,7 @@ fn encodeLayer(
     out: Buffer,
     t: usize,
     pos0: usize,
+    half: bool,
 ) !void {
     const tu: u32 = @intCast(t);
     const hu: u32 = @intCast(arch.hidden_size);
@@ -424,14 +485,21 @@ fn encodeLayer(
     const eps = arch.rms_norm_eps;
     const theta = arch.rope_theta;
 
-    try apple_ops.encodeRmsNorm(gpu, s.xn, x, w.input_ln, tu, hu, eps);
-    try apple_ops.encodeMatmulNaive(gpu, s.q_lin, s.xn, w.wq, tu, qd, hu);
-    try apple_ops.encodeMatmulNaive(gpu, s.k_lin, s.xn, w.wk, tu, kvd, hu);
-    try apple_ops.encodeMatmulNaive(gpu, s.v_lin, s.xn, w.wv, tu, kvd, hu);
-
-    // QK-norm: treat [t, n_heads, d] as rows=t*n_heads, cols=d.
-    try apple_ops.encodeRmsNorm(gpu, s.q_lin, s.q_lin, w.q_norm, tu * n_q, d, eps);
-    try apple_ops.encodeRmsNorm(gpu, s.k_lin, s.k_lin, w.k_norm, tu * n_kv, d, eps);
+    if (half) {
+        try apple_ops.encodeRmsNormBf16(gpu, s.xn, x, w.input_ln, tu, hu, eps);
+        try apple_ops.encodeMatmulNaiveBf16(gpu, s.q_lin, s.xn, w.wq, tu, qd, hu);
+        try apple_ops.encodeMatmulNaiveBf16(gpu, s.k_lin, s.xn, w.wk, tu, kvd, hu);
+        try apple_ops.encodeMatmulNaiveBf16(gpu, s.v_lin, s.xn, w.wv, tu, kvd, hu);
+        try apple_ops.encodeRmsNormBf16(gpu, s.q_lin, s.q_lin, w.q_norm, tu * n_q, d, eps);
+        try apple_ops.encodeRmsNormBf16(gpu, s.k_lin, s.k_lin, w.k_norm, tu * n_kv, d, eps);
+    } else {
+        try apple_ops.encodeRmsNorm(gpu, s.xn, x, w.input_ln, tu, hu, eps);
+        try apple_ops.encodeMatmulNaive(gpu, s.q_lin, s.xn, w.wq, tu, qd, hu);
+        try apple_ops.encodeMatmulNaive(gpu, s.k_lin, s.xn, w.wk, tu, kvd, hu);
+        try apple_ops.encodeMatmulNaive(gpu, s.v_lin, s.xn, w.wv, tu, kvd, hu);
+        try apple_ops.encodeRmsNorm(gpu, s.q_lin, s.q_lin, w.q_norm, tu * n_q, d, eps);
+        try apple_ops.encodeRmsNorm(gpu, s.k_lin, s.k_lin, w.k_norm, tu * n_kv, d, eps);
+    }
 
     try apple_ops.encodeRope(gpu, s.q_lin, tu, n_q, d, used_u, theta);
     try apple_ops.encodeRope(gpu, s.k_lin, tu, n_kv, d, used_u, theta);
@@ -439,32 +507,61 @@ fn encodeLayer(
     try apple_ops.encodePermuteTokensHeads(gpu, s.q_htd, s.q_lin, tu, n_q, d);
     try apple_ops.encodePermuteTokensHeads(gpu, s.k_htd, s.k_lin, tu, n_kv, d);
     try apple_ops.encodePermuteTokensHeads(gpu, s.v_htd, s.v_lin, tu, n_kv, d);
-    try apple_ops.encodeKvAppend(gpu, s.k_htd, s.v_htd, kv.k_cache, kv.v_cache, n_kv, tu, d, max_seq, used_u);
+    if (half) {
+        try apple_ops.encodeKvAppendBf16(gpu, s.k_htd, s.v_htd, kv.k_cache, kv.v_cache, n_kv, tu, d, max_seq, used_u);
+    } else {
+        try apple_ops.encodeKvAppend(gpu, s.k_htd, s.v_htd, kv.k_cache, kv.v_cache, n_kv, tu, d, max_seq, used_u);
+    }
 
     const kv_len: u32 = used_u + tu;
-    try apple_ops.encodeAttention(
-        gpu,
-        s.attn_htd,
-        s.q_htd,
-        kv.k_cache,
-        kv.v_cache,
-        n_q,
-        n_kv,
-        tu,
-        kv_len,
-        max_seq,
-        d,
-        s.scores,
-    );
+    if (half) {
+        try apple_ops.encodeAttentionBf16Kv(
+            gpu,
+            s.attn_htd,
+            s.q_htd,
+            kv.k_cache,
+            kv.v_cache,
+            n_q,
+            n_kv,
+            tu,
+            kv_len,
+            max_seq,
+            d,
+            s.scores,
+        );
+    } else {
+        try apple_ops.encodeAttention(
+            gpu,
+            s.attn_htd,
+            s.q_htd,
+            kv.k_cache,
+            kv.v_cache,
+            n_q,
+            n_kv,
+            tu,
+            kv_len,
+            max_seq,
+            d,
+            s.scores,
+        );
+    }
     try apple_ops.encodePermuteHeadsTokens(gpu, s.attn_lin, s.attn_htd, tu, n_q, d);
-    try apple_ops.encodeMatmulNaive(gpu, s.ao, s.attn_lin, w.wo, tu, hu, qd);
-
-    // Retained fusion: residual add + post-attn RMSNorm.
-    try apple_ops.encodeAddRmsNorm(gpu, s.x1, s.mlp_n, x, s.ao, w.post_attn_ln, tu, hu, eps);
-
-    try apple_ops.encodeMatmulNaive(gpu, s.gate, s.mlp_n, w.wg, tu, inter, hu);
-    try apple_ops.encodeMatmulNaive(gpu, s.up, s.mlp_n, w.wu, tu, inter, hu);
+    if (half) {
+        try apple_ops.encodeMatmulNaiveBf16(gpu, s.ao, s.attn_lin, w.wo, tu, hu, qd);
+        try apple_ops.encodeAddRmsNormBf16(gpu, s.x1, s.mlp_n, x, s.ao, w.post_attn_ln, tu, hu, eps);
+        try apple_ops.encodeMatmulNaiveBf16(gpu, s.gate, s.mlp_n, w.wg, tu, inter, hu);
+        try apple_ops.encodeMatmulNaiveBf16(gpu, s.up, s.mlp_n, w.wu, tu, inter, hu);
+    } else {
+        try apple_ops.encodeMatmulNaive(gpu, s.ao, s.attn_lin, w.wo, tu, hu, qd);
+        try apple_ops.encodeAddRmsNorm(gpu, s.x1, s.mlp_n, x, s.ao, w.post_attn_ln, tu, hu, eps);
+        try apple_ops.encodeMatmulNaive(gpu, s.gate, s.mlp_n, w.wg, tu, inter, hu);
+        try apple_ops.encodeMatmulNaive(gpu, s.up, s.mlp_n, w.wu, tu, inter, hu);
+    }
     try apple_ops.encodeSiluMul(gpu, s.hidden_act, s.gate, s.up, tu * inter);
-    try apple_ops.encodeMatmulNaive(gpu, s.down, s.hidden_act, w.wd, tu, hu, inter);
+    if (half) {
+        try apple_ops.encodeMatmulNaiveBf16(gpu, s.down, s.hidden_act, w.wd, tu, hu, inter);
+    } else {
+        try apple_ops.encodeMatmulNaive(gpu, s.down, s.hidden_act, w.wd, tu, hu, inter);
+    }
     try apple_ops.encodeAdd(gpu, out, s.x1, s.down, tu * hu);
 }
