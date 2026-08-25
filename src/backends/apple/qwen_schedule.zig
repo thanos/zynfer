@@ -237,7 +237,53 @@ const LayerQ8Weights = struct {
         return apple_ops.Q8DeviceWeights.upload(gpu, packed_w.q, packed_w.scale, out_dim, in_dim, .per_row);
     }
 
-    fn init(allocator: std.mem.Allocator, gpu: *Gpu, arch: qwen3.Arch, w: qwen_weights.LayerWeights) !LayerQ8Weights {
+    /// Artifact i8 is already HF `[out, in]` — same layout Metal Q8 expects.
+    fn uploadArtifactQ8(
+        gpu: *Gpu,
+        art: *const artifact.Artifact,
+        name: []const u8,
+        out_dim: usize,
+        in_dim: usize,
+    ) !apple_ops.Q8DeviceWeights {
+        const entry = try art.findByName(name);
+        const dt = try entry.dtypeTag();
+        if (dt != .i8) return error.InvalidDtype;
+        if (entry.rank != 2) return error.InvalidShape;
+        if (entry.shape[0] != out_dim or entry.shape[1] != in_dim) return error.ShapeMismatch;
+        const q_raw = try art.tensorBytesByName(name);
+        if (q_raw.len != out_dim * in_dim) return error.ShapeMismatch;
+
+        var scale_name_buf: [128]u8 = undefined;
+        const scale_name = std.fmt.bufPrint(&scale_name_buf, "{s}.qscale", .{name}) catch return error.InvalidName;
+        const scale_raw = try art.tensorBytesByName(scale_name);
+        if (scale_raw.len != out_dim * @sizeOf(f32)) return error.ShapeMismatch;
+        if (@intFromPtr(scale_raw.ptr) % @alignOf(f32) != 0) return error.BadAlignment;
+        const scales: []const f32 = @as([*]const f32, @ptrCast(@alignCast(scale_raw.ptr)))[0..out_dim];
+        const q = std.mem.bytesAsSlice(i8, q_raw);
+        return apple_ops.Q8DeviceWeights.upload(gpu, q, scales, out_dim, in_dim, .per_row);
+    }
+
+    fn tryUploadArtifactQ8(
+        gpu: *Gpu,
+        art: *const artifact.Artifact,
+        name: []const u8,
+        out_dim: usize,
+        in_dim: usize,
+    ) !?apple_ops.Q8DeviceWeights {
+        const entry = art.findByName(name) catch return null;
+        const dt = entry.dtypeTag() catch return null;
+        if (dt != .i8) return null;
+        return try uploadArtifactQ8(gpu, art, name, out_dim, in_dim);
+    }
+
+    fn init(
+        allocator: std.mem.Allocator,
+        gpu: *Gpu,
+        arch: qwen3.Arch,
+        w: qwen_weights.LayerWeights,
+        art: *const artifact.Artifact,
+        layer: u32,
+    ) !LayerQ8Weights {
         const h: usize = @intCast(arch.hidden_size);
         const qd: usize = @intCast(arch.qDim());
         const kvd: usize = @intCast(arch.kvDim());
@@ -257,20 +303,54 @@ const LayerQ8Weights = struct {
         try copyTensorToBuf(k_norm, w.k_norm);
         try copyTensorToBuf(post_attn_ln, w.post_attn_ln);
 
-        var wq = try packUpload(allocator, gpu, w.wq, qd, h);
-        errdefer wq.deinit();
-        var wk = try packUpload(allocator, gpu, w.wk, kvd, h);
-        errdefer wk.deinit();
-        var wv = try packUpload(allocator, gpu, w.wv, kvd, h);
-        errdefer wv.deinit();
-        var wo = try packUpload(allocator, gpu, w.wo, h, qd);
-        errdefer wo.deinit();
-        var wg = try packUpload(allocator, gpu, w.wg, inter, h);
-        errdefer wg.deinit();
-        var wu = try packUpload(allocator, gpu, w.wu, inter, h);
-        errdefer wu.deinit();
-        var wd = try packUpload(allocator, gpu, w.wd, h, inter);
-        errdefer wd.deinit();
+        var name_buf: [96]u8 = undefined;
+        const q_name = qwen3.layerQProjName(layer, &name_buf);
+        const use_artifact = blk: {
+            const entry = art.findByName(q_name) catch break :blk false;
+            const dt = entry.dtypeTag() catch break :blk false;
+            break :blk dt == .i8;
+        };
+
+        var wq: apple_ops.Q8DeviceWeights = undefined;
+        var wk: apple_ops.Q8DeviceWeights = undefined;
+        var wv: apple_ops.Q8DeviceWeights = undefined;
+        var wo: apple_ops.Q8DeviceWeights = undefined;
+        var wg: apple_ops.Q8DeviceWeights = undefined;
+        var wu: apple_ops.Q8DeviceWeights = undefined;
+        var wd: apple_ops.Q8DeviceWeights = undefined;
+
+        if (use_artifact) {
+            wq = try uploadArtifactQ8(gpu, art, q_name, qd, h);
+            errdefer wq.deinit();
+            wk = try uploadArtifactQ8(gpu, art, qwen3.layerKProjName(layer, &name_buf), kvd, h);
+            errdefer wk.deinit();
+            wv = try uploadArtifactQ8(gpu, art, qwen3.layerVProjName(layer, &name_buf), kvd, h);
+            errdefer wv.deinit();
+            wo = try uploadArtifactQ8(gpu, art, qwen3.layerOProjName(layer, &name_buf), h, qd);
+            errdefer wo.deinit();
+            wg = try uploadArtifactQ8(gpu, art, qwen3.layerGateProjName(layer, &name_buf), inter, h);
+            errdefer wg.deinit();
+            wu = try uploadArtifactQ8(gpu, art, qwen3.layerUpProjName(layer, &name_buf), inter, h);
+            errdefer wu.deinit();
+            wd = try uploadArtifactQ8(gpu, art, qwen3.layerDownProjName(layer, &name_buf), h, inter);
+            errdefer wd.deinit();
+        } else {
+            if (!w.projs_resident) return error.InvalidDtype;
+            wq = try packUpload(allocator, gpu, w.wq, qd, h);
+            errdefer wq.deinit();
+            wk = try packUpload(allocator, gpu, w.wk, kvd, h);
+            errdefer wk.deinit();
+            wv = try packUpload(allocator, gpu, w.wv, kvd, h);
+            errdefer wv.deinit();
+            wo = try packUpload(allocator, gpu, w.wo, h, qd);
+            errdefer wo.deinit();
+            wg = try packUpload(allocator, gpu, w.wg, inter, h);
+            errdefer wg.deinit();
+            wu = try packUpload(allocator, gpu, w.wu, inter, h);
+            errdefer wu.deinit();
+            wd = try packUpload(allocator, gpu, w.wd, h, inter);
+            errdefer wd.deinit();
+        }
 
         return .{
             .input_ln = input_ln,
@@ -503,12 +583,22 @@ pub const MetalStack = struct {
                 layers_q8[i].deinit();
             };
             while (i < n_layers) : (i += 1) {
-                layers_q8[i] = try LayerQ8Weights.init(allocator, gpu, arch, weights.layers[i]);
+                layers_q8[i] = try LayerQ8Weights.init(
+                    allocator,
+                    gpu,
+                    arch,
+                    weights.layers[i],
+                    art,
+                    @intCast(i),
+                );
             }
             const vocab: usize = @intCast(arch.vocab_size);
             const h: usize = @intCast(arch.hidden_size);
-            // Tied embed and CPU lm_head are HF `[vocab, hidden]` (out, in).
-            lm_head_q8 = try LayerQ8Weights.packUploadOutIn(allocator, gpu, weights.lm_head, vocab, h);
+            // Prefer on-disk i8 lm_head; else pack HF `[vocab, hidden]` host embed/lm_head.
+            lm_head_q8 = if (try LayerQ8Weights.tryUploadArtifactQ8(gpu, art, qwen3.lm_head_name, vocab, h)) |lh|
+                lh
+            else
+                try LayerQ8Weights.packUploadOutIn(allocator, gpu, weights.lm_head, vocab, h);
             errdefer if (lm_head_q8) |*lh| lh.deinit();
         } else {
             layers_w = try allocator.alloc(LayerDeviceWeights, n_layers);

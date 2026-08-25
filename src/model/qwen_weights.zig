@@ -1,7 +1,8 @@
 //! Load Qwen3 weights from a validated `.zynfer` artifact into f32 tensors.
 //!
 //! Hugging Face stores linear weights as `[out_features, in_features]`. Zynfer
-//! matmul uses `[in, out]`, so projections are transposed on load.
+//! matmul uses `[in, out]`, so projections are transposed on full host load.
+//! Apple Q8 slim load keeps on-disk i8 projections for direct Metal upload.
 
 const std = @import("std");
 const artifact = @import("artifact.zig");
@@ -17,27 +18,32 @@ pub const LayerWeights = struct {
     input_ln: Tensor,
     q_norm: Tensor,
     k_norm: Tensor,
-    wq: Tensor,
-    wk: Tensor,
-    wv: Tensor,
-    wo: Tensor,
+    /// Projection tensors; valid only when `projs_resident`.
+    wq: Tensor = undefined,
+    wk: Tensor = undefined,
+    wv: Tensor = undefined,
+    wo: Tensor = undefined,
     post_attn_ln: Tensor,
-    wg: Tensor,
-    wu: Tensor,
-    wd: Tensor,
+    wg: Tensor = undefined,
+    wu: Tensor = undefined,
+    wd: Tensor = undefined,
+    /// False on Apple Q8 slim load: i8 projs stay on the artifact → Metal path.
+    projs_resident: bool = true,
 
     pub fn deinit(self: *LayerWeights) void {
         self.input_ln.deinit();
         self.q_norm.deinit();
         self.k_norm.deinit();
-        self.wq.deinit();
-        self.wk.deinit();
-        self.wv.deinit();
-        self.wo.deinit();
         self.post_attn_ln.deinit();
-        self.wg.deinit();
-        self.wu.deinit();
-        self.wd.deinit();
+        if (self.projs_resident) {
+            self.wq.deinit();
+            self.wk.deinit();
+            self.wv.deinit();
+            self.wo.deinit();
+            self.wg.deinit();
+            self.wu.deinit();
+            self.wd.deinit();
+        }
         self.* = undefined;
     }
 };
@@ -50,6 +56,8 @@ pub const Weights = struct {
     lm_head_tied: bool,
     layers: []LayerWeights,
     allocator: std.mem.Allocator,
+    /// When false, layer projections were not dequantized into host f32.
+    projs_on_host: bool = true,
 
     pub fn deinit(self: *Weights) void {
         self.embed.deinit();
@@ -61,6 +69,24 @@ pub const Weights = struct {
     }
 
     pub fn load(allocator: std.mem.Allocator, art: *const artifact.Artifact, arch: qwen3.Arch) Error!Weights {
+        return loadInner(allocator, art, arch, .full);
+    }
+
+    /// Embed + norms only. Projection i8 stays on the artifact for Metal upload
+    /// (avoids the ~model-size host f32 twin after int8 dequant).
+    pub fn loadForAppleQ8(allocator: std.mem.Allocator, art: *const artifact.Artifact, arch: qwen3.Arch) Error!Weights {
+        if (!artifactHasI8Projs(art)) return error.InvalidDtype;
+        return loadInner(allocator, art, arch, .apple_q8_slim);
+    }
+
+    const LoadMode = enum { full, apple_q8_slim };
+
+    fn loadInner(
+        allocator: std.mem.Allocator,
+        art: *const artifact.Artifact,
+        arch: qwen3.Arch,
+        mode: LoadMode,
+    ) Error!Weights {
         const meta = try art.meta.toArch();
         if (meta.hidden_size != arch.hidden_size or meta.num_layers != arch.num_layers) {
             return error.ShapeMismatch;
@@ -88,7 +114,10 @@ pub const Weights = struct {
         var layer_buf: [96]u8 = undefined;
         var layer: u32 = 0;
         while (layer < arch.num_layers) : (layer += 1) {
-            layers[layer] = try loadLayer(allocator, art, arch, layer, &layer_buf);
+            layers[layer] = switch (mode) {
+                .full => try loadLayer(allocator, art, arch, layer, &layer_buf),
+                .apple_q8_slim => try loadLayerNormsOnly(allocator, art, arch, layer, &layer_buf),
+            };
             errdefer layers[layer].deinit();
         }
 
@@ -100,9 +129,19 @@ pub const Weights = struct {
             .lm_head_tied = lm_head_tied,
             .layers = layers,
             .allocator = allocator,
+            .projs_on_host = mode == .full,
         };
     }
 };
+
+/// True when layer-0 `q_proj` is on-disk int8 (int8 `.zynfer` artifacts).
+pub fn artifactHasI8Projs(art: *const artifact.Artifact) bool {
+    var buf: [96]u8 = undefined;
+    const name = qwen3.layerQProjName(0, &buf);
+    const entry = art.findByName(name) catch return false;
+    const dt = entry.dtypeTag() catch return false;
+    return dt == .i8;
+}
 
 fn loadLayer(
     allocator: std.mem.Allocator,
@@ -173,6 +212,42 @@ fn loadLayer(
         .wg = wg,
         .wu = wu,
         .wd = wd,
+        .projs_resident = true,
+    };
+}
+
+fn loadLayerNormsOnly(
+    allocator: std.mem.Allocator,
+    art: *const artifact.Artifact,
+    arch: qwen3.Arch,
+    layer: u32,
+    buf: *[96]u8,
+) Error!LayerWeights {
+    const hidden = arch.hidden_size;
+    const hd = arch.head_dim;
+
+    var input_ln = try loadNamed(allocator, art, qwen3.layerInputNormName(layer, buf), false);
+    errdefer input_ln.deinit();
+    try expectShape1(input_ln, hidden);
+
+    var q_norm = try loadNamed(allocator, art, qwen3.layerQNormName(layer, buf), false);
+    errdefer q_norm.deinit();
+    try expectShape1(q_norm, hd);
+
+    var k_norm = try loadNamed(allocator, art, qwen3.layerKNormName(layer, buf), false);
+    errdefer k_norm.deinit();
+    try expectShape1(k_norm, hd);
+
+    var post_attn_ln = try loadNamed(allocator, art, qwen3.layerPostAttnNormName(layer, buf), false);
+    errdefer post_attn_ln.deinit();
+    try expectShape1(post_attn_ln, hidden);
+
+    return .{
+        .input_ln = input_ln,
+        .q_norm = q_norm,
+        .k_norm = k_norm,
+        .post_attn_ln = post_attn_ln,
+        .projs_resident = false,
     };
 }
 

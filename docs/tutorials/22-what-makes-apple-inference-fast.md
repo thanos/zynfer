@@ -62,12 +62,13 @@ length / sampling / definitions. Losses get hypotheses in
 ### Why zynfer can feel much slower than Ollama
 
 Ollama is a product (usually llama.cpp Metal + aggressive GGUF quants).
-Zynfer’s M8 4B int8 path still expands weights to a **host f32 twin**
-before Metal residency, uses a curriculum int8 scheme (not Q4_K), and
-lacks years of kernel polish. On this laptop that showed up as
-~3.6 tok/s decode vs Ollama often many× faster for chat — see the
-ledger section **“Why zynfer feels much slower than Ollama.”** That gap
-is expected baseline debt, not a silent failure of the Apple-complete gate.
+Zynfer’s M8 4B int8 path now uploads on-disk i8 projections straight to
+Metal (no full host f32 proj twin), but still uses a curriculum int8
+scheme (not Q4_K) and lacks years of kernel polish. On this laptop that
+showed up as ~3.6 tok/s decode vs Ollama often many× faster for chat —
+see the ledger section **“Why zynfer feels much slower than Ollama.”**
+That gap is expected baseline debt, not a silent failure of the
+Apple-complete gate.
 
 ## What “Apple-complete” means
 

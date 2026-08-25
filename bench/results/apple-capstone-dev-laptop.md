@@ -107,15 +107,15 @@ itl_ms p50=261.528 p95=269.741 p99=269.954 (n=19)
 
 | Item | Bytes |
 | --- | --- |
-| host_weights (f32 after dequant load) | ~16.1 GiB |
+| host_weights (embed + norms; **no** proj f32 twin) | ~1.45 GiB |
 | metal_weights (int8 + scales resident) | ~5.6 GiB |
 | metal_kv_cap | ~151 MiB |
-| peak_rss | ~26.1 GiB |
+| peak_rss | ~10.8 GiB |
 
-Note: host still materializes f32 for the CPU-side `Weights` table, then
-Metal re-packs to int8. Disk int8 saves download/storage; peak RSS is
-dominated by that host twin. A future path can stream i8→GPU without the
-full host f32 twin.
+Note: Apple `ZYNFER_QWEN_METAL=int8` + on-disk i8 artifact uploads
+projections straight artifact→Metal (`loadForAppleQ8`). Host keeps embed
+(f32 for lm_head pack when tied) + RMS norms only. Disk int8 is the
+weight source of truth for Metal GEMV/GEMM.
 
 ## External comparison (same Mac)
 
@@ -125,7 +125,8 @@ full host f32 twin.
 | MLX | `mlx_lm` **not** found | Install to fill; document gap until then |
 
 Hypothesis template for gaps: bytes/token, batching, kernel fusion, quant
-scheme mismatch (GGUF vs per-row int8), and zynfer’s host f32 twin tax.
+scheme mismatch (GGUF vs per-row int8), and remaining residency gaps
+(embed still host-f32; KV still f32 on the int8 path).
 
 ## Why zynfer feels much slower than Ollama
 
@@ -144,27 +145,27 @@ chat on the same Mac.
 | Mission | Curriculum engine; retain/reject by ledger | Product UX / tok/s |
 | Backend | Our Metal schedule (M0–M6) | llama.cpp Metal (years of kernels) |
 | Quant | Per-row int8 (M5), documented | Common GGUF Q4_K / similar (fewer bytes/token) |
-| Weight residency | Disk i8 → **host f32 twin (~16 GiB)** → Metal i8 (~5.6 GiB) | Quantized weights stay closer to GPU; no giant host rebuild |
-| Cold start | Dominated by that dequant + pack (minute-scale feels normal) | Much lighter load path |
-| Peak RSS | ~26 GiB (`mem-report`) | Usually far lower for 4B-class GGUF |
+| Weight residency | Disk i8 → **Metal i8** (~5.6 GiB); host embed+norms ~1.45 GiB | Quantized weights stay closer to GPU; often denser GGUF |
+| Cold start | Faster than full dequant twin (was minute-scale); still heavier than GGUF | Much lighter load path |
+| Peak RSS | ~10.8 GiB (`mem-report`) | Usually far lower for 4B-class GGUF |
 | Serving polish | Single-request `chat` / `qwen-bench` | Persistent server, tuned sampling/batching |
 
 **Hypotheses for the gap (to re-check when running a matched A/B):**
 
-1. **Host f32 twin** — largest structural tax; removing it (i8→GPU only)
-   should cut RSS and cold start first.
-2. **Bytes/token** — Ollama’s default quant is often lower bit-width than
+1. **Bytes/token** — Ollama’s default quant is often lower bit-width than
    our int8; that alone moves the roofline.
-3. **Kernel maturity** — attention / GEMV fusion and memory layouts in
+2. **Kernel maturity** — attention / GEMV fusion and memory layouts in
    llama.cpp vs our educational op set.
+3. **Remaining residency** — embed still host-f32 (~1.45 GiB); KV still
+   f32 on the int8 path; cold start still heavier than GGUF mmap.
 4. **Fairness** — same model size, quant family, prompt length, max tokens,
    and warm vs cold. Do not compare a warm Ollama server to a cold
    `zynfer chat` process.
 
 **What this does *not* mean:** Metal is “wrong,” or M8 failed. Capstone
 numbers are an honest baseline. Closing toward Ollama is future work
-(stream i8 to Metal, tighter kernels, optional lower-bit weights) — Phase
-S / follow-ons, not a silent half-path.
+(tighter kernels, optional lower-bit weights, embed/KV half) — Phase S /
+follow-ons, not a silent half-path.
 
 **Matched comparison recipe (when filling numbers):**
 

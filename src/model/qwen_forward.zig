@@ -64,7 +64,13 @@ pub const Session = struct {
     ) Error!Session {
         try backend_mod.requireBackend(kind);
         if (max_seq == 0 or max_seq > arch.max_position_embeddings) return error.InvalidShape;
-        var weights = try qwen_weights.Weights.load(allocator, art, arch);
+
+        // Apple int8 Metal: skip host f32 dequant of projections when artifact is i8.
+        const apple_q8_slim = kind == .apple and apple_schedule.useQ8Path() and qwen_weights.artifactHasI8Projs(art);
+        var weights = if (apple_q8_slim)
+            try qwen_weights.Weights.loadForAppleQ8(allocator, art, arch)
+        else
+            try qwen_weights.Weights.load(allocator, art, arch);
         errdefer weights.deinit();
 
         // Batched Metal owns KV + layer scratch; host keeps used-counters only.
@@ -684,9 +690,11 @@ pub const Session = struct {
         if (!self.weights.lm_head_tied) host_weights += tensorBytes(self.weights.lm_head);
         for (self.weights.layers) |lw| {
             host_weights += tensorBytes(lw.input_ln) + tensorBytes(lw.q_norm) + tensorBytes(lw.k_norm);
-            host_weights += tensorBytes(lw.wq) + tensorBytes(lw.wk) + tensorBytes(lw.wv) + tensorBytes(lw.wo);
             host_weights += tensorBytes(lw.post_attn_ln);
-            host_weights += tensorBytes(lw.wg) + tensorBytes(lw.wu) + tensorBytes(lw.wd);
+            if (lw.projs_resident) {
+                host_weights += tensorBytes(lw.wq) + tensorBytes(lw.wk) + tensorBytes(lw.wv) + tensorBytes(lw.wo);
+                host_weights += tensorBytes(lw.wg) + tensorBytes(lw.wu) + tensorBytes(lw.wd);
+            }
         }
 
         var host_kv: u64 = 0;
