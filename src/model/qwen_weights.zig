@@ -8,9 +8,10 @@ const artifact = @import("artifact.zig");
 const qwen3 = @import("qwen3.zig");
 const bf16 = @import("../runtime/bf16.zig");
 const float16 = @import("../runtime/float16.zig");
+const qwen_quant = @import("qwen_quant.zig");
 const Tensor = @import("../runtime/tensor.zig").Tensor;
 const DType = @import("../runtime/dtype.zig").DType;
-pub const Error = artifact.Error || @import("../runtime/tensor.zig").TensorError;
+pub const Error = artifact.Error || @import("../runtime/tensor.zig").TensorError || qwen_quant.Error;
 
 pub const LayerWeights = struct {
     input_ln: Tensor,
@@ -182,8 +183,54 @@ fn loadNamed(
     transpose: bool,
 ) Error!Tensor {
     const entry = try art.findByName(name);
+    const dt = try entry.dtypeTag();
+    if (dt == .i8) {
+        return loadI8Dequant(allocator, art, entry, name, transpose);
+    }
     const raw = try art.tensorBytesByName(name);
     return loadTensorF32(allocator, entry, raw, transpose);
+}
+
+/// Stage M8: on-disk int8 projections (HF `[out,in]` + `{name}.qscale`) → host f32.
+fn loadI8Dequant(
+    allocator: std.mem.Allocator,
+    art: *const artifact.Artifact,
+    entry: *const artifact.TensorEntry,
+    name: []const u8,
+    transpose: bool,
+) Error!Tensor {
+    if (entry.rank != 2) return error.InvalidShape;
+    const out_dim: usize = entry.shape[0];
+    const in_dim: usize = entry.shape[1];
+    const q_raw = try art.tensorBytesByName(name);
+    if (q_raw.len != out_dim * in_dim) return error.ShapeMismatch;
+
+    var scale_buf: [128]u8 = undefined;
+    const scale_name = std.fmt.bufPrint(&scale_buf, "{s}.qscale", .{name}) catch return error.InvalidName;
+    const scale_raw = try art.tensorBytesByName(scale_name);
+    if (scale_raw.len != out_dim * @sizeOf(f32)) return error.ShapeMismatch;
+
+    const q = std.mem.bytesAsSlice(i8, q_raw);
+    if (scale_raw.len % @sizeOf(f32) != 0) return error.ShapeMismatch;
+    if (@intFromPtr(scale_raw.ptr) % @alignOf(f32) != 0) return error.BadAlignment;
+    const scales: []const f32 = @as([*]const f32, @ptrCast(@alignCast(scale_raw.ptr)))[0 .. scale_raw.len / @sizeOf(f32)];
+    if (scales.len != out_dim) return error.ShapeMismatch;
+
+    const hf = try allocator.alloc(f32, out_dim * in_dim);
+    defer allocator.free(hf);
+    try qwen_quant.dequantRowQ8(hf, q, scales, out_dim, in_dim);
+
+    if (!transpose) {
+        var t = try Tensor.alloc(allocator, .f32, &.{ out_dim, in_dim });
+        errdefer t.deinit();
+        @memcpy(try t.f32s(), hf);
+        return t;
+    }
+    // Host layout `[in, out]` (same as float projection load).
+    var t = try Tensor.alloc(allocator, .f32, &.{ in_dim, out_dim });
+    errdefer t.deinit();
+    transpose2d(try t.f32s(), hf, out_dim, in_dim);
+    return t;
 }
 
 fn loadTensorF32(

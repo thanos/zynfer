@@ -190,6 +190,16 @@ pub fn build(b: *std.Build) void {
     const stageM7_step = b.step("stageM7", "ANE/Core ML Qwen-scale Stage M7 ledger");
     stageM7_step.dependOn(&stageM7_cmd.step);
 
+    const stageM8_cmd = b.addRunArtifact(exe);
+    stageM8_cmd.step.dependOn(b.getInstallStep());
+    stageM8_cmd.addArg("stageM8");
+    stageM8_cmd.expectStdOutMatch("Stage M8");
+    stageM8_cmd.expectStdOutMatch("Apple-complete");
+    stageM8_cmd.expectStdOutMatch("qwen3-4b");
+    stageM8_cmd.expectExitCode(0);
+    const stageM8_step = b.step("stageM8", "Apple capstone Qwen3-4B Stage M8 ledger");
+    stageM8_step.dependOn(&stageM8_cmd.step);
+
     const qwen_bench_cmd = b.addRunArtifact(exe);
     qwen_bench_cmd.step.dependOn(b.getInstallStep());
     qwen_bench_cmd.addArg("qwen-bench");
@@ -458,6 +468,13 @@ pub fn build(b: *std.Build) void {
     stageM7_ok.expectStdOutMatch("REJECT");
     stageM7_ok.expectExitCode(0);
     integration_step.dependOn(&stageM7_ok.step);
+
+    const stageM8_ok = b.addRunArtifact(exe);
+    stageM8_ok.addArg("stageM8");
+    stageM8_ok.expectStdOutMatch("Stage M8");
+    stageM8_ok.expectStdOutMatch("qwen3-4b");
+    stageM8_ok.expectExitCode(0);
+    integration_step.dependOn(&stageM8_ok.step);
 
     const coreml_smoke_ok = b.addRunArtifact(exe);
     coreml_smoke_ok.addArg("coreml-smoke");

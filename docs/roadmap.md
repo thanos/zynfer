@@ -65,7 +65,7 @@ int8, ICB, extra fusions, Core ML/ANE — reopened at Qwen scale in M3–M7.
 | **M5** | Weight quantization (Apple) | 18 (Apple) | **done** (int8) |
 | **M6** | Static decode plan (Apple) | 20 (Apple) | **done** |
 | **M7** | ANE / Core ML gated experiment | 7 reject reopen | **done (REJECT)** — [`docs/stages/M7-ane-coreml-qwen.md`](stages/M7-ane-coreml-qwen.md) |
-| **M8** | Capstone: quantized Qwen3-4B + matrix | 25 (Apple) | not started — [`docs/stages/M8-apple-capstone.md`](stages/M8-apple-capstone.md) |
+| **M8** | Capstone: quantized Qwen3-4B + matrix | 25 (Apple) | **done (Apple-complete)** — [`docs/stages/M8-apple-capstone.md`](stages/M8-apple-capstone.md) |
 
 **M0 gate (not closed):** full-model Metal token parity, Metal TTFT
 baseline, per-layer ladder, LM-head path A/B, `kv_len>256` parity — see
@@ -86,11 +86,12 @@ graph; handoff tax vs resident Metal; unified memory ≠ free splice) —
 not “raced and lost.” Toy `coreml-smoke` + one `xctrace` do not clear
 retain.
 
-**M8 gate (Apple-complete):** registered quantized Qwen3-4B; final Apple
-benchmark matrix with ledgers; optional llama.cpp-Metal / MLX comparison;
-`zynfer run` / `chat` at competitive documented speed. Does **not**
-include Phase R (AMD) or Phase S (serving). Milestone **J** here means
-a larger **registered Metal** checkpoint, not Core ML specialization.
+**M8 gate (Apple-complete — closed):** registered quantized Qwen3-4B;
+final Apple benchmark matrix with ledgers
+(`bench/results/apple-capstone-dev-laptop.md`); `zynfer stageM8`;
+tutorial 22. Optional llama.cpp-Metal / MLX comparison on the same
+machine. Does **not** include Phase R (AMD) or Phase S (serving).
+Milestone **J** = larger **registered Metal** checkpoint, not Core ML.
 
 ---
 

@@ -23,6 +23,7 @@ const usage =
     \\  zynfer stageM5      int8 weight quantization Stage M5 ledger
     \\  zynfer stageM6      static decode plan Stage M6 ledger
     \\  zynfer stageM7      ANE / Core ML Qwen-scale Stage M7 ledger
+    \\  zynfer stageM8      Apple capstone: Qwen3-4B + benchmark matrix
     \\  zynfer coreml-smoke [PATH]  Load toy Core ML .mlpackage + one predict (M7 polish)
     \\  zynfer mem-report   weights / KV / scratch / peak RSS (Stage M6)
     \\  zynfer inspect PATH Validate and print a .zynfer artifact
@@ -33,7 +34,7 @@ const usage =
     \\  zynfer kv-bench [ARTIFACT] [--mini] [--layout] [--prompt TEXT] [--max-tokens N]
     \\  zynfer qwen-bench [ARTIFACT] [--mini] [--prompt TEXT] [--max-tokens N]
     \\  zynfer qwen-profile [ARTIFACT] [--mini] [--prompt TEXT] [--backend apple|cpu]
-    \\  zynfer setup [--skip-golden] [--skip-pip]   Download Qwen3-0.6B + build .zynfer
+    \\  zynfer setup [--model 0.6b|4b] [--quantize] [--skip-golden] [--skip-pip]
     \\  zynfer backends     List selectable backends
     \\  zynfer ops-bench    CPU vs Apple op microbenchmarks
     \\  zynfer block-bench  Tiny-block prefill/decode timings
@@ -84,6 +85,8 @@ pub fn main(init: std.process.Init) !void {
     var skip_download = false;
     var artifact_mini = false;
     var kv_layout_bench = false;
+    var setup_quantize = false;
+    var setup_model: []const u8 = "0.6b";
     var positionals: [16][]const u8 = undefined;
     var n_pos: usize = 0;
     while (args_it.next()) |arg| {
@@ -227,6 +230,15 @@ pub fn main(init: std.process.Init) !void {
             skip_pip = true;
         } else if (std.mem.eql(u8, arg, "--skip-download")) {
             skip_download = true;
+        } else if (std.mem.eql(u8, arg, "--quantize")) {
+            setup_quantize = true;
+        } else if (std.mem.eql(u8, arg, "--model")) {
+            setup_model = args_it.next() orelse {
+                std.debug.print("missing value for --model\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.startsWith(u8, arg, "--model=")) {
+            setup_model = arg["--model=".len..];
         } else if (!have_command and !std.mem.startsWith(u8, arg, "-")) {
             command = arg;
             have_command = true;
@@ -295,6 +307,8 @@ pub fn main(init: std.process.Init) !void {
         try printStageM6(writer);
     } else if (std.mem.eql(u8, command, "stageM7") or std.mem.eql(u8, command, "stagem7")) {
         try printStageM7(writer);
+    } else if (std.mem.eql(u8, command, "stageM8") or std.mem.eql(u8, command, "stagem8")) {
+        try printStageM8(writer);
     } else if (std.mem.eql(u8, command, "coreml-smoke") or std.mem.eql(u8, command, "coremlsmoke")) {
         const path = if (n_pos >= 1) positionals[0] else "tools/fixtures/coreml_toy.mlpackage";
         try cmdCoreMlSmoke(writer, path);
@@ -390,7 +404,7 @@ pub fn main(init: std.process.Init) !void {
         );
     } else if (std.mem.eql(u8, command, "chat")) {
         // zynfer chat "prompt"  OR  zynfer chat ARTIFACT "prompt"  OR  --prompt=
-        var artifact_path: []const u8 = "models/qwen3-0.6b.zynfer";
+        var artifact_path: []const u8 = defaultRegisteredArtifact(io);
         var chat_prompt: ?[]const u8 = prompt_arg;
         if (n_pos >= 1 and std.mem.endsWith(u8, positionals[0], ".zynfer")) {
             artifact_path = positionals[0];
@@ -430,7 +444,7 @@ pub fn main(init: std.process.Init) !void {
             try resolveKind(forced_backend),
         );
     } else if (std.mem.eql(u8, command, "setup")) {
-        try runSetup(host, writer, skip_pip, skip_download, skip_golden);
+        try runSetup(host, writer, skip_pip, skip_download, skip_golden, setup_model, setup_quantize);
     } else if (std.mem.eql(u8, command, "backends")) {
         try printBackends(writer);
     } else if (std.mem.eql(u8, command, "ops-bench")) {
@@ -857,6 +871,64 @@ fn printStageM7(writer: *std.Io.Writer) !void {
     try writer.print("See docs/tutorials/21-the-neural-engine-question.md\n", .{});
 }
 
+fn printStageM8(writer: *std.Io.Writer) !void {
+    try writer.print("zynfer Stage M8 — Apple capstone (Qwen3-4B)\n", .{});
+    try writer.print("==========================================\n\n", .{});
+    try writer.print("Milestone: Apple-complete (Backend 1)\n\n", .{});
+
+    try writer.print("Registered models\n", .{});
+    for (zynfer.registry.entries) |e| {
+        try writer.print("  {s}\n", .{e.id.name()});
+        try writer.print("    label:     {s}\n", .{e.label});
+        try writer.print("    hf:        {s}\n", .{e.hf_repo});
+        try writer.print("    dims:      h={d} inter={d} layers={d} heads={d}/{d} head_dim={d}\n", .{
+            e.arch.hidden_size,
+            e.arch.intermediate_size,
+            e.arch.num_layers,
+            e.arch.num_attention_heads,
+            e.arch.num_key_value_heads,
+            e.arch.head_dim,
+        });
+        try writer.print("    artifact:  {s}\n", .{e.artifact_path});
+        try writer.print("    int8:      {s}\n", .{e.int8_artifact_path});
+        if (e.int8_sha256_hex) |sha| {
+            try writer.print("    int8_sha:  {s}\n", .{sha});
+        }
+    }
+    try writer.writeAll("\n");
+
+    const e4 = zynfer.registry.byId(.qwen3_4b);
+    try writer.print("KV budget (Qwen3-4B, f32 K/V — Metal int8 path)\n", .{});
+    inline for ([_]usize{ 256, 512, 1024, 2048 }) |seq| {
+        const kv = zynfer.registry.estimateKvBytesF32(e4.arch, seq);
+        const wt = e4.arch.estimateDecodeBytesPerTokenQ8(seq);
+        try writer.print("  max_seq={d: <5}  KV≈{d} MiB   decode-bytes/tok (int8 w + f32 KV)≈{d} MiB\n", .{
+            seq,
+            kv / (1024 * 1024),
+            wt / (1024 * 1024),
+        });
+    }
+    try writer.print("  Metal attention kv_len cap: 2048 (Unsupported above)\n\n", .{});
+
+    try writer.print("Final Apple matrix (see bench/results/apple-capstone-dev-laptop.md)\n", .{});
+    try writer.print("  paths: CPU / Accelerate / Metal f32 / Metal bf16 / Metal int8 /\n", .{});
+    try writer.print("         Core ML-ANE (REJECT — Stage M7)\n", .{});
+    try writer.print("  axes:  short+long prefill × batch-1 decode × cold/warm\n", .{});
+    try writer.print("  external: llama.cpp-Metal / MLX permitted (same machine; document gaps)\n\n", .{});
+
+    try writer.print("Setup\n", .{});
+    try writer.print("  python3 tools/setup_qwen.py --model 4b --quantize --skip-golden\n", .{});
+    try writer.print("  ZYNFER_QWEN_METAL=int8 ./zig-out/bin/zynfer chat models/qwen3-4b-int8.zynfer \"…\"\n\n", .{});
+
+    try writer.print("Stage M8 decision\n", .{});
+    try writer.print("  Backend 1 (Apple):  Metal M0–M6 + Accelerate; Core ML REJECT (M7)\n", .{});
+    try writer.print("  Capstone model:    registered Qwen3-4B (int8 preferred)\n", .{});
+    try writer.print("  Next phases:       R (AMD when hardware), S (serving)\n\n", .{});
+    try writer.print("See docs/stages/M8-apple-capstone.md\n", .{});
+    try writer.print("See docs/tutorials/22-what-makes-apple-inference-fast.md\n", .{});
+    try writer.print("See bench/results/apple-capstone-dev-laptop.md\n", .{});
+}
+
 fn cmdCoreMlSmoke(writer: *std.Io.Writer, path: []const u8) !void {
     try writer.print("zynfer coreml-smoke — Stage M7 toy load\n", .{});
     try writer.print("======================================\n\n", .{});
@@ -1015,18 +1087,23 @@ fn runSetup(
     skip_pip: bool,
     skip_download: bool,
     skip_golden: bool,
+    model: []const u8,
+    quantize: bool,
 ) !void {
-    try writer.print("zynfer setup — download Qwen3-0.6B, convert .zynfer, optional golden\n", .{});
-    try writer.print("(live output from python3 tools/setup_qwen.py)\n\n", .{});
+    try writer.print("zynfer setup — download registered Qwen3, convert .zynfer\n", .{});
+    try writer.print("(live output from python3 tools/setup_qwen.py --model {s})\n\n", .{model});
     try writer.flush();
 
     var argv_list: std.ArrayList([]const u8) = .empty;
     defer argv_list.deinit(host.gpa);
     try argv_list.append(host.gpa, "python3");
     try argv_list.append(host.gpa, "tools/setup_qwen.py");
+    try argv_list.append(host.gpa, "--model");
+    try argv_list.append(host.gpa, model);
     if (skip_pip) try argv_list.append(host.gpa, "--skip-pip");
     if (skip_download) try argv_list.append(host.gpa, "--skip-download");
     if (skip_golden) try argv_list.append(host.gpa, "--skip-golden");
+    if (quantize) try argv_list.append(host.gpa, "--quantize");
 
     var child = std.process.spawn(host.io, .{
         .argv = argv_list.items,
@@ -1053,6 +1130,20 @@ fn runSetup(
     }
 }
 
+/// Prefer registered int8 4B, then bf16 4B, then 0.6B int8/bf16 (Stage M8).
+fn defaultRegisteredArtifact(io: std.Io) []const u8 {
+    const prefer = [_][]const u8{
+        "models/qwen3-4b-int8.zynfer",
+        "models/qwen3-4b.zynfer",
+        "models/qwen3-0.6b-int8.zynfer",
+        "models/qwen3-0.6b.zynfer",
+    };
+    for (prefer) |p| {
+        if (zynfer.util.fileExists(io, p)) return p;
+    }
+    return "models/qwen3-0.6b.zynfer";
+}
+
 fn tokenizerDirHasFiles(io: std.Io, dir: []const u8) bool {
     var vbuf: [512]u8 = undefined;
     const vocab = std.fmt.bufPrint(&vbuf, "{s}/vocab.json", .{dir}) catch return false;
@@ -1076,24 +1167,25 @@ fn resolveTokenizerDir(
         std.process.exit(2);
     }
 
-    // 1) sibling of artifact: models/qwen3-0.6b.zynfer → models/Qwen3-0.6B
-    if (std.fs.path.dirname(artifact_path)) |parent| {
-        var cand_buf: [512]u8 = undefined;
-        if (std.fmt.bufPrint(&cand_buf, "{s}/Qwen3-0.6B", .{parent})) |cand| {
-            if (tokenizerDirHasFiles(io, cand)) return try allocator.dupe(u8, cand);
-        } else |_| {}
-    }
-
-    // 2) conventional repo path
-    if (tokenizerDirHasFiles(io, "models/Qwen3-0.6B")) {
-        return try allocator.dupe(u8, "models/Qwen3-0.6B");
+    // 1) registry HF dirs next to artifact and at conventional paths
+    for (zynfer.registry.entries) |entry| {
+        if (std.fs.path.dirname(artifact_path)) |parent| {
+            var cand_buf: [512]u8 = undefined;
+            const base = std.fs.path.basename(entry.hf_dir);
+            if (std.fmt.bufPrint(&cand_buf, "{s}/{s}", .{ parent, base })) |cand| {
+                if (tokenizerDirHasFiles(io, cand)) return try allocator.dupe(u8, cand);
+            } else |_| {}
+        }
+        if (tokenizerDirHasFiles(io, entry.hf_dir)) {
+            return try allocator.dupe(u8, entry.hf_dir);
+        }
     }
 
     std.debug.print(
         \\tokenizer: could not find vocab.json + merges.txt
-        \\  looked next to artifact and at models/Qwen3-0.6B
-        \\  fix with:  ./zig-out/bin/zynfer setup
-        \\       or:  --tokenizer models/Qwen3-0.6B
+        \\  looked next to artifact and at registered models/*/ HF dirs
+        \\  fix with:  ./zig-out/bin/zynfer setup --model 4b
+        \\       or:  --tokenizer models/Qwen3-4B
         \\
     , .{});
     std.process.exit(2);

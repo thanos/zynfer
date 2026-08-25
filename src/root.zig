@@ -22,6 +22,7 @@ pub const qwen_quant = @import("model/qwen_quant.zig");
 pub const decode_profile = @import("model/decode_profile.zig");
 pub const tokenizer = @import("model/tokenizer.zig");
 pub const artifact = @import("model/artifact.zig");
+pub const registry = @import("model/registry.zig");
 pub const sample = @import("runtime/sample.zig");
 
 pub const cpu = struct {
@@ -63,6 +64,7 @@ test {
     _ = decode_profile;
     _ = tokenizer;
     _ = artifact;
+    _ = registry;
     _ = sample;
     _ = cpu.ops;
     _ = cpu.accelerate;

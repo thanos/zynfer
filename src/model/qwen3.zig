@@ -1,17 +1,25 @@
-//! Qwen3 architecture constants used by artifacts and (later) forward passes.
+//! Qwen3 architecture constants used by artifacts and forward passes.
 //!
-//! Values match Hugging Face `Qwen/Qwen3-0.6B` `config.json`. Stage 10 stores
-//! them in `.zynfer` metadata; Stage 11 runs the forward.
+//! Registered models: `Qwen/Qwen3-0.6B` and `Qwen/Qwen3-4B` (Stage M8).
+//! Stage 10 stores dims in `.zynfer` metadata; the registry validates them.
 
 const std = @import("std");
 
 pub const ModelId = enum {
     qwen3_0_6b,
+    qwen3_4b,
 
     pub fn name(self: ModelId) []const u8 {
         return switch (self) {
             .qwen3_0_6b => "qwen3-0.6b",
+            .qwen3_4b => "qwen3-4b",
         };
+    }
+
+    pub fn parse(s: []const u8) ?ModelId {
+        if (std.mem.eql(u8, s, "qwen3-0.6b")) return .qwen3_0_6b;
+        if (std.mem.eql(u8, s, "qwen3-4b")) return .qwen3_4b;
+        return null;
     }
 };
 
@@ -32,6 +40,31 @@ pub const qwen3_0_6b = Arch{
     .rms_norm_eps = 1e-6,
     .tie_word_embeddings = true,
 };
+
+/// Architecture for `Qwen/Qwen3-4B` (HF `config.json`).
+pub const qwen3_4b = Arch{
+    .model_id = .qwen3_4b,
+    .vocab_size = 151936,
+    .hidden_size = 2560,
+    .intermediate_size = 9728,
+    .num_layers = 36,
+    .num_attention_heads = 32,
+    .num_key_value_heads = 8,
+    .head_dim = 128,
+    .max_position_embeddings = 40960,
+    .bos_token_id = 151643,
+    .eos_token_id = 151645,
+    .rope_theta = 1_000_000.0,
+    .rms_norm_eps = 1e-6,
+    .tie_word_embeddings = true,
+};
+
+pub fn archForId(id: ModelId) Arch {
+    return switch (id) {
+        .qwen3_0_6b => qwen3_0_6b,
+        .qwen3_4b => qwen3_4b,
+    };
+}
 
 pub const Arch = struct {
     model_id: ModelId,
@@ -145,6 +178,22 @@ test "Qwen3-0.6B dims are consistent" {
     try std.testing.expectEqualStrings("qwen3-0.6b", a.model_id.name());
     try std.testing.expect(a.estimateDecodeBytesPerToken(128) > a.estimateDecodeBytesPerToken(1));
     try std.testing.expectEqual(@as(u32, 17 * 28), a.estimateMetalOpLaunchesPerDecodeToken());
+}
+
+test "Qwen3-4B dims are consistent" {
+    const a = qwen3_4b;
+    try std.testing.expectEqual(@as(u32, 4096), a.qDim());
+    try std.testing.expectEqual(@as(u32, 1024), a.kvDim());
+    try std.testing.expectEqualStrings("qwen3-4b", a.model_id.name());
+    try std.testing.expectEqual(@as(u32, 17 * 36), a.estimateMetalOpLaunchesPerDecodeToken());
+    // 4B is larger than 0.6B at equal kv_len.
+    try std.testing.expect(a.estimateDecodeBytesPerTokenQ8(256) > qwen3_0_6b.estimateDecodeBytesPerTokenQ8(256));
+}
+
+test "ModelId.parse" {
+    try std.testing.expect(ModelId.parse("qwen3-0.6b") == .qwen3_0_6b);
+    try std.testing.expect(ModelId.parse("qwen3-4b") == .qwen3_4b);
+    try std.testing.expect(ModelId.parse("nope") == null);
 }
 
 /// Tiny architecture for Stage 11 CI tests (1 layer, f32 fixture artifact).

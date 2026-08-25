@@ -37,6 +37,7 @@ pub const Error = error{
     InvalidRank,
     OutOfMemory,
     MemoryMappingNotSupported,
+    RegistryDimMismatch,
 };
 
 pub const Header = extern struct {
@@ -107,11 +108,8 @@ pub const Meta = extern struct {
 
     pub fn toArch(self: Meta) !qwen3.Arch {
         const id = self.modelIdSlice();
-        const model_id: qwen3.ModelId = if (std.mem.eql(u8, id, "qwen3-0.6b"))
-            .qwen3_0_6b
-        else
-            return error.UnsupportedVersion;
-        return .{
+        const model_id = qwen3.ModelId.parse(id) orelse return error.UnsupportedVersion;
+        const arch: qwen3.Arch = .{
             .model_id = model_id,
             .vocab_size = self.vocab_size,
             .hidden_size = self.hidden_size,
@@ -127,6 +125,11 @@ pub const Meta = extern struct {
             .rms_norm_eps = self.rms_norm_eps,
             .tie_word_embeddings = self.tie_word_embeddings != 0,
         };
+        // Full registered checkpoints share vocab 151936; CI mini fixtures do not.
+        if (arch.vocab_size == qwen3.qwen3_0_6b.vocab_size) {
+            try @import("registry.zig").validateArch(arch);
+        }
+        return arch;
     }
 };
 
@@ -398,7 +401,7 @@ pub const Artifact = struct {
         defer file.close(io);
         const st = try file.stat(io);
         const size: usize = std.math.cast(usize, st.size) orelse return error.Overflow;
-        if (size > 4 * 1024 * 1024 * 1024) return error.Overflow;
+        if (size > 32 * 1024 * 1024 * 1024) return error.Overflow;
         if (size == 0) return error.Truncated;
 
         if (canMmap()) blk: {

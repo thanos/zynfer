@@ -335,7 +335,7 @@ Stage 8 ledger: `bench/results/apple-stage8-dev-laptop.md`.
 | **fp16 Metal path + native half artifact upload** | **done** — M4 (`ZYNFER_QWEN_METAL=bf16`) |
 | **int8 session weights** | **done** — M5 (`ZYNFER_QWEN_METAL=int8`) |
 | **static decode / ANE** | M6 **done** / M7 **done (REJECT)** — tutorial 21 explains skip of Core ML prefill/`MLState` and unified-memory handoff |
-| **Qwen3-4B Apple capstone** | M8 — [`docs/stages/M8-apple-capstone.md`](stages/M8-apple-capstone.md) |
+| **Qwen3-4B Apple capstone** | M8 **done (Apple-complete)** — [`docs/stages/M8-apple-capstone.md`](stages/M8-apple-capstone.md) |
 
 See [`docs/roadmap.md`](roadmap.md) and [`baoulo/prompts/fable-5-prompt.md`](../baoulo/prompts/fable-5-prompt.md).
 
