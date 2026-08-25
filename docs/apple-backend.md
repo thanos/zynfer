@@ -16,9 +16,9 @@ Metal bridge. It is not the AMD production target.
   fused `add_rmsnorm_f32`, persistent int8 weights (`Q8DeviceWeights`).
   A/B with `ZYNFER_APPLE_BLOCK=baseline` (per-op waits).
 - Stage 7: SME/SME2 **hardware probe** + Core ML **framework probe**;
-  both inference paths **rejected** (see `zynfer stage7` /
-  `bench/results/apple-stage7-dev-laptop.md`). Accelerate retained;
-  do not claim AMX.
+  SME inference **rejected**. Core ML question **closed at Qwen scale in
+  M7** (`zynfer stageM7` / `coreml-smoke` / `bench/results/apple-ane-qwen-dev-laptop.md`).
+  Accelerate retained; do not claim AMX.
 - Stage 8: attention `kv_len` ≤ **256**, opt-in signposts
   (`ZYNFER_SIGNPOSTS=1`: prefill/decode/weights_upload + encode/batch),
   `peak_rss_bytes` in block-bench + benchmark matrix, dual-`Gpu`
@@ -276,7 +276,7 @@ Stage 6 A/B: `bench/results/apple-stage6-dev-laptop.md`.
 | Metal fused / batched tiny-block | Stage 6 one CB/wait + resident KV; ~8× vs per-op baseline |
 | Metal attention long context | Stage M0: `kv_len` ≤ **2048** (256 thread-local fast path) |
 | SME / SME2 | hardware probed (`FEAT_SME`); kernels **rejected** (Stage 7) |
-| Core ML / ANE | framework probed; inference path **rejected** (no verified subgraph) |
+| Core ML / ANE | framework + MLState probed; inference **REJECT** (M7 final) |
 | fp16 / bf16 Metal | **retained (M4)** — bf16 weights+KV; f32 activations; opt-in `ZYNFER_QWEN_METAL=bf16` |
 | HIP transformer ops | not implemented (probe only) |
 
@@ -304,7 +304,7 @@ Apple Stage 7/8 or curriculum Stages 10–12 / 16 land.
 | Item | Notes |
 | --- | --- |
 | **SME / SME2** | **done (rejected)** — `cpu.sme` detects FEAT_SME/SME2; kernels not retained (`bench/results/apple-stage7-dev-laptop.md`) |
-| **Core ML / ANE** | **done (rejected)** — framework probe only; no verified ANE subgraph |
+| **Core ML / ANE** | **done (REJECT final @ M7)** — framework + MLState probe; no verified ANE subgraph |
 
 ### Closed — Apple Stage 8
 
@@ -334,8 +334,8 @@ Stage 8 ledger: `bench/results/apple-stage8-dev-laptop.md`.
 | **Qwen-scale batched schedule / fusion** | **done** — M3 (`qwen_schedule`) |
 | **fp16 Metal path + native half artifact upload** | **done** — M4 (`ZYNFER_QWEN_METAL=bf16`) |
 | **int8 session weights** | **done** — M5 (`ZYNFER_QWEN_METAL=int8`) |
-| **static decode / ANE** | M6 **done** / M7 |
-| **Qwen3-4B Apple capstone** | M8 (old 25 slice) |
+| **static decode / ANE** | M6 **done** / M7 **done (REJECT)** — tutorial 21 explains skip of Core ML prefill/`MLState` and unified-memory handoff |
+| **Qwen3-4B Apple capstone** | M8 — [`docs/stages/M8-apple-capstone.md`](stages/M8-apple-capstone.md) |
 
 See [`docs/roadmap.md`](roadmap.md) and [`baoulo/prompts/fable-5-prompt.md`](../baoulo/prompts/fable-5-prompt.md).
 

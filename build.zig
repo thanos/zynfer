@@ -181,6 +181,15 @@ pub fn build(b: *std.Build) void {
     const stageM6_step = b.step("stageM6", "static decode plan Stage M6 ledger");
     stageM6_step.dependOn(&stageM6_cmd.step);
 
+    const stageM7_cmd = b.addRunArtifact(exe);
+    stageM7_cmd.step.dependOn(b.getInstallStep());
+    stageM7_cmd.addArg("stageM7");
+    stageM7_cmd.expectStdOutMatch("Stage M7");
+    stageM7_cmd.expectStdOutMatch("REJECT");
+    stageM7_cmd.expectExitCode(0);
+    const stageM7_step = b.step("stageM7", "ANE/Core ML Qwen-scale Stage M7 ledger");
+    stageM7_step.dependOn(&stageM7_cmd.step);
+
     const qwen_bench_cmd = b.addRunArtifact(exe);
     qwen_bench_cmd.step.dependOn(b.getInstallStep());
     qwen_bench_cmd.addArg("qwen-bench");
@@ -442,6 +451,21 @@ pub fn build(b: *std.Build) void {
     stageM6_ok.expectStdOutMatch("Stage M6");
     stageM6_ok.expectExitCode(0);
     integration_step.dependOn(&stageM6_ok.step);
+
+    const stageM7_ok = b.addRunArtifact(exe);
+    stageM7_ok.addArg("stageM7");
+    stageM7_ok.expectStdOutMatch("Stage M7");
+    stageM7_ok.expectStdOutMatch("REJECT");
+    stageM7_ok.expectExitCode(0);
+    integration_step.dependOn(&stageM7_ok.step);
+
+    const coreml_smoke_ok = b.addRunArtifact(exe);
+    coreml_smoke_ok.addArg("coreml-smoke");
+    coreml_smoke_ok.addArg("tools/fixtures/coreml_toy.mlpackage");
+    coreml_smoke_ok.expectStdOutMatch("predict_ok");
+    coreml_smoke_ok.expectStdOutMatch("does NOT verify ANE");
+    coreml_smoke_ok.expectExitCode(0);
+    integration_step.dependOn(&coreml_smoke_ok.step);
 
     const mem_report_ok = b.addRunArtifact(exe);
     mem_report_ok.addArg("mem-report");

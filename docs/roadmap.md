@@ -33,7 +33,8 @@ Phase S — Serving & scale, backend-neutral        (after M, overlapping R)
 - **G. AMD-native** — kernels tuned for `gfx1201` (Phase R)
 - **H. Specialized** — quant, fusion, graphs measured (M4–M6, R5–R7)
 - **I. Useful** — concurrent requests (Phase S)
-- **J. NInfer philosophy** — registered larger checkpoint (M8 Apple, R10 AMD)
+- **J. NInfer philosophy** — registered larger checkpoint on the **retained**
+  backend (M8 Apple Metal 4B; R10 AMD) — not “NInfer for Core ML / ANE”
 
 ---
 
@@ -63,8 +64,8 @@ int8, ICB, extra fusions, Core ML/ANE — reopened at Qwen scale in M3–M7.
 | **M4** | fp16/bf16 Metal path | 8 reject reopen | **done** |
 | **M5** | Weight quantization (Apple) | 18 (Apple) | **done** (int8) |
 | **M6** | Static decode plan (Apple) | 20 (Apple) | **done** |
-| **M7** | ANE / Core ML gated experiment | 7 reject reopen | not started |
-| **M8** | Capstone: quantized Qwen3-4B + matrix | 25 (Apple) | not started |
+| **M7** | ANE / Core ML gated experiment | 7 reject reopen | **done (REJECT)** — [`docs/stages/M7-ane-coreml-qwen.md`](stages/M7-ane-coreml-qwen.md) |
+| **M8** | Capstone: quantized Qwen3-4B + matrix | 25 (Apple) | not started — [`docs/stages/M8-apple-capstone.md`](stages/M8-apple-capstone.md) |
 
 **M0 gate (not closed):** full-model Metal token parity, Metal TTFT
 baseline, per-layer ladder, LM-head path A/B, `kv_len>256` parity — see
@@ -77,6 +78,19 @@ baseline, per-layer ladder, LM-head path A/B, `kv_len>256` parity — see
 
 **M3 gate:** batched Qwen path improves decode/TTFT vs M0 baseline;
 fusion ledger in `bench/results/stageM3-dev-laptop.md`.
+
+**M7 gate (closed):** final Qwen-scale Core ML/ANE reject ledger
+(`bench/results/apple-ane-qwen-dev-laptop.md`); `ZYNFER_FORCE_COREML`
+exits 2; tutorial 21. Candidates (a)/(b) **skipped** (no Qwen Core ML
+graph; handoff tax vs resident Metal; unified memory ≠ free splice) —
+not “raced and lost.” Toy `coreml-smoke` + one `xctrace` do not clear
+retain.
+
+**M8 gate (Apple-complete):** registered quantized Qwen3-4B; final Apple
+benchmark matrix with ledgers; optional llama.cpp-Metal / MLX comparison;
+`zynfer run` / `chat` at competitive documented speed. Does **not**
+include Phase R (AMD) or Phase S (serving). Milestone **J** here means
+a larger **registered Metal** checkpoint, not Core ML specialization.
 
 ---
 

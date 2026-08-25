@@ -51,7 +51,10 @@ dominated. At Qwen scale the KV length (and attention `q_len`) still change
 every decode step, so a frozen ICB does not apply. Stage 8 and M3 already
 rejected ICB with that evidence; M6 **finalizes REJECT** — no zombie path.
 
+**M7** — ANE / Core ML at Qwen scale: **REJECT (final)** —
+`docs/tutorials/21-the-neural-engine-question.md`.
+
 ## Next
 
-**M7** — Core ML / ANE at Qwen scale as a gated experiment (retain only with
-Instruments proof, or close with an honest rejection ledger).
+**M8** — Apple capstone: quantized Qwen3-4B + final benchmark matrix
+([`docs/stages/M8-apple-capstone.md`](../stages/M8-apple-capstone.md)).

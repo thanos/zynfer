@@ -22,6 +22,8 @@ const usage =
     \\  zynfer stageM4      bf16/fp16 Metal weights+KV Stage M4 ledger
     \\  zynfer stageM5      int8 weight quantization Stage M5 ledger
     \\  zynfer stageM6      static decode plan Stage M6 ledger
+    \\  zynfer stageM7      ANE / Core ML Qwen-scale Stage M7 ledger
+    \\  zynfer coreml-smoke [PATH]  Load toy Core ML .mlpackage + one predict (M7 polish)
     \\  zynfer mem-report   weights / KV / scratch / peak RSS (Stage M6)
     \\  zynfer inspect PATH Validate and print a .zynfer artifact
     \\  zynfer artifact-compile [--out PATH] [--mini]  Write fixture .zynfer
@@ -43,9 +45,9 @@ const usage =
     \\  zynfer caps --backend apple
     \\  ZYNFER_BACKEND=cpu zynfer caps
     \\
-    \\Stage 7 experimental forces (must fail loud; paths are not retained):
+    \\Stage 7 / M7 experimental forces (must fail loud; paths are not retained):
     \\  ZYNFER_FORCE_SME=1 zynfer stage7
-    \\  ZYNFER_FORCE_COREML=1 zynfer stage7
+    \\  ZYNFER_FORCE_COREML=1 zynfer stageM7
     \\
 ;
 
@@ -291,6 +293,11 @@ pub fn main(init: std.process.Init) !void {
         try printStageM5(writer);
     } else if (std.mem.eql(u8, command, "stageM6") or std.mem.eql(u8, command, "stagem6")) {
         try printStageM6(writer);
+    } else if (std.mem.eql(u8, command, "stageM7") or std.mem.eql(u8, command, "stagem7")) {
+        try printStageM7(writer);
+    } else if (std.mem.eql(u8, command, "coreml-smoke") or std.mem.eql(u8, command, "coremlsmoke")) {
+        const path = if (n_pos >= 1) positionals[0] else "tools/fixtures/coreml_toy.mlpackage";
+        try cmdCoreMlSmoke(writer, path);
     } else if (std.mem.eql(u8, command, "mem-report") or std.mem.eql(u8, command, "memreport")) {
         const backend: zynfer.BackendKind = blk: {
             if (forced_backend) |fb| break :blk try zynfer.backend.parseBackendKind(fb);
@@ -499,7 +506,7 @@ fn rejectForcedExperimentalPaths() void {
     }
     if (zynfer.apple.coreml.forceRequested()) {
         std.debug.print(
-            "ZYNFER_FORCE_COREML requested but Core ML/ANE inference is not retained (Stage 7: no measured subgraph).\n",
+            "ZYNFER_FORCE_COREML requested but Core ML/ANE inference is not retained (Stage M7: Qwen-scale REJECT — no Instruments ANE proof / no e2e win over Metal).\n",
             .{},
         );
         std.process.exit(2);
@@ -524,6 +531,8 @@ fn printStage7(writer: *std.Io.Writer) !void {
     try writer.print("  MLModelConfiguration ok:    {s}\n", .{yn(cm_p.configuration_ok)});
     try writer.print("  computeUnits All ok:        {s}\n", .{yn(cm_p.compute_units_all_ok)});
     try writer.print("  computeUnits CPU+ANE ok:    {s}\n", .{yn(cm_p.compute_units_cpu_and_ane_ok)});
+    try writer.print("  MLState class available:    {s}\n", .{yn(cm_p.ml_state_available)});
+    try writer.print("  Darwin major:               {d}\n", .{cm_p.macos_major});
     try writer.print("  ANE execution verified:     {s}\n", .{yn(cm_p.ane_execution_verified)});
     try writer.print("  path retained:              {s}\n", .{yn(cm_p.path_retained)});
     try writer.print("  detail: {s}\n\n", .{cm_p.detail});
@@ -537,10 +546,10 @@ fn printStage7(writer: *std.Io.Writer) !void {
 
     try writer.print("Stage 7 decisions\n", .{});
     try writer.print("  SME kernels:     REJECT — detection only; no brittle assembly\n", .{});
-    try writer.print("  Core ML/ANE ops: REJECT — framework probe only; no end-to-end subgraph\n", .{});
+    try writer.print("  Core ML/ANE ops: REJECT — framework probe only; Qwen-scale closed in M7\n", .{});
     try writer.print("  Accelerate:      RETAIN — measured Stage 5 size-gated vDSP path\n", .{});
     try writer.print("  Metal Stage 6:   RETAIN — default tiny-block schedule\n", .{});
-    try writer.print("\nSee bench/results/apple-stage7-dev-laptop.md\n", .{});
+    try writer.print("\nSee bench/results/apple-stage7-dev-laptop.md and stageM7\n", .{});
 }
 
 fn printStage8(writer: *std.Io.Writer) !void {
@@ -796,7 +805,76 @@ fn printStageM6(writer: *std.Io.Writer) !void {
     try writer.print("ICB decision (final)\n", .{});
     try writer.print("  REJECT — KV/q_len change each decode; cite Stage 8 + M3 ledgers.\n", .{});
     try writer.print("  Encode count still high; waits already minimal (2). No ICB path.\n\n", .{});
+    try writer.print("Next\n", .{});
+    try writer.print("  ANE / Core ML — M7 done (REJECT); see stageM7\n\n", .{});
     try writer.print("See docs/stages/M6-static-decode-plan.md\n", .{});
+}
+
+fn printStageM7(writer: *std.Io.Writer) !void {
+    try writer.print("zynfer Stage M7 — ANE / Core ML at Qwen scale\n", .{});
+    try writer.print("=============================================\n\n", .{});
+
+    const cm_p = zynfer.apple.coreml.probe();
+    try writer.print("Probe (does not load a model; does not claim ANE)\n", .{});
+    try writer.print("  framework linked:           {s}\n", .{yn(cm_p.framework_linked)});
+    try writer.print("  MLModelConfiguration ok:    {s}\n", .{yn(cm_p.configuration_ok)});
+    try writer.print("  computeUnits All ok:        {s}\n", .{yn(cm_p.compute_units_all_ok)});
+    try writer.print("  computeUnits CPU+ANE ok:    {s}\n", .{yn(cm_p.compute_units_cpu_and_ane_ok)});
+    try writer.print("  MLState class available:    {s}\n", .{yn(cm_p.ml_state_available)});
+    try writer.print("  Darwin major:               {d}\n", .{cm_p.macos_major});
+    try writer.print("  .mlmodel in tree:           {s}\n", .{yn(cm_p.model_artifact_present)});
+    try writer.print("  ANE execution verified:     {s}\n", .{yn(cm_p.ane_execution_verified)});
+    try writer.print("  path retained:              {s}\n", .{yn(cm_p.path_retained)});
+    try writer.print("  detail: {s}\n\n", .{cm_p.detail});
+
+    try writer.print("Candidates considered\n", .{});
+    try writer.print("  (a) fixed-length prefill subgraph — SKIP: no Qwen .mlmodel / converter;\n", .{});
+    try writer.print("      fair race is most of the stage. Handoff/repack vs resident Metal\n", .{});
+    try writer.print("      taxes TTFT (unified memory ≠ free Metal↔Core ML splice)\n", .{});
+    try writer.print("  (b) stateful decode graph (MLState) — SKIP: API present on Darwin 24+\n", .{});
+    try writer.print("      but no Qwen KV graph exported; mutable KV + dynamic shapes remain\n", .{});
+    try writer.print("      the known hazard; no Instruments ANE placement proof\n", .{});
+    try writer.print("  (c) nothing — CHOSEN (did not start (a)/(b); retain criteria unmet)\n\n", .{});
+
+    try writer.print("Retain criteria (all required)\n", .{});
+    try writer.print("  [ ] Instruments confirms ANE placement (not CPU/GPU fallback)\n", .{});
+    try writer.print("  [ ] e2e TTFT or tok/s beats M6 Metal at equal quality\n", .{});
+    try writer.print("  [ ] I/O / layout handoffs do not erase the win\n", .{});
+    try writer.print("  [ ] graph stable enough to amortize compilation\n\n", .{});
+
+    try writer.print("Optional polish (does not clear retain)\n", .{});
+    try writer.print("  toy model:   tools/fixtures/coreml_toy.mlpackage (make_coreml_toy.py)\n", .{});
+    try writer.print("  load smoke:  zynfer coreml-smoke [PATH]\n", .{});
+    try writer.print("  xctrace:     see apple-ane-qwen-dev-laptop.md (Core ML template once)\n\n", .{});
+
+    try writer.print("Stage M7 decision\n", .{});
+    try writer.print("  Core ML / ANE at Qwen scale:  REJECT (final for this project)\n", .{});
+    try writer.print("  Retained Apple engine:        Metal (M0–M6) + Accelerate (Stage 5)\n", .{});
+    try writer.print("  ZYNFER_FORCE_COREML:          exit 2 (loud; no zombie path)\n", .{});
+    try writer.print("  Next:                         M8 Apple capstone (Qwen3-4B + matrix)\n\n", .{});
+    try writer.print("See bench/results/apple-ane-qwen-dev-laptop.md\n", .{});
+    try writer.print("See docs/stages/M7-ane-coreml-qwen.md\n", .{});
+    try writer.print("See docs/tutorials/21-the-neural-engine-question.md\n", .{});
+}
+
+fn cmdCoreMlSmoke(writer: *std.Io.Writer, path: []const u8) !void {
+    try writer.print("zynfer coreml-smoke — Stage M7 toy load\n", .{});
+    try writer.print("======================================\n\n", .{});
+    try writer.print("path: {s}\n", .{path});
+
+    const s = zynfer.apple.coreml.smoke(path);
+    try writer.print("status:         {d}\n", .{s.status});
+    try writer.print("load_ok:        {s}\n", .{yn(s.load_ok)});
+    try writer.print("predict_ok:     {s}\n", .{yn(s.predict_ok)});
+    try writer.print("compute_units:  {s}\n", .{s.compute_units});
+    try writer.print("y:              [{d:.6}, {d:.6}, {d:.6}, {d:.6}]\n", .{ s.y[0], s.y[1], s.y[2], s.y[3] });
+    try writer.print("detail:         {s}\n\n", .{s.detail});
+    try writer.print("Note: load/predict success does NOT verify ANE placement.\n", .{});
+    try writer.print("      ane_execution_verified stays false without Instruments.\n", .{});
+    try writer.flush();
+    if (s.status != 0 or !s.load_ok or !s.predict_ok) {
+        std.process.exit(1);
+    }
 }
 
 fn cmdMemReport(
@@ -2224,10 +2302,12 @@ fn printCaps(writer: *std.Io.Writer, forced: ?[]const u8) !void {
 
     const sme_p = zynfer.cpu.sme.probe();
     const cm_p = zynfer.apple.coreml.probe();
-    try writer.print("\nStage 7 probes (hardware/framework ≠ retained path)\n", .{});
+    try writer.print("\nStage 7 / M7 probes (hardware/framework ≠ retained path)\n", .{});
     try writer.print("  SME hardware FEAT_SME/SME2: {s}/{s}\n", .{ yn(sme_p.feat_sme), yn(sme_p.feat_sme2) });
     try writer.print("  Core ML framework linked:   {s}\n", .{yn(cm_p.framework_linked)});
+    try writer.print("  MLState class available:    {s}\n", .{yn(cm_p.ml_state_available)});
     try writer.print("  ANE execution verified:     {s}\n", .{yn(cm_p.ane_execution_verified)});
+    try writer.print("  Core ML path retained:      {s} (M7 final REJECT)\n", .{yn(cm_p.path_retained)});
 
     switch (caps.arch) {
         .apple_m => |feat| {
@@ -2255,7 +2335,8 @@ fn printCaps(writer: *std.Io.Writer, forced: ?[]const u8) !void {
             });
             try writer.print("  Stage 6 tiny-block path={s}: one CB/wait + resident KV + add_rmsnorm\n", .{zynfer.apple.block.path_staged});
             try writer.print("  A/B: ZYNFER_APPLE_BLOCK=baseline → path={s} (per-op waits)\n", .{zynfer.apple.block.path_baseline});
-            try writer.print("  Stage 7: SME/Core ML inference paths rejected; see `zynfer stage7`\n", .{});
+            try writer.print("  Stage 7: SME rejected; Core ML framework probe only — see `zynfer stage7`\n", .{});
+            try writer.print("  Stage M7: Core ML/ANE at Qwen scale REJECT (final) — see `zynfer stageM7`\n", .{});
             try writer.print("  Stage 8: kv_len<={d}; signposts via ZYNFER_SIGNPOSTS=1; see `zynfer stage8`\n", .{zynfer.apple.ops.max_attention_kv});
         },
         else => {},

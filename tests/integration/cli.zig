@@ -98,6 +98,24 @@ test "stage7 prints retain/reject ledger" {
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "SME") != null);
 }
 
+test "stageM7 prints Qwen-scale ANE reject ledger" {
+    var out = try run(&.{"stageM7"});
+    defer out.deinit(std.testing.allocator);
+    try expectExited(out, 0);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "Stage M7") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "REJECT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "MLState") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "apple-ane-qwen-dev-laptop") != null);
+}
+
+test "coreml-smoke loads toy mlpackage" {
+    var out = try run(&.{ "coreml-smoke", "tools/fixtures/coreml_toy.mlpackage" });
+    defer out.deinit(std.testing.allocator);
+    try expectExited(out, 0);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "predict_ok") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "does NOT verify ANE") != null);
+}
+
 test "stage8 prints hardening ledger" {
     var out = try run(&.{"stage8"});
     defer out.deinit(std.testing.allocator);

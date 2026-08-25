@@ -223,7 +223,7 @@ pub const Gpu = struct {
         };
         caps.addDisabled(sme_p.detail);
         caps.addDisabled(cm_p.detail);
-        caps.addDisabled("Core ML/ANE inference path not retained (Stage 7: no measured end-to-end subgraph)");
+        caps.addDisabled("Core ML/ANE inference path not retained (Stage M7: Qwen-scale REJECT)");
         caps.addDisabled("AMX is not a public contract; CPU matrix wins attribute to Accelerate only");
         caps.addDisabled("No tokenizer/sampling; Stage 10 loads .zynfer metadata/tensors only");
         caps.addDisabled("Full Qwen forward is Stage 11; TTFT/tok/s need Stage 12");

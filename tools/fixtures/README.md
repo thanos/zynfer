@@ -21,8 +21,17 @@ and [`docs/tutorials/11-qwen-forward-and-golden.md`](../../docs/tutorials/11-qwe
 | `gen_golden_logits.py` | torch, transformers | Last-token logits from Hugging Face → `ref_logits.f32` |
 | `ref_forward_numpy.py` | numpy | Replay forward from safetensors; bisect vs zynfer `--dump` |
 | `dump_forward_refs.py` | torch, transformers | HF hooks: layer0 / normed / logits f32 dumps |
+| `make_coreml_toy.py` | coremltools, numpy | Tiny fixed-shape `.mlpackage` for Stage M7 load smoke |
+
+Checked-in Core ML toy (rebuild with the script above):
+
+```bash
+ASDF_PYTHON_VERSION=3.12.9 python3 tools/fixtures/make_coreml_toy.py
+./zig-out/bin/zynfer coreml-smoke tools/fixtures/coreml_toy.mlpackage
+```
 
 Canonical workflow and troubleshooting: [`docs/stages/11-qwen-forward.md`](../../docs/stages/11-qwen-forward.md).
+Stage M7 ANE reject + xctrace recipe: [`docs/stages/M7-ane-coreml-qwen.md`](../../docs/stages/M7-ane-coreml-qwen.md).
 
 **Preferred setup (local):** `./zig-out/bin/zynfer setup` then
 `./zig-out/bin/zynfer chat "…"`.
