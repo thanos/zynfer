@@ -898,11 +898,11 @@ fn printStageM8(writer: *std.Io.Writer) !void {
     try writer.writeAll("\n");
 
     const e4 = zynfer.registry.byId(.qwen3_4b);
-    try writer.print("KV budget (Qwen3-4B, f32 K/V — Metal int8 path)\n", .{});
+    try writer.print("KV budget (Qwen3-4B, bf16 K/V — Metal int8 path)\n", .{});
     inline for ([_]usize{ 256, 512, 1024, 2048 }) |seq| {
-        const kv = zynfer.registry.estimateKvBytesF32(e4.arch, seq);
+        const kv = zynfer.registry.estimateKvBytesF32(e4.arch, seq) / 2;
         const wt = e4.arch.estimateDecodeBytesPerTokenQ8(seq);
-        try writer.print("  max_seq={d: <5}  KV≈{d} MiB   decode-bytes/tok (int8 w + f32 KV)≈{d} MiB\n", .{
+        try writer.print("  max_seq={d: <5}  KV≈{d} MiB   decode-bytes/tok (int8 w + bf16 KV)≈{d} MiB\n", .{
             seq,
             kv / (1024 * 1024),
             wt / (1024 * 1024),

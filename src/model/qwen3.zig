@@ -147,7 +147,7 @@ pub const Arch = struct {
         return self.estimateDecodeBytesPerToken(kv_len) / 2;
     }
 
-    /// M5: int8 projections + per-row f32 scales; f32 KV (Q8 path keeps f32 KV).
+    /// M5: int8 projections + per-row f32 scales; bf16 KV (Q8 path).
     pub fn estimateDecodeBytesPerTokenQ8(self: Arch, kv_len: usize) u64 {
         const h: u64 = self.hidden_size;
         const qd: u64 = self.qDim();
@@ -160,7 +160,7 @@ pub const Arch = struct {
         const scale_rows = layers * (qd + kvd + kvd + h + inter + inter + h) + @as(u64, self.vocab_size);
         const weight_bytes = weight_elems * 1 + scale_rows * @sizeOf(f32);
         const kv_bytes = layers * @as(u64, self.num_key_value_heads) * @as(u64, @intCast(kv_len)) *
-            @as(u64, self.head_dim) * 2 * @sizeOf(f32);
+            @as(u64, self.head_dim) * 2 * 2; // bf16 K/V
         return weight_bytes + kv_bytes;
     }
 

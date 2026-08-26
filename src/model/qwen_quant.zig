@@ -16,6 +16,7 @@ const std = @import("std");
 const cpu = @import("../backends/cpu/ops.zig");
 const Tensor = @import("../runtime/tensor.zig").Tensor;
 const compare = @import("../runtime/compare.zig");
+const bf16 = @import("../runtime/bf16.zig");
 
 pub const Error = cpu.OpsError || std.mem.Allocator.Error || @import("../runtime/tensor.zig").TensorError;
 
@@ -62,6 +63,29 @@ pub fn packOutInToQ8(
     if (host_out_in.shape[0] != out_dim or host_out_in.shape[1] != in_dim) return error.ShapeMismatch;
     const src = try host_out_in.f32s();
     return packRowsQ8(allocator, src, out_dim, in_dim);
+}
+
+/// Pack LE bf16 `[out, in]` bytes → row-quantized i8 (one f32 row scratch).
+pub fn packBf16OutInToQ8(
+    allocator: std.mem.Allocator,
+    bf16_le: []const u8,
+    out_dim: usize,
+    in_dim: usize,
+) Error!PackedQ8 {
+    if (bf16_le.len != out_dim * in_dim * 2) return error.ShapeMismatch;
+    const q = try allocator.alloc(i8, out_dim * in_dim);
+    errdefer allocator.free(q);
+    const scale = try allocator.alloc(f32, out_dim);
+    errdefer allocator.free(scale);
+    const row = try allocator.alloc(f32, in_dim);
+    defer allocator.free(row);
+    var r: usize = 0;
+    while (r < out_dim) : (r += 1) {
+        const off = r * in_dim * 2;
+        bf16.decodeIntoF32(row, bf16_le[off..][0 .. in_dim * 2]);
+        try cpu.packRowQ8(row, 1, in_dim, q[r * in_dim ..][0..in_dim], scale[r .. r + 1]);
+    }
+    return .{ .q = q, .scale = scale };
 }
 
 fn packRowsQ8(

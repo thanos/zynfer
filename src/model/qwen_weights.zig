@@ -50,19 +50,23 @@ pub const LayerWeights = struct {
 
 pub const Weights = struct {
     arch: qwen3.Arch,
-    embed: Tensor,
+    embed: Tensor = undefined,
     final_norm: Tensor,
-    lm_head: Tensor,
+    lm_head: Tensor = undefined,
     lm_head_tied: bool,
     layers: []LayerWeights,
     allocator: std.mem.Allocator,
     /// When false, layer projections were not dequantized into host f32.
     projs_on_host: bool = true,
+    /// When false, embed/lm_head stay on the artifact / Metal (Apple Q8 slim).
+    embed_resident: bool = true,
 
     pub fn deinit(self: *Weights) void {
-        self.embed.deinit();
+        if (self.embed_resident) {
+            self.embed.deinit();
+            if (!self.lm_head_tied) self.lm_head.deinit();
+        }
         self.final_norm.deinit();
-        if (!self.lm_head_tied) self.lm_head.deinit();
         for (self.layers) |*layer| layer.deinit();
         self.allocator.free(self.layers);
         self.* = undefined;
@@ -72,8 +76,8 @@ pub const Weights = struct {
         return loadInner(allocator, art, arch, .full);
     }
 
-    /// Embed + norms only. Projection i8 stays on the artifact for Metal upload
-    /// (avoids the ~model-size host f32 twin after int8 dequant).
+    /// Norms only. Projection i8 + embed bf16 stay on the artifact for Metal
+    /// (no host f32 proj twin, no host f32 embed twin).
     pub fn loadForAppleQ8(allocator: std.mem.Allocator, art: *const artifact.Artifact, arch: qwen3.Arch) Error!Weights {
         if (!artifactHasI8Projs(art)) return error.InvalidDtype;
         return loadInner(allocator, art, arch, .apple_q8_slim);
@@ -91,20 +95,25 @@ pub const Weights = struct {
         if (meta.hidden_size != arch.hidden_size or meta.num_layers != arch.num_layers) {
             return error.ShapeMismatch;
         }
-        var embed = try loadNamed(allocator, art, qwen3.embed_tokens_name, false);
-        errdefer embed.deinit();
-        try expectShape2(embed, arch.vocab_size, arch.hidden_size);
 
         var final_norm = try loadNamed(allocator, art, qwen3.final_norm_name, false);
         errdefer final_norm.deinit();
         try expectShape1(final_norm, arch.hidden_size);
 
         const lm_head_tied = arch.tie_word_embeddings;
-        var lm_head = embed;
-        if (!lm_head_tied) {
-            lm_head = try loadNamed(allocator, art, qwen3.lm_head_name, true);
-            errdefer lm_head.deinit();
-            try expectShape2(lm_head, arch.vocab_size, arch.hidden_size);
+        var embed: Tensor = undefined;
+        var lm_head: Tensor = undefined;
+        const embed_resident = mode == .full;
+        if (embed_resident) {
+            embed = try loadNamed(allocator, art, qwen3.embed_tokens_name, false);
+            errdefer embed.deinit();
+            try expectShape2(embed, arch.vocab_size, arch.hidden_size);
+            lm_head = embed;
+            if (!lm_head_tied) {
+                lm_head = try loadNamed(allocator, art, qwen3.lm_head_name, true);
+                errdefer lm_head.deinit();
+                try expectShape2(lm_head, arch.vocab_size, arch.hidden_size);
+            }
         }
 
         const layers = try allocator.alloc(LayerWeights, arch.num_layers);
@@ -130,6 +139,7 @@ pub const Weights = struct {
             .layers = layers,
             .allocator = allocator,
             .projs_on_host = mode == .full,
+            .embed_resident = embed_resident,
         };
     }
 };

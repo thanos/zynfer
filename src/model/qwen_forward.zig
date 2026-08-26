@@ -265,18 +265,18 @@ pub const Session = struct {
         const t = token_ids.len;
         const hidden: usize = @intCast(self.arch.hidden_size);
 
+        if (self.metal_stack) |ms| {
+            try ms.forwardLastLogitsFromTokens(token_ids, logits_out);
+            self.syncHostKvUsed();
+            dump(hook, hook_ctx, "logits", logits_out);
+            return;
+        }
+
         const embed_view = try self.hidden_a.viewAs(&.{ t, hidden });
         try cpu.embeddingGather(embed_view, self.weights.embed, token_ids);
         if (hook) |_| {
             const embed = try embed_view.f32s();
             dump(hook, hook_ctx, "embed_last", embed[(t - 1) * hidden ..][0..hidden]);
-        }
-
-        if (self.metal_stack) |ms| {
-            try ms.forwardLastLogits(embed_view, logits_out);
-            self.syncHostKvUsed();
-            dump(hook, hook_ctx, "logits", logits_out);
-            return;
         }
 
         var in_buf = self.hidden_a;
@@ -323,14 +323,14 @@ pub const Session = struct {
         const t: usize = 1;
         const token_ids = [_]u32{token_id};
 
-        const embed_view = try self.hidden_a.viewAs(&.{ t, hidden });
-        try cpu.embeddingGather(embed_view, self.weights.embed, &token_ids);
-
         if (self.metal_stack) |ms| {
-            try ms.forwardLastLogits(embed_view, logits_out);
+            try ms.forwardLastLogitsFromTokens(&token_ids, logits_out);
             self.syncHostKvUsed();
             return;
         }
+
+        const embed_view = try self.hidden_a.viewAs(&.{ t, hidden });
+        try cpu.embeddingGather(embed_view, self.weights.embed, &token_ids);
 
         var in_buf = self.hidden_a;
         var out_buf = self.hidden_b;
@@ -685,9 +685,11 @@ pub const Session = struct {
     /// Stage M6 memory breakdown (host + Metal residents).
     pub fn memoryReport(self: *const Session) MemoryReport {
         var host_weights: u64 = 0;
-        host_weights += tensorBytes(self.weights.embed);
+        if (self.weights.embed_resident) {
+            host_weights += tensorBytes(self.weights.embed);
+            if (!self.weights.lm_head_tied) host_weights += tensorBytes(self.weights.lm_head);
+        }
         host_weights += tensorBytes(self.weights.final_norm);
-        if (!self.weights.lm_head_tied) host_weights += tensorBytes(self.weights.lm_head);
         for (self.weights.layers) |lw| {
             host_weights += tensorBytes(lw.input_ln) + tensorBytes(lw.q_norm) + tensorBytes(lw.k_norm);
             host_weights += tensorBytes(lw.post_attn_ln);

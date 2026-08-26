@@ -111,6 +111,16 @@ fn copyWeightHalf(
     try copyTensorToBufBf16(buf, host);
 }
 
+fn copyEmbedBf16(
+    buf: Buffer,
+    art: *const artifact.Artifact,
+    weights: *const qwen_weights.Weights,
+) !void {
+    if (try qwen_weights.copyArtifactToBf16(buf.bytes, art, qwen3.embed_tokens_name, false)) return;
+    if (!weights.embed_resident) return error.InvalidDtype;
+    try copyTensorToBufBf16(buf, weights.embed);
+}
+
 const LayerDeviceWeights = struct {
     input_ln: Buffer,
     q_norm: Buffer,
@@ -440,13 +450,18 @@ const Scratch = struct {
     final_norm: Buffer,
     lm_head: Buffer,
     lm_head_tied: bool,
+    /// Scratch.embed is bf16 (half path or Apple Q8 table).
+    embed_bf16: bool,
 
     fn init(
         gpu: *Gpu,
         arch: qwen3.Arch,
         max_seq: usize,
         weights: *const qwen_weights.Weights,
-        half: bool,
+        /// bf16 resident layer weights / final_norm / lm_head (non-Q8 half path).
+        weight_half: bool,
+        /// bf16 embedding table (half path or Q8).
+        embed_bf16: bool,
         art: *const artifact.Artifact,
     ) !Scratch {
         const h: usize = @intCast(arch.hidden_size);
@@ -482,26 +497,38 @@ const Scratch = struct {
             .normed = try gpu.allocShared(f32Bytes(h)),
             .logits = try gpu.allocShared(f32Bytes(vocab)),
             .scores = try gpu.allocShared(f32Bytes(scores_n)),
-            .embed = try gpu.allocShared(weightBytes(vocab * h, half)),
-            .final_norm = try gpu.allocShared(weightBytes(h, half)),
+            .embed = try gpu.allocShared(weightBytes(vocab * h, embed_bf16)),
+            .final_norm = try gpu.allocShared(weightBytes(h, weight_half)),
             .lm_head = undefined,
             .lm_head_tied = weights.lm_head_tied,
+            .embed_bf16 = embed_bf16,
         };
         errdefer s.deinitPartialBeforeLmHead();
-        if (half) {
-            try copyWeightHalf(s.embed, art, qwen3.embed_tokens_name, false, weights.embed);
+        if (embed_bf16) {
+            try copyEmbedBf16(s.embed, art, weights);
+        } else {
+            if (!weights.embed_resident) return error.InvalidDtype;
+            try copyTensorToBuf(s.embed, weights.embed);
+        }
+        if (weight_half) {
             try copyWeightHalf(s.final_norm, art, qwen3.final_norm_name, false, weights.final_norm);
         } else {
-            try copyTensorToBuf(s.embed, weights.embed);
             try copyTensorToBuf(s.final_norm, weights.final_norm);
         }
         if (weights.lm_head_tied) {
             s.lm_head = s.embed;
         } else {
-            s.lm_head = try gpu.allocShared(weightBytes(vocab * h, half));
-            if (half) {
-                try copyWeightHalf(s.lm_head, art, qwen3.lm_head_name, true, weights.lm_head);
+            s.lm_head = try gpu.allocShared(weightBytes(vocab * h, weight_half));
+            if (weight_half) {
+                if (!weights.embed_resident and weights.lm_head_tied) unreachable;
+                if (weights.embed_resident) {
+                    try copyWeightHalf(s.lm_head, art, qwen3.lm_head_name, true, weights.lm_head);
+                } else {
+                    if (!try qwen_weights.copyArtifactToBf16(s.lm_head.bytes, art, qwen3.lm_head_name, true))
+                        return error.InvalidDtype;
+                }
             } else {
+                if (!weights.embed_resident) return error.InvalidDtype;
                 try copyTensorToBuf(s.lm_head, weights.lm_head);
             }
         }
@@ -547,6 +574,8 @@ pub const MetalStack = struct {
     max_seq: usize,
     half_mode: bool,
     q8_mode: bool,
+    /// bf16 K/V caches (half path and Q8 path).
+    kv_bf16: bool,
     layers_w: []LayerDeviceWeights,
     layers_q8: []LayerQ8Weights,
     layers_kv: []LayerKv,
@@ -566,12 +595,17 @@ pub const MetalStack = struct {
     ) !MetalStack {
         if (max_seq == 0 or max_seq > arch.max_position_embeddings) return error.InvalidShape;
         if (max_seq > apple_ops.max_attention_kv) return error.Unsupported;
+        // Weight-half and Q8 projections are mutually exclusive schedules.
         if (half and q8) return error.Unsupported;
 
         const n_layers: usize = @intCast(arch.num_layers);
         var layers_w: []LayerDeviceWeights = &.{};
         var layers_q8: []LayerQ8Weights = &.{};
         var lm_head_q8: ?apple_ops.Q8DeviceWeights = null;
+        const weight_half = half and !q8;
+        const embed_bf16 = half or q8;
+        // Q8 keeps i8 weights + f32 norms; KV is bf16 to cut decode traffic.
+        const kv_bf16 = half or q8;
 
         if (q8) {
             layers_q8 = try allocator.alloc(LayerQ8Weights, n_layers);
@@ -594,11 +628,14 @@ pub const MetalStack = struct {
             }
             const vocab: usize = @intCast(arch.vocab_size);
             const h: usize = @intCast(arch.hidden_size);
-            // Prefer on-disk i8 lm_head; else pack HF `[vocab, hidden]` host embed/lm_head.
+            // Prefer on-disk i8 lm_head. Tied embed falls back to bf16 matvec on
+            // Scratch.embed (no host f32 twin, no init-time pack of vocab×hidden).
             lm_head_q8 = if (try LayerQ8Weights.tryUploadArtifactQ8(gpu, art, qwen3.lm_head_name, vocab, h)) |lh|
                 lh
+            else if (weights.embed_resident and !weights.lm_head_tied)
+                try LayerQ8Weights.packUploadOutIn(allocator, gpu, weights.lm_head, vocab, h)
             else
-                try LayerQ8Weights.packUploadOutIn(allocator, gpu, weights.lm_head, vocab, h);
+                null;
             errdefer if (lm_head_q8) |*lh| lh.deinit();
         } else {
             layers_w = try allocator.alloc(LayerDeviceWeights, n_layers);
@@ -610,8 +647,8 @@ pub const MetalStack = struct {
                 layers_w[i].deinit();
             };
             while (i < n_layers) : (i += 1) {
-                layers_w[i] = try LayerDeviceWeights.init(gpu, arch, half);
-                try layers_w[i].uploadFrom(weights.layers[i], half, art, @intCast(i));
+                layers_w[i] = try LayerDeviceWeights.init(gpu, arch, weight_half);
+                try layers_w[i].uploadFrom(weights.layers[i], weight_half, art, @intCast(i));
             }
         }
 
@@ -623,18 +660,18 @@ pub const MetalStack = struct {
             j -= 1;
             layers_kv[j].deinit();
         };
-        // Q8 path keeps f32 KV (isolate weight quantization).
         while (j < n_layers) : (j += 1) {
-            layers_kv[j] = try LayerKv.init(gpu, arch, max_seq, half and !q8);
+            layers_kv[j] = try LayerKv.init(gpu, arch, max_seq, kv_bf16);
         }
 
-        const scratch = try Scratch.init(gpu, arch, max_seq, weights, half and !q8, art);
+        const scratch = try Scratch.init(gpu, arch, max_seq, weights, weight_half, embed_bf16, art);
         return .{
             .gpu = gpu,
             .arch = arch,
             .max_seq = max_seq,
-            .half_mode = half and !q8,
+            .half_mode = weight_half,
             .q8_mode = q8,
+            .kv_bf16 = kv_bf16,
             .layers_w = layers_w,
             .layers_q8 = layers_q8,
             .layers_kv = layers_kv,
@@ -709,6 +746,37 @@ pub const MetalStack = struct {
         };
     }
 
+    /// Prefill or decode from token ids (gather from Scratch.embed → act_a).
+    pub fn forwardLastLogitsFromTokens(self: *MetalStack, token_ids: []const u32, logits_out: []f32) !void {
+        const arch = self.arch;
+        const h: usize = @intCast(arch.hidden_size);
+        const vocab: usize = @intCast(arch.vocab_size);
+        const t = token_ids.len;
+        if (t == 0 or t > self.max_seq) return error.InvalidShape;
+        if (logits_out.len != vocab) return error.ShapeMismatch;
+
+        const out = self.scratch.act_a.f32s()[0 .. t * h];
+        if (self.scratch.embed_bf16) {
+            const tab = self.scratch.embed.bytes;
+            if (tab.len < vocab * h * 2) return error.ShapeMismatch;
+            for (token_ids, 0..) |tid, i| {
+                if (tid >= vocab) return error.InvalidShape;
+                const src = @as(usize, tid) * h * 2;
+                bf16.decodeIntoF32(out[i * h ..][0..h], tab[src..][0 .. h * 2]);
+            }
+        } else {
+            const tab = self.scratch.embed.f32s();
+            if (tab.len < vocab * h) return error.ShapeMismatch;
+            for (token_ids, 0..) |tid, i| {
+                if (tid >= vocab) return error.InvalidShape;
+                const src = @as(usize, tid) * h;
+                @memcpy(out[i * h ..][0..h], tab[src..][0..h]);
+            }
+        }
+
+        try self.forwardLastLogitsAct(t, logits_out);
+    }
+
     /// Prefill or decode: `x_host` is `[t, hidden]` embeddings; writes last-token logits.
     pub fn forwardLastLogits(self: *MetalStack, x_host: Tensor, logits_out: []f32) !void {
         const arch = self.arch;
@@ -717,6 +785,13 @@ pub const MetalStack = struct {
         const t = x_host.shape[0];
         if (t == 0 or t > self.max_seq) return error.InvalidShape;
         if (logits_out.len != arch.vocab_size) return error.ShapeMismatch;
+        @memcpy(self.scratch.act_a.f32s()[0 .. t * h], try x_host.f32s());
+        try self.forwardLastLogitsAct(t, logits_out);
+    }
+
+    fn forwardLastLogitsAct(self: *MetalStack, t: usize, logits_out: []f32) !void {
+        const arch = self.arch;
+        const h: usize = @intCast(arch.hidden_size);
 
         const pos0 = self.layers_kv[0].used;
         if (pos0 + t > self.max_seq) return error.InvalidShape;
@@ -725,8 +800,6 @@ pub const MetalStack = struct {
         for (self.layers_kv) |kv| {
             if (kv.used != pos0) return error.InvalidShape;
         }
-
-        @memcpy(self.scratch.act_a.f32s()[0 .. t * h], try x_host.f32s());
 
         try self.gpu.batchBegin();
         errdefer self.gpu.batchAbort();
@@ -746,6 +819,7 @@ pub const MetalStack = struct {
                     out_buf,
                     t,
                     pos0,
+                    self.kv_bf16,
                 );
             } else {
                 try encodeLayer(
@@ -784,8 +858,13 @@ pub const MetalStack = struct {
         const vu: u32 = @intCast(arch.vocab_size);
         if (self.q8_mode) {
             try apple_ops.encodeRmsNorm(self.gpu, self.scratch.normed, self.scratch.xn, self.scratch.final_norm, 1, hu, arch.rms_norm_eps);
-            const lh = self.lm_head_q8.?;
-            try apple_ops.encodeMatvecQ8(self.gpu, self.scratch.logits, lh.q, lh.scale, self.scratch.normed, vu, hu);
+            if (self.lm_head_q8) |lh| {
+                try apple_ops.encodeMatvecQ8(self.gpu, self.scratch.logits, lh.q, lh.scale, self.scratch.normed, vu, hu);
+            } else {
+                // Tied word embeddings: Scratch.embed is bf16 `[vocab, hidden]`.
+                if (!self.scratch.embed_bf16) return error.InvalidDtype;
+                try apple_ops.encodeMatvecBf16(self.gpu, self.scratch.logits, self.scratch.embed, self.scratch.normed, vu, hu);
+            }
         } else if (self.half_mode) {
             try apple_ops.encodeRmsNormBf16(self.gpu, self.scratch.normed, self.scratch.xn, self.scratch.final_norm, 1, hu, arch.rms_norm_eps);
             try apple_ops.encodeMatvecBf16(self.gpu, self.scratch.logits, self.scratch.lm_head, self.scratch.normed, vu, hu);
@@ -811,6 +890,7 @@ fn encodeLayerQ8(
     out: Buffer,
     t: usize,
     pos0: usize,
+    kv_bf16: bool,
 ) !void {
     const tu: u32 = @intCast(t);
     const hu: u32 = @intCast(arch.hidden_size);
@@ -839,23 +919,44 @@ fn encodeLayerQ8(
     try apple_ops.encodePermuteTokensHeads(gpu, s.q_htd, s.q_lin, tu, n_q, d);
     try apple_ops.encodePermuteTokensHeads(gpu, s.k_htd, s.k_lin, tu, n_kv, d);
     try apple_ops.encodePermuteTokensHeads(gpu, s.v_htd, s.v_lin, tu, n_kv, d);
-    try apple_ops.encodeKvAppend(gpu, s.k_htd, s.v_htd, kv.k_cache, kv.v_cache, n_kv, tu, d, max_seq, used_u);
+    if (kv_bf16) {
+        try apple_ops.encodeKvAppendBf16(gpu, s.k_htd, s.v_htd, kv.k_cache, kv.v_cache, n_kv, tu, d, max_seq, used_u);
+    } else {
+        try apple_ops.encodeKvAppend(gpu, s.k_htd, s.v_htd, kv.k_cache, kv.v_cache, n_kv, tu, d, max_seq, used_u);
+    }
 
     const kv_len: u32 = used_u + tu;
-    try apple_ops.encodeAttention(
-        gpu,
-        s.attn_htd,
-        s.q_htd,
-        kv.k_cache,
-        kv.v_cache,
-        n_q,
-        n_kv,
-        tu,
-        kv_len,
-        max_seq,
-        d,
-        s.scores,
-    );
+    if (kv_bf16) {
+        try apple_ops.encodeAttentionBf16Kv(
+            gpu,
+            s.attn_htd,
+            s.q_htd,
+            kv.k_cache,
+            kv.v_cache,
+            n_q,
+            n_kv,
+            tu,
+            kv_len,
+            max_seq,
+            d,
+            s.scores,
+        );
+    } else {
+        try apple_ops.encodeAttention(
+            gpu,
+            s.attn_htd,
+            s.q_htd,
+            kv.k_cache,
+            kv.v_cache,
+            n_q,
+            n_kv,
+            tu,
+            kv_len,
+            max_seq,
+            d,
+            s.scores,
+        );
+    }
     try apple_ops.encodePermuteHeadsTokens(gpu, s.attn_lin, s.attn_htd, tu, n_q, d);
     try apple_ops.encodeMatmulAq8(gpu, s.ao, s.attn_lin, w.wo.q, w.wo.scale, tu, hu, qd);
 

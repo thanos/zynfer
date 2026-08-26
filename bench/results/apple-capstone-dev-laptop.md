@@ -27,17 +27,17 @@ Dims are validated on load when `vocab_size == 151936` (`registry.validateArch`)
 CI mini fixtures (tiny vocab) skip that check. Artifact load size limit raised
 to 32 GiB for 4B bf16.
 
-## KV budget (Qwen3-4B, f32 K/V)
+## KV budget (Qwen3-4B, **bf16** K/V on int8 Metal path)
 
 | max_seq | KV (MiB) | notes |
 | --- | --- | --- |
-| 256 | ~72 | comfortable |
-| 512 | ~144 | comfortable |
-| 1024 | ~288 | fine on ≥32 GB unified |
-| 2048 | ~576 | Metal `kv_len` cap; Unsupported above |
+| 256 | ~36 | comfortable |
+| 512 | ~72 | comfortable (`mem-report` metal_kv_cap) |
+| 1024 | ~144 | fine on ≥32 GB unified |
+| 2048 | ~288 | Metal `kv_len` cap; Unsupported above |
 
-Int8 weight working set for 4B is ~3.8 GiB (projections + scales; norms/embed
-float). Prefer `models/qwen3-4b-int8.zynfer` on the laptop.
+Int8 weight working set for 4B is ~4.1 GiB Metal-resident (i8 projs + scales +
+bf16 embed table; norms f32). Prefer `models/qwen3-4b-int8.zynfer` on the laptop.
 
 ## Final Apple matrix — Qwen3-0.6B calibration (same machine)
 
@@ -60,16 +60,26 @@ Derived from `qwen-bench` JSON (`prefill_ns` / `ttft_ns` / `decode_ns`,
 - bf16 apple: `decode_ns=1.007e9` / 7 → ~7.0 tok/s  
 - int8 apple: `decode_ns=4.75e8` / 7 → ~14.7 tok/s  
 
-### Long prompt (0.6B int8)
+### Long prompt (0.6B / 4B int8 Metal)
 
-Re-run when filling release notes:
+`printf 'word %.0s' {1..200}` → **213** prompt tokens; `--max-tokens 8`; fresh process.
 
-```bash
-ZYNFER_QWEN_METAL=int8 ./zig-out/bin/zynfer qwen-bench models/qwen3-0.6b.zynfer \
-  --prompt "$(python3 -c 'print(\"word \"*200)')" --max-tokens 16
-```
+| Model | Prefill TTFT (ms) | Prefill tok/s | Decode tok/s |
+| --- | --- | --- | --- |
+| 0.6B int8 | ~1407 | ~151 | ~4.2 |
+| 4B int8 | ~15352 | ~13.9 | ~1.9 |
 
-Cold vs warm: restart process for cold; second `qwen-bench` in-process is warm.
+Long decode is slower than short-prompt decode (attention scales with `kv_len`).
+
+### Cold vs warm (4B int8, prompt `"Hi"`, max_new=8)
+
+| | Prefill TTFT (ms) | Decode tok/s |
+| --- | --- | --- |
+| Cold (fresh process, includes load) | ~910 (forward only; load ~20 s wall) | ~3.6 |
+| Warm haiku chat (after prior load in other runs) | ~1080 | ~3.9 |
+
+Load is no longer dominated by host f32 dequant/pack; wall ~20 s is mostly
+mmap + Metal upload of i8 + bf16 embed.
 
 ## Qwen3-4B matrix (int8 artifact, lab machine)
 
@@ -80,11 +90,14 @@ SHA-256: `c7ef40e3312623f1958f5e4473313eb1bc06fbca1ec89721d4f15d2b26d0b541`
 | Path | Prefill TTFT (ms) | Decode tok/s | waits/tok |
 | --- | --- | --- | --- |
 | CPU | ~252700 | ~0.039 | — |
-| Metal int8 | ~1944 | ~3.59 | 2 |
+| Metal int8 | ~910 | ~3.6 | 2 |
 
-Chat smoke (`--max-tokens 24`): prefill ~1.8 s (18 tok), decode ~3.9 tok/s.
+4B bf16/f32 Metal rows: not filled (7.5 GiB bf16 artifact + host twin exceeds
+comfortable laptop headroom vs int8 path). Use 0.6B bf16 row above for half path.
 
-Haiku example (warm process):
+Chat smoke (`--max-tokens 24`): prefill ~1.1 s (19 tok), decode ~3.9 tok/s.
+
+Haiku example:
 
 ```bash
 ZYNFER_QWEN_METAL=int8 ./zig-out/bin/zynfer chat models/qwen3-4b-int8.zynfer \
@@ -98,24 +111,21 @@ winter's breath is still.
 
 ---
 prompt_tokens=19 generated_tokens=20 kv_cache=on backend=apple
-prefill_ms=1087.809 prefill_tok_s=17.466 ttft_ms=1088.216
-decode_tok_s=3.858 decode_ms_per_tok=259.230
-itl_ms p50=261.528 p95=269.741 p99=269.954 (n=19)
+prefill_ms≈1080  decode_tok_s≈3.88  itl_ms p50≈261
 ```
 
 ### Memory (`mem-report`, max_seq=512, int8 Metal)
 
 | Item | Bytes |
 | --- | --- |
-| host_weights (embed + norms; **no** proj f32 twin) | ~1.45 GiB |
-| metal_weights (int8 + scales resident) | ~5.6 GiB |
-| metal_kv_cap | ~151 MiB |
-| peak_rss | ~10.8 GiB |
+| host_weights (RMS norms only) | ~0.75 MiB |
+| metal_weights (i8 projs + scales + bf16 embed) | ~4.1 GiB |
+| metal_kv_cap (bf16 K/V) | ~72 MiB |
+| peak_rss | ~8.3 GiB |
 
-Note: Apple `ZYNFER_QWEN_METAL=int8` + on-disk i8 artifact uploads
-projections straight artifact→Metal (`loadForAppleQ8`). Host keeps embed
-(f32 for lm_head pack when tied) + RMS norms only. Disk int8 is the
-weight source of truth for Metal GEMV/GEMM.
+Note: `loadForAppleQ8` skips host embed + proj f32 twins. Embed gathers from
+Metal-resident bf16 table; tied lm_head uses bf16 matvec on that table (no
+vocab-wide i8 pack at init). Projections upload artifact i8→Metal directly.
 
 ## External comparison (same Mac)
 
@@ -125,8 +135,8 @@ weight source of truth for Metal GEMV/GEMM.
 | MLX | `mlx_lm` **not** found | Install to fill; document gap until then |
 
 Hypothesis template for gaps: bytes/token, batching, kernel fusion, quant
-scheme mismatch (GGUF vs per-row int8), and remaining residency gaps
-(embed still host-f32; KV still f32 on the int8 path).
+scheme mismatch (GGUF vs per-row int8). No matched llama.cpp/MLX numbers yet
+(no Qwen3-4B GGUF on disk; `mlx_lm` absent).
 
 ## Why zynfer feels much slower than Ollama
 
@@ -135,19 +145,18 @@ Zynfer Phase M is a measured Metal engine with a real 4B path — not a
 finished competitor. Comparing them without that context looks like a bug;
 it is mostly **different goals + unpaid optimization debt**.
 
-**Observed (this host):** Qwen3-4B int8 Metal ≈ **3.6 tok/s** decode and
-≈ **2 s** TTFT for a short prompt. Ollama (typically llama.cpp Metal + a
-GGUF quant of a similar-size model) is often many× faster for interactive
-chat on the same Mac.
+**Observed (this host):** Qwen3-4B int8 Metal ≈ **3.6–3.9 tok/s** decode and
+≈ **0.9–1.1 s** TTFT for a short prompt (forward). Ollama (typically
+llama.cpp Metal + a denser GGUF) is often many× faster for interactive chat.
 
 | Factor | Zynfer (M8 4B int8) | Ollama (typical) |
 | --- | --- | --- |
 | Mission | Curriculum engine; retain/reject by ledger | Product UX / tok/s |
 | Backend | Our Metal schedule (M0–M6) | llama.cpp Metal (years of kernels) |
 | Quant | Per-row int8 (M5), documented | Common GGUF Q4_K / similar (fewer bytes/token) |
-| Weight residency | Disk i8 → **Metal i8** (~5.6 GiB); host embed+norms ~1.45 GiB | Quantized weights stay closer to GPU; often denser GGUF |
-| Cold start | Faster than full dequant twin (was minute-scale); still heavier than GGUF | Much lighter load path |
-| Peak RSS | ~10.8 GiB (`mem-report`) | Usually far lower for 4B-class GGUF |
+| Weight residency | Disk i8 → Metal i8 (~4.1 GiB) + bf16 embed; host norms only | Quantized weights stay closer to GPU; denser GGUF |
+| Cold start | ~20 s load (mmap + Metal upload); no host f32 twin | Much lighter load path |
+| Peak RSS | ~8.3 GiB (`mem-report`) | Usually far lower for 4B-class GGUF |
 | Serving polish | Single-request `chat` / `qwen-bench` | Persistent server, tuned sampling/batching |
 
 **Hypotheses for the gap (to re-check when running a matched A/B):**
@@ -156,16 +165,15 @@ chat on the same Mac.
    our int8; that alone moves the roofline.
 2. **Kernel maturity** — attention / GEMV fusion and memory layouts in
    llama.cpp vs our educational op set.
-3. **Remaining residency** — embed still host-f32 (~1.45 GiB); KV still
-   f32 on the int8 path; cold start still heavier than GGUF mmap.
-4. **Fairness** — same model size, quant family, prompt length, max tokens,
+3. **Fairness** — same model size, quant family, prompt length, max tokens,
    and warm vs cold. Do not compare a warm Ollama server to a cold
    `zynfer chat` process.
 
+**Deferred (not this pass):** denser than int8 weights (4-bit / GGUF-like);
+further Metal kernel polish. Phase S / follow-ons.
+
 **What this does *not* mean:** Metal is “wrong,” or M8 failed. Capstone
-numbers are an honest baseline. Closing toward Ollama is future work
-(tighter kernels, optional lower-bit weights, embed/KV half) — Phase S /
-follow-ons, not a silent half-path.
+numbers are an honest baseline.
 
 **Matched comparison recipe (when filling numbers):**
 
