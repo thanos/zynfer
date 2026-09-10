@@ -200,6 +200,29 @@ pub fn build(b: *std.Build) void {
     const stageM8_step = b.step("stageM8", "Apple capstone Qwen3-4B Stage M8 ledger");
     stageM8_step.dependOn(&stageM8_cmd.step);
 
+    const stageS1_cmd = b.addRunArtifact(exe);
+    stageS1_cmd.step.dependOn(b.getInstallStep());
+    stageS1_cmd.addArg("stageS1");
+    stageS1_cmd.expectStdOutMatch("Stage S1");
+    stageS1_cmd.expectExitCode(0);
+    const stageS1_step = b.step("stageS1", "batching/scheduling Stage S1 ledger");
+    stageS1_step.dependOn(&stageS1_cmd.step);
+
+    const batch_bench_cmd = b.addRunArtifact(exe);
+    batch_bench_cmd.step.dependOn(b.getInstallStep());
+    batch_bench_cmd.addArg("batch-bench");
+    batch_bench_cmd.addArg("--mini");
+    batch_bench_cmd.addArg("--batch-size");
+    batch_bench_cmd.addArg("2");
+    batch_bench_cmd.addArg("--max-tokens");
+    batch_bench_cmd.addArg("4");
+    batch_bench_cmd.expectStdOutMatch("request scheduling");
+    batch_bench_cmd.expectStdOutMatch("token_parity: PASS");
+    batch_bench_cmd.expectStdOutMatch("json");
+    batch_bench_cmd.expectExitCode(0);
+    const batch_bench_step = b.step("batch-bench", "multi-request scheduling A/B (Stage S1)");
+    batch_bench_step.dependOn(&batch_bench_cmd.step);
+
     const qwen_bench_cmd = b.addRunArtifact(exe);
     qwen_bench_cmd.step.dependOn(b.getInstallStep());
     qwen_bench_cmd.addArg("qwen-bench");
@@ -475,6 +498,24 @@ pub fn build(b: *std.Build) void {
     stageM8_ok.expectStdOutMatch("qwen3-4b");
     stageM8_ok.expectExitCode(0);
     integration_step.dependOn(&stageM8_ok.step);
+
+    const stageS1_ok = b.addRunArtifact(exe);
+    stageS1_ok.addArg("stageS1");
+    stageS1_ok.expectStdOutMatch("Stage S1");
+    stageS1_ok.expectExitCode(0);
+    integration_step.dependOn(&stageS1_ok.step);
+
+    const batch_bench_ok = b.addRunArtifact(exe);
+    batch_bench_ok.addArg("batch-bench");
+    batch_bench_ok.addArg("--mini");
+    batch_bench_ok.addArg("--batch-size");
+    batch_bench_ok.addArg("2");
+    batch_bench_ok.addArg("--max-tokens");
+    batch_bench_ok.addArg("4");
+    batch_bench_ok.expectStdOutMatch("token_parity: PASS");
+    batch_bench_ok.expectStdOutMatch("json");
+    batch_bench_ok.expectExitCode(0);
+    integration_step.dependOn(&batch_bench_ok.step);
 
     const coreml_smoke_ok = b.addRunArtifact(exe);
     coreml_smoke_ok.addArg("coreml-smoke");

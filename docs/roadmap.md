@@ -118,12 +118,18 @@ fabricated AMD numbers**.
 
 ## Phase S — Serving (after M8, overlaps R)
 
-| Stage | Title | Old # |
-| --- | --- | --- |
-| S1 | Batching and scheduling | 21 |
-| S2 | Prefix reuse / cache management | 22 |
-| S3 | Speculative / MTP | 23 |
-| S4 | HTTP server | 24 |
+| Stage | Title | Old # | Status |
+| --- | --- | --- | --- |
+| S1 | Batching and scheduling | 21 | **done** (request-level FIFO+RR) |
+| S2 | Prefix reuse / cache management | 22 | next |
+| S3 | Speculative / MTP | 23 | pending |
+| S4 | HTTP server | 24 | pending |
+
+**S1 gate (closed):** `src/runtime/scheduler.zig` FIFO admit +
+`max_inflight` + round-robin decode over independent Sessions; greedy
+token parity vs serial; `zynfer batch-bench` + tutorial 23. Explicitly
+**not** packed `n_seq` Metal forward, prefix KV (S2), or HTTP (S4).
+Metal CB packing remains Stage M3.
 
 ---
 

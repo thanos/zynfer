@@ -24,6 +24,7 @@ pub const tokenizer = @import("model/tokenizer.zig");
 pub const artifact = @import("model/artifact.zig");
 pub const registry = @import("model/registry.zig");
 pub const sample = @import("runtime/sample.zig");
+pub const scheduler = @import("runtime/scheduler.zig");
 
 pub const cpu = struct {
     pub const ops = @import("backends/cpu/ops.zig");
@@ -66,6 +67,7 @@ test {
     _ = artifact;
     _ = registry;
     _ = sample;
+    _ = scheduler;
     _ = cpu.ops;
     _ = cpu.accelerate;
     _ = cpu.sme;

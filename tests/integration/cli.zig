@@ -138,6 +138,23 @@ test "stageM8 prints Apple-complete capstone ledger" {
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "apple-capstone-dev-laptop") != null);
 }
 
+test "stageS1 prints batching ledger" {
+    var out = try run(&.{"stageS1"});
+    defer out.deinit(std.testing.allocator);
+    try expectExited(out, 0);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "Stage S1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "max_inflight") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "batch-bench") != null);
+}
+
+test "batch-bench mini serial vs scheduled token parity" {
+    var out = try run(&.{ "batch-bench", "--mini", "--batch-size", "2", "--max-tokens", "4" });
+    defer out.deinit(std.testing.allocator);
+    try expectExited(out, 0);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "token_parity: PASS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "\"cmd\":\"batch-bench\"") != null);
+}
+
 test "stage8 prints hardening ledger" {
     var out = try run(&.{"stage8"});
     defer out.deinit(std.testing.allocator);

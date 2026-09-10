@@ -24,6 +24,7 @@ const usage =
     \\  zynfer stageM6      static decode plan Stage M6 ledger
     \\  zynfer stageM7      ANE / Core ML Qwen-scale Stage M7 ledger
     \\  zynfer stageM8      Apple capstone: Qwen3-4B + benchmark matrix
+    \\  zynfer stageS1      Batching / scheduling Stage S1 ledger
     \\  zynfer coreml-smoke [PATH]  Load toy Core ML .mlpackage + one predict (M7 polish)
     \\  zynfer mem-report   weights / KV / scratch / peak RSS (Stage M6)
     \\  zynfer inspect PATH Validate and print a .zynfer artifact
@@ -34,6 +35,7 @@ const usage =
     \\  zynfer kv-bench [ARTIFACT] [--mini] [--layout] [--prompt TEXT] [--max-tokens N]
     \\  zynfer qwen-bench [ARTIFACT] [--mini] [--prompt TEXT] [--max-tokens N]
     \\  zynfer qwen-profile [ARTIFACT] [--mini] [--prompt TEXT] [--backend apple|cpu]
+    \\  zynfer batch-bench [ARTIFACT] [--mini] [--batch-size N] [--max-inflight N] [--max-tokens N]
     \\  zynfer setup [--model 0.6b|4b] [--quantize] [--skip-golden] [--skip-pip]
     \\  zynfer backends     List selectable backends
     \\  zynfer ops-bench    CPU vs Apple op microbenchmarks
@@ -73,6 +75,8 @@ pub fn main(init: std.process.Init) !void {
     var prompt_arg: ?[]const u8 = null;
     var tokenizer_dir: ?[]const u8 = null;
     var max_tokens: u32 = 64;
+    var batch_size: u32 = 2;
+    var max_inflight: u32 = 2;
     var temperature: f32 = 0;
     var top_k: u32 = 0;
     var top_p: f32 = 1.0;
@@ -155,6 +159,34 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.startsWith(u8, arg, "--max-tokens=")) {
             max_tokens = std.fmt.parseInt(u32, arg["--max-tokens=".len..], 10) catch {
                 std.debug.print("invalid --max-tokens\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.eql(u8, arg, "--batch-size")) {
+            const v = args_it.next() orelse {
+                std.debug.print("missing value for --batch-size\n", .{});
+                std.process.exit(2);
+            };
+            batch_size = std.fmt.parseInt(u32, v, 10) catch {
+                std.debug.print("invalid --batch-size\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.startsWith(u8, arg, "--batch-size=")) {
+            batch_size = std.fmt.parseInt(u32, arg["--batch-size=".len..], 10) catch {
+                std.debug.print("invalid --batch-size\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.eql(u8, arg, "--max-inflight")) {
+            const v = args_it.next() orelse {
+                std.debug.print("missing value for --max-inflight\n", .{});
+                std.process.exit(2);
+            };
+            max_inflight = std.fmt.parseInt(u32, v, 10) catch {
+                std.debug.print("invalid --max-inflight\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.startsWith(u8, arg, "--max-inflight=")) {
+            max_inflight = std.fmt.parseInt(u32, arg["--max-inflight=".len..], 10) catch {
+                std.debug.print("invalid --max-inflight\n", .{});
                 std.process.exit(2);
             };
         } else if (std.mem.eql(u8, arg, "--temperature") or std.mem.eql(u8, arg, "--temp")) {
@@ -309,6 +341,8 @@ pub fn main(init: std.process.Init) !void {
         try printStageM7(writer);
     } else if (std.mem.eql(u8, command, "stageM8") or std.mem.eql(u8, command, "stagem8")) {
         try printStageM8(writer);
+    } else if (std.mem.eql(u8, command, "stageS1") or std.mem.eql(u8, command, "stages1")) {
+        try printStageS1(writer);
     } else if (std.mem.eql(u8, command, "coreml-smoke") or std.mem.eql(u8, command, "coremlsmoke")) {
         const path = if (n_pos >= 1) positionals[0] else "tools/fixtures/coreml_toy.mlpackage";
         try cmdCoreMlSmoke(writer, path);
@@ -398,6 +432,19 @@ pub fn main(init: std.process.Init) !void {
             artifact_mini,
             tokens_arg,
             forced_backend,
+        );
+    } else if (std.mem.eql(u8, command, "batch-bench")) {
+        try runBatchBench(
+            allocator,
+            io,
+            writer,
+            if (n_pos >= 1) positionals[0] else null,
+            artifact_mini,
+            batch_size,
+            max_inflight,
+            max_tokens,
+            seed,
+            try resolveKind(forced_backend),
         );
     } else if (std.mem.eql(u8, command, "chat")) {
         // zynfer chat "prompt"  OR  zynfer chat ARTIFACT "prompt"  OR  --prompt=
@@ -926,6 +973,31 @@ fn printStageM8(writer: *std.Io.Writer) !void {
     try writer.print("See docs/stages/M8-apple-capstone.md\n", .{});
     try writer.print("See docs/tutorials/22-what-makes-apple-inference-fast.md\n", .{});
     try writer.print("See bench/results/apple-capstone-dev-laptop.md\n", .{});
+}
+
+fn printStageS1(writer: *std.Io.Writer) !void {
+    try writer.print("zynfer Stage S1 — batching and scheduling\n", .{});
+    try writer.print("=========================================\n\n", .{});
+    try writer.print("Done (request-level)\n", .{});
+    try writer.print("  queue:            FIFO admit (one job/iteration) into max_inflight slots\n", .{});
+    try writer.print("  decode:           round-robin one token across active slots\n", .{});
+    try writer.print("  ownership:        each request owns its Session / KV (no shared cache)\n", .{});
+    try writer.print("  baseline:         serial generate A/B vs scheduled\n", .{});
+    try writer.print("  metrics:          concurrency, aggregate tok/s, per-req tok/s, TTFT, mean ITL\n", .{});
+    try writer.print("  CLI:              batch-bench [--mini] [--batch-size N] [--max-inflight N]\n\n", .{});
+    try writer.print("Not Stage S1 (explicit non-goals)\n", .{});
+    try writer.print("  packed n_seq Metal forward / continuous batch in one CB\n", .{});
+    try writer.print("  prefix / paged KV reuse (S2)\n", .{});
+    try writer.print("  speculative / MTP (S3)\n", .{});
+    try writer.print("  HTTP server (S4)\n", .{});
+    try writer.print("  Metal CB packing — that is Stage M3, not request scheduling\n\n", .{});
+    try writer.print("Gate\n", .{});
+    try writer.print("  >=2 requests; greedy token parity serial vs scheduled (mini)\n", .{});
+    try writer.print("  batch-bench prints TTFT / aggregate tok/s + JSON\n", .{});
+    try writer.print("  tutorial distinguishes request scheduling vs Metal CB batching\n\n", .{});
+    try writer.print("See docs/stages/S1-batching-and-scheduling.md\n", .{});
+    try writer.print("See docs/tutorials/23-batching-and-scheduling.md\n", .{});
+    try writer.print("See bench/results/stageS1-dev-laptop.md\n", .{});
 }
 
 fn cmdCoreMlSmoke(writer: *std.Io.Writer, path: []const u8) !void {
@@ -1902,6 +1974,219 @@ fn runQwenBench(
     try writer.print("]}}\n", .{});
 
     if (n_rows == 0) {
+        try writer.flush();
+        std.process.exit(1);
+    }
+}
+
+/// Stage S1: serial vs scheduled multi-request A/B (independent Sessions).
+fn runBatchBench(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    writer: *std.Io.Writer,
+    artifact_path_opt: ?[]const u8,
+    force_mini: bool,
+    batch_size_in: u32,
+    max_inflight_in: u32,
+    max_new_tokens_in: u32,
+    seed: u64,
+    kind: zynfer.BackendKind,
+) !void {
+    const default_path = "models/qwen3-0.6b.zynfer";
+    const use_mini = force_mini or (artifact_path_opt == null and !zynfer.util.fileExists(io, default_path));
+    const batch_size: usize = if (batch_size_in == 0) 2 else batch_size_in;
+    const inflight: usize = if (max_inflight_in == 0) 2 else max_inflight_in;
+    const max_new: u32 = if (max_new_tokens_in == 64 and use_mini) 4 else if (max_new_tokens_in == 64) 8 else max_new_tokens_in;
+
+    try writer.print("zynfer batch-bench — request scheduling (Stage S1)\n", .{});
+    try writer.print("=================================================\n\n", .{});
+    try writer.print("note: request-level FIFO+RR over independent Sessions;\n", .{});
+    try writer.print("      not Metal CB packing (M3) and not packed n_seq forward.\n\n", .{});
+
+    var art: zynfer.artifact.Artifact = undefined;
+    var arch: zynfer.qwen3.Arch = undefined;
+    var prompt_pool: [4][]const u32 = undefined;
+    var owned_prompts: [4]?[]u32 = .{ null, null, null, null };
+    defer for (owned_prompts) |p| if (p) |ids| allocator.free(ids);
+
+    if (use_mini) {
+        try writer.print("fixture: stage11-mini (in-memory)\n", .{});
+        const bytes = try zynfer.qwen_forward.buildMiniArtifact(allocator);
+        art = try zynfer.artifact.Artifact.loadOwned(allocator, bytes);
+        arch = zynfer.qwen3.stage11_mini;
+        const a = try allocator.dupe(u32, &.{ 2, 3 });
+        const b = try allocator.dupe(u32, &.{ 2, 4 });
+        const c = try allocator.dupe(u32, &.{ 2, 5 });
+        const d = try allocator.dupe(u32, &.{ 2, 6 });
+        owned_prompts = .{ a, b, c, d };
+        prompt_pool = .{ a, b, c, d };
+    } else {
+        const path = artifact_path_opt orelse default_path;
+        try writer.print("artifact: {s}\n", .{path});
+        art = zynfer.artifact.Artifact.loadFile(allocator, io, path) catch |err| {
+            std.debug.print("batch-bench: load failed ({s}): {s}\n", .{ path, @errorName(err) });
+            std.process.exit(2);
+        };
+        arch = try art.meta.toArch();
+        // Distinct token prompts without requiring a tokenizer (CSV-style ids).
+        const a = try allocator.dupe(u32, &.{ 151643, 8948 });
+        const b = try allocator.dupe(u32, &.{ 151643, 872 });
+        const c = try allocator.dupe(u32, &.{ 151643, 2610 });
+        const d = try allocator.dupe(u32, &.{ 151643, 320 });
+        owned_prompts = .{ a, b, c, d };
+        prompt_pool = .{ a, b, c, d };
+    }
+    defer art.deinit();
+
+    if (batch_size == 0) {
+        std.debug.print("batch-bench: --batch-size must be >= 1\n", .{});
+        std.process.exit(2);
+    }
+
+    const jobs = try allocator.alloc(zynfer.scheduler.Job, batch_size);
+    defer allocator.free(jobs);
+    var max_prompt: usize = 0;
+    for (jobs, 0..) |*job, i| {
+        const ids = prompt_pool[i % prompt_pool.len];
+        job.* = .{
+            .prompt_ids = ids,
+            .max_new_tokens = max_new,
+            .sample = .{ .temperature = 0 },
+            .seed = seed +% i,
+        };
+        max_prompt = @max(max_prompt, ids.len);
+    }
+    const max_seq = max_prompt + max_new;
+    if (max_seq == 0 or max_seq > arch.max_position_embeddings) {
+        std.debug.print("batch-bench: sequence too long\n", .{});
+        std.process.exit(2);
+    }
+
+    try writer.print("backend={s} batch_size={d} max_inflight={d} max_new={d} max_seq={d}\n\n", .{
+        kind.name(),
+        batch_size,
+        inflight,
+        max_new,
+        max_seq,
+    });
+
+    var serial = zynfer.scheduler.runSerial(allocator, io, &art, arch, kind, max_seq, jobs) catch |err| {
+        std.debug.print("batch-bench: serial failed: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    defer serial.deinit();
+
+    var scheduled = zynfer.scheduler.runScheduled(allocator, io, &art, arch, kind, max_seq, jobs, inflight) catch |err| {
+        std.debug.print("batch-bench: scheduled failed: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    defer scheduled.deinit();
+
+    var parity_ok = true;
+    if (serial.n_requests != scheduled.n_requests) parity_ok = false;
+    for (serial.requests, scheduled.requests) |a, b| {
+        if (!std.mem.eql(u32, a.token_ids, b.token_ids)) {
+            parity_ok = false;
+            break;
+        }
+    }
+
+    try writer.print("{s:<10} {s:>10} {s:>12} {s:>14} {s:>10}\n", .{
+        "mode",
+        "inflight",
+        "wall_ms",
+        "agg_tok/s",
+        "gen_tok",
+    });
+    try writer.print("{s:-<10} {s:->10} {s:->12} {s:->14} {s:->10}\n", .{ "", "", "", "", "" });
+    inline for (.{ &serial, &scheduled }) |rep| {
+        try writer.print("{s:<10} {d:>10} {d:>12.3} {d:>14.3} {d:>10}\n", .{
+            rep.mode,
+            rep.max_inflight,
+            @as(f64, @floatFromInt(rep.wall_ns)) / 1e6,
+            rep.aggregate_tok_s,
+            rep.total_generated,
+        });
+    }
+    try writer.writeAll("\n");
+
+    try writer.print("{s:<6} {s:<10} {s:>8} {s:>10} {s:>10} {s:>10} {s:>10} {s:>12}\n", .{
+        "id",
+        "mode",
+        "gen",
+        "ttft_ms",
+        "e2e_ms",
+        "itl_ms",
+        "tok/s",
+        "queue_ms",
+    });
+    try writer.print("{s:-<6} {s:-<10} {s:->8} {s:->10} {s:->10} {s:->10} {s:->10} {s:->12}\n", .{
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+    });
+
+    const printReq = struct {
+        fn go(w: *std.Io.Writer, mode: []const u8, r: zynfer.scheduler.RequestStats) !void {
+            const e2e_s = @as(f64, @floatFromInt(r.e2e_ns)) * 1e-9;
+            const tok_s = if (e2e_s == 0) 0 else @as(f64, @floatFromInt(r.generated_tokens)) / e2e_s;
+            try w.print("{d:<6} {s:<10} {d:>8} {d:>10.3} {d:>10.3} {d:>10.3} {d:>10.3} {d:>12.3}\n", .{
+                r.id,
+                mode,
+                r.generated_tokens,
+                @as(f64, @floatFromInt(r.ttft_ns)) / 1e6,
+                @as(f64, @floatFromInt(r.e2e_ns)) / 1e6,
+                @as(f64, @floatFromInt(r.mean_itl_ns)) / 1e6,
+                tok_s,
+                @as(f64, @floatFromInt(r.queue_wait_ns)) / 1e6,
+            });
+        }
+    }.go;
+
+    for (serial.requests) |r| try printReq(writer, "serial", r);
+    for (scheduled.requests) |r| try printReq(writer, "scheduled", r);
+
+    try writer.print("\ntoken_parity: {s}\n\n", .{if (parity_ok) "PASS" else "FAIL"});
+
+    try writer.print("json\n", .{});
+    try writer.print("{{\"cmd\":\"batch-bench\",\"backend\":\"{s}\",\"mini\":{},\"batch_size\":{d},\"max_inflight\":{d},\"max_new\":{d},\"token_parity\":{},\"serial\":{{\"wall_ns\":{d},\"aggregate_tok_s\":{d:.6},\"total_generated\":{d}}},\"scheduled\":{{\"wall_ns\":{d},\"aggregate_tok_s\":{d:.6},\"total_generated\":{d},\"max_inflight\":{d}}},\"requests\":[", .{
+        kind.name(),
+        use_mini,
+        batch_size,
+        inflight,
+        max_new,
+        parity_ok,
+        serial.wall_ns,
+        serial.aggregate_tok_s,
+        serial.total_generated,
+        scheduled.wall_ns,
+        scheduled.aggregate_tok_s,
+        scheduled.total_generated,
+        scheduled.max_inflight,
+    });
+    for (scheduled.requests, 0..) |r, i| {
+        if (i != 0) try writer.writeAll(",");
+        const e2e_s = @as(f64, @floatFromInt(r.e2e_ns)) * 1e-9;
+        const tok_s = if (e2e_s == 0) 0 else @as(f64, @floatFromInt(r.generated_tokens)) / e2e_s;
+        try writer.print("{{\"id\":{d},\"prompt_tokens\":{d},\"generated\":{d},\"ttft_ns\":{d},\"e2e_ns\":{d},\"mean_itl_ns\":{d},\"queue_wait_ns\":{d},\"tok_s\":{d:.6}}}", .{
+            r.id,
+            r.prompt_tokens,
+            r.generated_tokens,
+            r.ttft_ns,
+            r.e2e_ns,
+            r.mean_itl_ns,
+            r.queue_wait_ns,
+            tok_s,
+        });
+    }
+    try writer.print("]}}\n", .{});
+
+    if (!parity_ok) {
         try writer.flush();
         std.process.exit(1);
     }
