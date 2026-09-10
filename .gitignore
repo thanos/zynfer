@@ -23,6 +23,8 @@ models/
 *.csv
 *.json
 !bench/baselines/*.json
+# Core ML .mlpackage requires Manifest.json (otherwise CI load smoke fails).
+!tools/fixtures/**/Manifest.json
 prof/
 trace/
 

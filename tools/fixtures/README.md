@@ -22,6 +22,7 @@ and [`docs/tutorials/11-qwen-forward-and-golden.md`](../../docs/tutorials/11-qwe
 | `ref_forward_numpy.py` | numpy | Replay forward from safetensors; bisect vs zynfer `--dump` |
 | `dump_forward_refs.py` | torch, transformers | HF hooks: layer0 / normed / logits f32 dumps |
 | `make_coreml_toy.py` | coremltools, numpy | Tiny fixed-shape `.mlpackage` for Stage M7 load smoke |
+| `coreml_toy.mlpackage/` | (checked in) | Must include `Manifest.json` — do not let `*.json` gitignore drop it |
 
 Checked-in Core ML toy (rebuild with the script above):
 
