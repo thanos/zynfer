@@ -479,9 +479,17 @@ pub fn build(b: *std.Build) void {
     const coreml_smoke_ok = b.addRunArtifact(exe);
     coreml_smoke_ok.addArg("coreml-smoke");
     coreml_smoke_ok.addArg("tools/fixtures/coreml_toy.mlpackage");
-    coreml_smoke_ok.expectStdOutMatch("predict_ok");
-    coreml_smoke_ok.expectStdOutMatch("does NOT verify ANE");
-    coreml_smoke_ok.expectExitCode(0);
+    if (have_apple) {
+        // Real Core ML load/predict only on macOS.
+        coreml_smoke_ok.expectStdOutMatch("predict_ok");
+        coreml_smoke_ok.expectStdOutMatch("does NOT verify ANE");
+        coreml_smoke_ok.expectExitCode(0);
+    } else {
+        // Linux CI: command must report unsupported and exit 0 (not fail the suite).
+        coreml_smoke_ok.expectStdOutMatch("unsupported");
+        coreml_smoke_ok.expectStdOutMatch("does NOT verify ANE");
+        coreml_smoke_ok.expectExitCode(0);
+    }
     integration_step.dependOn(&coreml_smoke_ok.step);
 
     const mem_report_ok = b.addRunArtifact(exe);

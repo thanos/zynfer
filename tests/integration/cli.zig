@@ -109,10 +109,22 @@ test "stageM7 prints Qwen-scale ANE reject ledger" {
 }
 
 test "coreml-smoke loads toy mlpackage" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+
     var out = try run(&.{ "coreml-smoke", "tools/fixtures/coreml_toy.mlpackage" });
     defer out.deinit(std.testing.allocator);
     try expectExited(out, 0);
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "predict_ok") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "does NOT verify ANE") != null);
+}
+
+test "coreml-smoke reports unsupported off macOS" {
+    if (@import("builtin").os.tag == .macos) return error.SkipZigTest;
+
+    var out = try run(&.{ "coreml-smoke", "tools/fixtures/coreml_toy.mlpackage" });
+    defer out.deinit(std.testing.allocator);
+    try expectExited(out, 0);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "unsupported") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "does NOT verify ANE") != null);
 }
 

@@ -20,25 +20,32 @@ kcov or a ReleaseSafe timed run.
 | Docs | `.github/workflows/docs.yml` | autodoc + markdown site; GitHub Pages deploy from `main` |
 
 HIP is always off in CI (`-Dhip=off`). GitHub-hosted runners do not have
-ROCm. Apple Metal GPU tests skip on `macos-latest` via
-`ZYNFER_SKIP_APPLE_GPU=1` because those images often lack the Metal
-shader toolchain. Compile still links Metal on macOS. Full Metal
-differential tests run on a developer Mac: `zig build test`.
+ROCm. Apple Metal **GPU** tests skip on `macos-latest` via
+`ZYNFER_SKIP_APPLE_GPU=1` because those images often lack a usable Metal
+GPU / shader path for differential tests. Compile still **links Metal** on
+macOS. Full Metal differential tests run on a developer Mac:
+`zig build test` (without `ZYNFER_SKIP_APPLE_GPU`).
+
+## Integration tests
+
+`zig build integration` installs `zynfer` and checks CLI contracts on a
+**matrix** (`ubuntu-latest` + `macos-latest`):
+
+| Runner | What it proves |
+| --- | --- |
+| Ubuntu | CPU contracts; `coreml-smoke` exits 0 with **unsupported** |
+| macOS | Apple-linked binary; `coreml-smoke` toy **load/predict**; `mem-report` default backend |
+
+Use `runs-on: macos-14` (or `macos-13`) instead of `macos-latest` if you
+need a pinned image. macOS minutes are slower and cost more than Ubuntu;
+keep heavy Metal GPU work on a local Mac, not Actions.
 
 ## Regression tests
 
 `zig build test` is the numerical/invariant regression suite: CPU oracle
 ops, tensor construction, backend selection (unknown names fail), and
-Metal-vs-CPU when the GPU path is enabled.
-
-## Integration tests
-
-`zig build integration` installs `zynfer` and checks CLI contracts:
-
-- `help` / `env` / `caps --backend cpu` / `backends` exit 0
-- `--backend cuda` and unknown commands exit 2
-- `ops-bench --backend cpu` prints a JSON object with `cpu_ns`
-- `block-bench --backend cpu` prints a JSON object with `cpu_prefill_ns`
+Metal-vs-CPU when the GPU path is enabled. On `macos-latest` CI, set
+`ZYNFER_SKIP_APPLE_GPU=1` (already in the workflow).
 
 ## Coverage
 

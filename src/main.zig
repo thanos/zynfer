@@ -313,10 +313,7 @@ pub fn main(init: std.process.Init) !void {
         const path = if (n_pos >= 1) positionals[0] else "tools/fixtures/coreml_toy.mlpackage";
         try cmdCoreMlSmoke(writer, path);
     } else if (std.mem.eql(u8, command, "mem-report") or std.mem.eql(u8, command, "memreport")) {
-        const backend: zynfer.BackendKind = blk: {
-            if (forced_backend) |fb| break :blk try zynfer.backend.parseBackendKind(fb);
-            break :blk .apple;
-        };
+        const backend = try resolveKind(forced_backend);
         const path = if (n_pos >= 1) positionals[0] else null;
         try cmdMemReport(host, writer, path, artifact_mini, max_tokens, backend);
     } else if (std.mem.eql(u8, command, "inspect")) {
@@ -945,6 +942,12 @@ fn cmdCoreMlSmoke(writer: *std.Io.Writer, path: []const u8) !void {
     try writer.print("detail:         {s}\n\n", .{s.detail});
     try writer.print("Note: load/predict success does NOT verify ANE placement.\n", .{});
     try writer.print("      ane_execution_verified stays false without Instruments.\n", .{});
+
+    if (comptime !zynfer.apple.coreml.have_coreml) {
+        try writer.print("Core ML smoke is unsupported on this platform; skipping.\n", .{});
+        try writer.flush();
+        return;
+    }
     try writer.flush();
     if (s.status != 0 or !s.load_ok or !s.predict_ok) {
         std.process.exit(1);
