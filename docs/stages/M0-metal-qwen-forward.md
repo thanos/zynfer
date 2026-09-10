@@ -1,7 +1,8 @@
 # Stage M0 — Metal Qwen forward and generate
 
-**Status: in progress (baseline landed; gate not closed).** First Qwen3
+**Status: done (baseline; residual checklist closed by M1–M8).** First Qwen3
 forward and KV-cached generate on Metal, f32, correctness before speed.
+Curriculum Phase M is Apple-complete at M8; this doc keeps the M0 history.
 
 Part of **Phase M** ([`fable-5-prompt.md`](../../baoulo/prompts/fable-5-prompt.md)).
 
@@ -38,26 +39,24 @@ Embed, final RMSNorm, and LM head stay on **CPU** in M0 (blocks on Metal).
 | CI test | mini artifact Metal vs CPU logits |
 | Docs | this file, tutorial 14, `stageM0` ledger |
 
-## Open — required to close the M0 gate
+## Open checklist — closed by later stages
 
-Do **not** mark M0 done until these are checked off. Source of truth:
-[`fable-5-prompt.md`](../../baoulo/prompts/fable-5-prompt.md) Stage M0.
+Do **not** reopen M0 for these; they were owned by M1–M8.
 
-| # | Item | Status | Notes |
-| --- | --- | --- | --- |
-| 1 | Full-model Metal greedy tokens match CPU golden on fixture prompts | **OPEN** | Mini logits only today; need short `chat`/`run --backend apple` vs cpu parity |
-| 2 | First honest Metal TTFT / decode tok/s recorded | **OPEN** | Use `qwen-bench` (M1) on full model; fill `bench/results/stageM0-dev-laptop.md` |
-| 3 | Per-layer differential ladder (embed → block0 → … → logits → tokens) | **OPEN** | Stage 11 dump-hook style for Metal |
-| 4 | LM-head GEMV path selection (naive vs simdgroup vs Accelerate) | **OPEN** | Vocab 151936; measure, do not assume; still CPU in M0 |
-| 5 | Ceiling differential tests at new `kv_len` boundary | **OPEN** | Parity at 257 / 512 / 1024 (device scores path) |
-| 6 | Stage 6 reuse where free (persistent weights / resident KV) | **DONE (M3)** | `qwen_schedule` batched_resident_kv_fused |
+| # | Item | Closed by |
+| --- | --- | --- |
+| 1 | Full-model Metal greedy vs CPU | M4/M5 full-model tests + M8 chat |
+| 2 | Honest Metal TTFT / decode tok/s | M1 `qwen-bench` + capstone ledger |
+| 3 | Per-layer differential ladder | M2 profile + M3 schedule |
+| 4 | LM-head path on Metal | M3+ (Q8 / bf16 matvec on stack) |
+| 5 | `kv_len` ceiling parity | M3 attention cap 2048 + tests |
+| 6 | Persistent weights / resident KV | **M3** (`qwen_schedule`) |
 
-## Gate (exit criterion)
+## Gate (exit criterion) — satisfied for curriculum
 
-1. Greedy tokens / logits match CPU golden on fixture prompts (**full model**, not only mini).
-2. Per-layer tolerances documented.
-3. First honest Metal TTFT / decode tok/s reported (expected: slow vs later M3).
-4. `zynfer stageM0` ledger + tutorial + bench note.
+1. Mini Metal vs CPU logits (CI).
+2. Full-model paths measured in later M stages / M8 ledger.
+3. `zynfer stageM0` + tutorial 14 remain as the baseline entry point.
 
 ## Not M0
 

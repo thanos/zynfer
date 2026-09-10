@@ -10,7 +10,7 @@ accepted only when they match it within an explicit tolerance.
 | CPU oracle | f32 | Scalar loops in `src/backends/cpu/ops.zig` |
 | Metal baseline (M3 default) | f32 weights + f32 KV | Batched schedule |
 | Metal half path (M4) | **bf16** weights + **bf16** KV | `ZYNFER_QWEN_METAL=bf16`; f32 activations and accumulators |
-| Metal int8 path (M5) | **int8** projections + f32 scales; f32 KV | `ZYNFER_QWEN_METAL=int8`; fused dequant in GEMM/GEMV |
+| Metal int8 path (M5+) | **int8** projections + f32 scales; **bf16** KV; bf16 embed table | `ZYNFER_QWEN_METAL=int8`; fused dequant in GEMM/GEMV |
 | Checkpoint / `.zynfer` | BF16 payloads (tag `2`); optional i8 tag `3` | Converter / `quantize_zynfer_int8.py` |
 | RMSNorm / softmax accumulation | f32 | Stability before speed |
 | RoPE | f32 split-half | Matches the CPU Qwen3-style pairing |

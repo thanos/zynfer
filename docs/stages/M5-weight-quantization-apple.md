@@ -28,9 +28,10 @@ Default Apple path remains M3 f32. Half: `bf16`. Int8: `int8|q8`.
 | Group | **Full output row** (per-channel / per-row) |
 | Scale | `max_abs(row) / 127`, symmetric, **no zero-point** |
 | Storage | i8 `[out, in]` (HF layout) + f32 `scale[out]` |
-| Pack site | `MetalStack.init` from host f32 `[in,out]` (transpose → pack) |
+| Pack site | Prefer on-disk i8 + `.qscale` → Metal; else pack host f32 `[in,out]` |
 | Dequant | **Fused** in `matmul_aq8_f32` / `matvec_q8_f32` |
-| Not quantized | Norms, embed gather, KV (f32), activations |
+| Not quantized | Norms (f32); embed table (bf16 gather); activations (f32) |
+| KV | **bf16** on the int8 Metal path (post-M8; was f32 in M5 v1) |
 
 Why per-row (not group-32): already implemented and differentially tested at
 ops level (Stage 5); Qwen decode is bandwidth-bound on weight traffic; row
@@ -63,7 +64,8 @@ python3 tools/checkpoint/quantize_zynfer_int8.py \
 | --- | --- |
 | `src/model/qwen_quant.zig` | Scheme + pack/dequant CPU decoder |
 | `src/backends/apple/kernels.metal` | `matmul_aq8_f32` |
-| `src/backends/apple/qwen_schedule.zig` | `LayerQ8Weights`, path `batched_resident_kv_q8` |
+| `src/backends/apple/qwen_schedule.zig` | `LayerQ8Weights`, artifact i8 upload, bf16 KV, path `batched_resident_kv_q8` |
+| `src/model/qwen_weights.zig` | `loadForAppleQ8` (norms-only host when artifact is i8) |
 | `tools/checkpoint/quantize_zynfer_int8.py` | Dev-time i8 artifact writer |
 | `docs/tutorials/19-quantization-on-apple-silicon.md` | Walkthrough |
 | `bench/results/stageM5-dev-laptop.md` | A/B + quality |

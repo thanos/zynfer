@@ -133,3 +133,23 @@ test "packInOutToQ8 round-trips within packing error" {
     transpose2d(expect, s, 4, 3);
     try compare.expectClose(expect, recon, 2e-2, 2e-2);
 }
+
+test "packBf16OutInToQ8 matches f32 pack within packing error" {
+    const gpa = std.testing.allocator;
+    const out_dim: usize = 3;
+    const in_dim: usize = 4;
+    var f32_host = try Tensor.alloc(gpa, .f32, &.{ out_dim, in_dim });
+    defer f32_host.deinit();
+    const s = try f32_host.f32s();
+    for (s, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i)) * 0.1 - 0.5;
+    var bf16_bytes: [3 * 4 * 2]u8 = undefined;
+    bf16.encodeFromF32(&bf16_bytes, s);
+    const from_bf16 = try packBf16OutInToQ8(gpa, &bf16_bytes, out_dim, in_dim);
+    defer gpa.free(from_bf16.q);
+    defer gpa.free(from_bf16.scale);
+    const from_f32 = try packOutInToQ8(gpa, f32_host, out_dim, in_dim);
+    defer gpa.free(from_f32.q);
+    defer gpa.free(from_f32.scale);
+    // Scales should match closely; i8 may differ by 1 on rounding edges.
+    try compare.expectClose(from_f32.scale, from_bf16.scale, 1e-3, 1e-3);
+}

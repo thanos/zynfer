@@ -18,26 +18,22 @@ The project is also educational. Every major subsystem is developed in stages, b
 
 ## Status
 
-**v0.1.0 — Apple Metal tiny-block backend (Stages 0–8).**
-**Stage 10 — `.zynfer` artifact inspect/load is done** (see `docs/stages/10-checkpoint-artifact.md`).
-**Stage 11 — Qwen forward + golden logits is done (CPU)** — full 28-layer
-prefill, last-token logits vs PyTorch golden on local weights; mini fixture in
-CI. Workflow: [`docs/stages/11-qwen-forward.md`](docs/stages/11-qwen-forward.md),
-fixtures: [`tools/fixtures/README.md`](tools/fixtures/README.md).
-**Stage 12 — tokenizer + sampling is done (CPU)** — `zynfer run --prompt`
-with Qwen2 BPE, greedy/temp/top-k/top-p, TTFT metrics.
-See [`docs/stages/12-tokenizer-sampling.md`](docs/stages/12-tokenizer-sampling.md).
-**Stage 13 — KV cache is done (CPU)** — cached vs uncached generate, parity,
-`kv-bench`, memory formula.
-See [`docs/stages/13-kv-cache.md`](docs/stages/13-kv-cache.md).
-**Phase M (Apple Qwen, fast path) — in progress** — see
-[`baoulo/prompts/fable-5-prompt.md`](baoulo/prompts/fable-5-prompt.md) and
-[`docs/roadmap.md`](docs/roadmap.md). **M0:** Metal Qwen blocks + `--backend apple`
-(gate open — checklist in [`docs/stages/M0-metal-qwen-forward.md`](docs/stages/M0-metal-qwen-forward.md)).
-**M1 done:** `qwen-bench` prefill/decode split.
-**M2 done:** `qwen-profile` one-token family table + STREAM roofline.
-**M3 done:** batched Metal Qwen (`~2` waits/forward) + fusion ledger.
-**Phase R (AMD)** waits for hardware; **Phase S (serving)** after M8.
+**v0.3.0 — Apple-complete (Phase M / Backend 1).** Registered quantized
+Qwen3-4B on Metal int8 (`ZYNFER_QWEN_METAL=int8`); Core ML/ANE rejected at
+Qwen scale (M7). See [`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md),
+[`docs/stages/M8-apple-capstone.md`](docs/stages/M8-apple-capstone.md),
+[`docs/roadmap.md`](docs/roadmap.md).
+
+**v0.1.0 — Apple Metal tiny-block backend (Stages 0–8)** remains the
+foundation release ([`docs/releases/v0.1.0.md`](docs/releases/v0.1.0.md)).
+Stages **10–13** (artifact, Qwen CPU forward, tokenizer/sampling, KV cache)
+are done.
+
+**Phase M (M0–M8) — done (Apple-complete).** Metal Qwen schedule (batched,
+bf16, int8), static decode plan, ANE reject, 4B capstone ledger. Post-M8
+polish: artifact i8→Metal without host f32 twins; bf16 KV on the int8 path.
+**Next:** Phase S (serving) when ready; Phase R (AMD `gfx1201`) when hardware
+lands.
 
 The Zig repository, HIP device enumeration (when ROCm is present),
 environment report, CPU f32 reference ops, Metal kernels, a tiny
@@ -1235,9 +1231,9 @@ GPU            Radeon AI PRO R9700 / Apple M-series
 Architecture   RDNA 4 / Apple GPU family 7+
 LLVM target    gfx1201 (AMD)
 GPU runtime    ROCm/HIP (AMD) and Metal (Apple)
-Bootstrap LLM  Qwen3-0.6B (not loaded yet)
-Execution      Single GPU
-Status         CPU oracle + Metal baseline ops; no token generation
+Bootstrap LLM  Qwen3-0.6B / Qwen3-4B (registered; int8 preferred)
+Execution      Single GPU (batching → Phase S)
+Status         Apple-complete (Phase M); Phase R waits for hardware
 ```
 
 ---

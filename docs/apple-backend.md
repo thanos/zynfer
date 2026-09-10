@@ -324,20 +324,20 @@ Apple Stage 7/8 or curriculum Stages 10–12 / 16 land.
 
 Stage 8 ledger: `bench/results/apple-stage8-dev-laptop.md`.
 
-### Still open — curriculum (Phase M)
+### Phase M — curriculum (closed)
 
 | Item | Lands in |
 | --- | --- |
-| **Metal Qwen forward + generate** | **M0 (in progress)** — open checklist in [`docs/stages/M0-metal-qwen-forward.md`](stages/M0-metal-qwen-forward.md) |
-| **Prefill/decode split on Qwen** | **M1 (done)** — [`docs/stages/M1-prefill-vs-decode-qwen.md`](stages/M1-prefill-vs-decode-qwen.md) |
-| **Profile one token + roofline** | **done** — M2 (`qwen-profile`) |
-| **Qwen-scale batched schedule / fusion** | **done** — M3 (`qwen_schedule`) |
-| **fp16 Metal path + native half artifact upload** | **done** — M4 (`ZYNFER_QWEN_METAL=bf16`) |
-| **int8 session weights** | **done** — M5 (`ZYNFER_QWEN_METAL=int8`) |
-| **static decode / ANE** | M6 **done** / M7 **done (REJECT)** — tutorial 21 explains skip of Core ML prefill/`MLState` and unified-memory handoff |
+| **Metal Qwen forward + generate** | **M0 done** — [`docs/stages/M0-metal-qwen-forward.md`](stages/M0-metal-qwen-forward.md) |
+| **Prefill/decode split on Qwen** | **M1 done** — [`docs/stages/M1-prefill-vs-decode-qwen.md`](stages/M1-prefill-vs-decode-qwen.md) |
+| **Profile one token + roofline** | **M2 done** (`qwen-profile`) |
+| **Qwen-scale batched schedule / fusion** | **M3 done** (`qwen_schedule`) |
+| **fp16 Metal path + native half artifact upload** | **M4 done** (`ZYNFER_QWEN_METAL=bf16`) |
+| **int8 session weights** | **M5 done** (`ZYNFER_QWEN_METAL=int8`); post-M8: artifact i8→Metal, bf16 KV |
+| **static decode / ANE** | M6 **done** / M7 **done (REJECT)** — tutorial 21 |
 | **Qwen3-4B Apple capstone** | M8 **done (Apple-complete)** — [`docs/stages/M8-apple-capstone.md`](stages/M8-apple-capstone.md) |
 
-See [`docs/roadmap.md`](roadmap.md) and [`baoulo/prompts/fable-5-prompt.md`](../baoulo/prompts/fable-5-prompt.md).
+**Next:** Phase S (serving) or Phase R (AMD when hardware). See [`docs/roadmap.md`](roadmap.md).
 
 ### Previously mapped (done)
 

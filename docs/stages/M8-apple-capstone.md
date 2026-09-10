@@ -45,9 +45,11 @@ prefill_ms≈1088  decode_tok_s≈3.86  itl_ms p50≈262
 - Qwen3-4B Arch (h=2560, 36 layers, GQA 32/8); converter `--model-id` /
   dim inference; setup `--model 4b --quantize`.
 - Artifact mmap limit raised to 32 GiB.
-- KV budget table in `stageM8` + ledger.
+- KV budget table in `stageM8` + ledger (**bf16** K/V on int8 Metal path).
 - Final Apple matrix in `bench/results/apple-capstone-dev-laptop.md`
   (0.6B measured; 4B filled after local quantize).
+- Post-M8 residency: `loadForAppleQ8` (norms-only host); artifact i8→Metal;
+  bf16 embed gather; bf16 KV.
 - External comparison: llama.cpp present / MLX absent on lab host — noted.
 - Tutorial 22 retrospective.
 

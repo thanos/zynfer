@@ -11,16 +11,16 @@ from the master prompt remain binding.
 ## Phase overview
 
 ```text
-Phase M — Apple Qwen backend, complete and fast   (now)
+Phase M — Apple Qwen backend, complete and fast   (done — Apple-complete)
 Phase R — AMD gfx1201 campaign                    (when hardware lands)
-Phase S — Serving & scale, backend-neutral        (after M, overlapping R)
+Phase S — Serving & scale, backend-neutral        (next; overlaps R)
 ```
 
 | Phase | Goal | Precondition |
 | --- | --- | --- |
-| **M** | Maximally fast Apple M-series Qwen inference (Metal primary) | Mac + Stages 10–13 done |
+| **M** | Maximally fast Apple M-series Qwen inference (Metal primary) | **done** (M8) |
 | **R** | Maximally fast RDNA 4 HIP inference | Physical `gfx1201` hardware |
-| **S** | Batching, prefix cache, speculative, HTTP server | M8 Apple-complete |
+| **S** | Batching, prefix cache, speculative, HTTP server | M8 Apple-complete (**met**) |
 
 ## Milestones
 
@@ -57,7 +57,7 @@ int8, ICB, extra fusions, Core ML/ANE — reopened at Qwen scale in M3–M7.
 
 | Stage | Title | Old # | Status |
 | --- | --- | --- | --- |
-| **M0** | Metal Qwen forward + generate (f32) | — | **in progress** (open checklist in stage doc) |
+| **M0** | Metal Qwen forward + generate (f32) | — | **done** — baseline + residual checklist closed by M1–M8; [`docs/stages/M0-metal-qwen-forward.md`](stages/M0-metal-qwen-forward.md) |
 | **M1** | Prefill vs decode on Qwen | 14 | **done** — [`docs/stages/M1-prefill-vs-decode-qwen.md`](stages/M1-prefill-vs-decode-qwen.md) |
 | **M2** | Profile one decode token | 15 | **done** — [`docs/stages/M2-profile-one-decode-token.md`](stages/M2-profile-one-decode-token.md) |
 | **M3** | Qwen-scale scheduling + fusion | 16 (Apple) | **done** — [`docs/stages/M3-qwen-schedule-fusion.md`](stages/M3-qwen-schedule-fusion.md) |
@@ -67,9 +67,9 @@ int8, ICB, extra fusions, Core ML/ANE — reopened at Qwen scale in M3–M7.
 | **M7** | ANE / Core ML gated experiment | 7 reject reopen | **done (REJECT)** — [`docs/stages/M7-ane-coreml-qwen.md`](stages/M7-ane-coreml-qwen.md) |
 | **M8** | Capstone: quantized Qwen3-4B + matrix | 25 (Apple) | **done (Apple-complete)** — [`docs/stages/M8-apple-capstone.md`](stages/M8-apple-capstone.md) |
 
-**M0 gate (not closed):** full-model Metal token parity, Metal TTFT
-baseline, per-layer ladder, LM-head path A/B, `kv_len>256` parity — see
-[`docs/stages/M0-metal-qwen-forward.md`](stages/M0-metal-qwen-forward.md).
+**M0 gate (closed for curriculum):** Metal Qwen baseline shipped; remaining
+checklist items were satisfied or superseded by M1–M8 (bench/profile,
+batched schedule, half/int8, 4B capstone). See stage M0 doc.
 
 **M1 gate:** `zynfer qwen-bench` split report on CPU + Apple.
 

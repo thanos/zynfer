@@ -14,13 +14,17 @@ Not a copy of llama.cpp GGUF. Chosen from what Metal already executes well:
 4. Weights stored as HF `[out, in]` for the pack; schedule uses
    `matmul_aq8_f32`: `C[t,out] = A[t,in] @ dequant(W[out,in])ᵀ`
 
-Norms, embeddings (gather), and the KV cache stay higher precision.
-Activations stay f32.
+Norms stay f32. The embedding table is **bf16** on the int8 Metal path
+(gather + tied lm_head matvec). KV cache is **bf16**. Activations stay f32.
 
 ## How to run
 
 ```bash
-# Pack happens at Session init from the usual bf16/f32 .zynfer
+# Prefer on-disk int8 artifact (no host f32 proj/embed twin):
+ZYNFER_QWEN_METAL=int8 ./zig-out/bin/zynfer qwen-bench \
+  models/qwen3-0.6b-int8.zynfer --prompt "Explain gravity simply." --max-tokens 2
+
+# Float .zynfer still works: packs projections from host f32 at init
 ZYNFER_QWEN_METAL=int8 ./zig-out/bin/zynfer qwen-bench \
   models/qwen3-0.6b.zynfer --prompt "Explain gravity simply." --max-tokens 2
 ```
@@ -35,8 +39,8 @@ python3 tools/checkpoint/quantize_zynfer_int8.py \
 ```
 
 Smoke on qwen3-0.6b: 197 projections, worst CPU dequant abs err ≈ **4.9e-3**
-(budget 0.05). Runtime still packs from host f32 for the Metal path in M5 v1;
-the converter proves the scheme and dtype tag `3=i8` + `.qscale` siblings.
+(budget 0.05). With an i8 artifact, Apple int8 uploads projections straight
+to Metal (`loadForAppleQ8`); float artifacts still pack from host f32.
 
 Full-model greedy parity (CPU vs Metal int8, 2 tokens) runs under
 `ZYNFER_FULL_MODEL_TESTS=1 zig build test -Dhip=off`.

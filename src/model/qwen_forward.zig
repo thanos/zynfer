@@ -1304,6 +1304,10 @@ test "Stage M5: batched Metal int8 matches CPU logits within quant tolerance" {
     defer q8.deinit();
     try std.testing.expect(q8.metal_stack != null);
     try std.testing.expect(q8.metal_stack.?.q8_mode);
+    try std.testing.expect(q8.metal_stack.?.kv_bf16);
+    // Mini fixture is f32 — packs from host; slim load needs on-disk i8.
+    try std.testing.expect(q8.weights.embed_resident);
+    try std.testing.expect(q8.weights.projs_on_host);
 
     var cpu_sess = try Session.init(gpa, &art, arch, 8);
     defer cpu_sess.deinit();
@@ -1372,6 +1376,7 @@ test "Stage M5: greedy tokens match CPU (full model when artifact present)" {
     defer q8_sess.deinit();
     try std.testing.expect(q8_sess.metal_stack != null);
     try std.testing.expect(q8_sess.metal_stack.?.q8_mode);
+    try std.testing.expect(q8_sess.metal_stack.?.kv_bf16);
     var rng_q8 = std.Random.DefaultPrng.init(0);
     _ = try q8_sess.generate(io, prompt_ids, &q8_ids, .{
         .max_new_tokens = max_new,
@@ -1579,4 +1584,35 @@ test "Stage M6: long generate does not allocate (full model when artifact presen
     try std.testing.expectEqual(before, fa.allocations);
     try std.testing.expect(stats.generated_tokens >= 2);
     try std.testing.expect(stats.decode_steps >= 1);
+}
+
+test "Apple Q8 slim: i8 artifact skips host embed/projs (when present)" {
+    if (apple_gpu.skipAppleGpuTests()) return error.SkipZigTest;
+    defer apple_schedule.force_baseline_path = null;
+    defer apple_schedule.force_half_path = null;
+    defer apple_schedule.force_q8_path = null;
+
+    const path = "models/qwen3-0.6b-int8.zynfer";
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    std.Io.Dir.cwd().access(io, path, .{}) catch return error.SkipZigTest;
+
+    var art = try artifact.Artifact.loadFile(gpa, io, path);
+    defer art.deinit();
+    if (!qwen_weights.artifactHasI8Projs(&art)) return error.SkipZigTest;
+
+    const arch = try art.meta.toArch();
+    apple_schedule.force_baseline_path = false;
+    apple_schedule.force_half_path = false;
+    apple_schedule.force_q8_path = true;
+    var sess = try Session.initWithBackend(gpa, &art, arch, 16, .apple);
+    defer sess.deinit();
+
+    try std.testing.expect(!sess.weights.embed_resident);
+    try std.testing.expect(!sess.weights.projs_on_host);
+    try std.testing.expect(sess.metal_stack.?.q8_mode);
+    try std.testing.expect(sess.metal_stack.?.kv_bf16);
+    const rep = sess.memoryReport();
+    // Norms only on host — far below a full f32 twin of the model.
+    try std.testing.expect(rep.host_weights_bytes < 64 * 1024 * 1024);
 }

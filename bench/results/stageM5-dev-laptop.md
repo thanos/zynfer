@@ -48,7 +48,11 @@ commands:
 | --- | ---: | --- |
 | M3 f32 | ~2.39e9 | weights+KV f32 |
 | M4 bf16 | ~1.19e9 | weights+KV bf16 |
-| M5 int8 | ~0.60e9 | i8 weights + f32 scales + **f32 KV** |
+| M5 int8 | ~0.60e9 | i8 weights + f32 scales + **f32 KV** (M5 v1 estimate) |
+
+> Post-M8: shipped int8 path uses **bf16 KV** and artifact i8→Metal (no host
+> f32 twin). Recompute `B/tok_est` via `estimateDecodeBytesPerTokenQ8` /
+> `mem-report`; see `apple-capstone-dev-laptop.md`.
 
 ## Full-model A/B (qwen3-0.6b, 17 prompt tok, max-tokens 2)
 
@@ -92,11 +96,11 @@ need beyond int8 quality/footprint.
 | --- | --- |
 | Per-row int8 projections + LM head | Bandwidth / footprint + decode win |
 | Fused dequant kernels | No full f32 materialization |
-| f32 KV + norms | Numerics |
+| bf16 KV + f32 norms (post-M8) | Numerics; KV traffic cut vs M5 v1 f32 KV |
 
 ## Deferred
 
 | Item | Stage |
 | --- | --- |
 | 4-bit weights | later if justified |
-| Runtime load of on-disk i8 artifact (skip host f32) | polish / M6 |
+| Matched llama.cpp / denser GGUF A/B | polish |
