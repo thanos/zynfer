@@ -8,13 +8,15 @@ accepted only when they match it within an explicit tolerance.
 | Quantity | Choice | Notes |
 | --- | --- | --- |
 | CPU oracle | f32 | Scalar loops in `src/backends/cpu/ops.zig` |
-| Metal baseline | f32 | Same formulas; reduction in threadgroup memory |
-| Weights / activations in a real model | not loaded | Qwen3-0.6B dtypes are not pinned yet |
+| Metal baseline (M3 default) | f32 weights + f32 KV | Batched schedule |
+| Metal half path (M4) | **bf16** weights + **bf16** KV | `ZYNFER_QWEN_METAL=bf16`; f32 activations and accumulators |
+| Metal int8 path (M5+) | **int8** projections + f32 scales; **bf16** KV; bf16 embed table | `ZYNFER_QWEN_METAL=int8`; fused dequant in GEMM/GEMV |
+| Checkpoint / `.zynfer` | BF16 payloads (tag `2`); optional i8 tag `3` | Converter / `quantize_zynfer_int8.py` |
 | RMSNorm / softmax accumulation | f32 | Stability before speed |
 | RoPE | f32 split-half | Matches the CPU Qwen3-style pairing |
 
-fp16 and bf16 exist as `DType` tags. No CPU or Metal kernel uses them
-yet. `caps` reports those paths as disabled.
+`caps` reports Apple `fp16`/`bf16` as available. CPU still does not run
+half-precision kernels (oracle stays f32).
 
 ## Tolerance policy
 
@@ -27,11 +29,16 @@ attention, SwiGLU, int8 GEMV vs its dequant oracle, and the tiny
 transformer block. Quantized vs full-precision f32 uses a looser bound
 on purpose (packing error).
 
+**M4 bf16 path vs CPU logits:** **5e-3** atol (BF16 ~3–4 decimal digits).
+**M5 int8 path vs CPU logits:** **5e-2** atol (per-row packing error).
+Greedy tokens on the mini fixture match CPU for bf16; full-model greedy is gated
+behind `ZYNFER_FULL_MODEL_TESTS=1` (slow CPU oracle).
+
 On mismatch, `src/runtime/compare.zig` prints max abs, max rel, RMS,
 failing index, and expected/actual.
 
 ## Questions still open
 
-- FP32 vs BF16 vs FP16 for each tensor class once a checkpoint is read
 - Whether softmax/RMSNorm should accumulate in higher precision on GPU
-- What quantization changes, once a floating-point baseline model exists
+  beyond current f32 reductions
+- 4-bit weights only after int8 shows a measured decode win (M5 ledger)

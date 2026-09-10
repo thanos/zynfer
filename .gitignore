@@ -23,6 +23,8 @@ models/
 *.csv
 *.json
 !bench/baselines/*.json
+# Core ML .mlpackage requires Manifest.json (otherwise CI load smoke fails).
+!tools/fixtures/**/Manifest.json
 prof/
 trace/
 
@@ -32,3 +34,5 @@ bench/results/local/
 .tool-versions
 /models/
 ref_logits.*
+/__pycache__/
+tools/checkpoint/__pycache__/

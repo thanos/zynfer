@@ -7,6 +7,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const Tensor = @import("../../runtime/tensor.zig").Tensor;
 const compare = @import("../../runtime/compare.zig");
+const bf16 = @import("../../runtime/bf16.zig");
 const cpu = @import("../cpu/ops.zig");
 const gpu_mod = @import("gpu.zig");
 
@@ -26,6 +27,13 @@ fn upload(gpu: *Gpu, t: Tensor) Error!Buffer {
 fn download(buf: Buffer, t: Tensor) Error!void {
     const dst = try t.f32s();
     @memcpy(dst, buf.f32s()[0..dst.len]);
+}
+
+fn uploadBf16FromF32(gpu: *Gpu, t: Tensor) Error!Buffer {
+    const src = try t.f32s();
+    var buf = try gpu.allocShared(src.len * 2);
+    bf16.encodeFromF32(buf.bytes[0 .. src.len * 2], src);
+    return buf;
 }
 
 /// Collect Metal handles only when the Apple backend is compiled in.
@@ -445,9 +453,10 @@ pub fn rope(gpu: *Gpu, x: Tensor, pos0: usize, theta: f32) Error!void {
     try download(xb, x);
 }
 
-/// Thread-local softmax; `kv_len` must be <= `max_attention_kv`.
-/// Stage 8 raised the cap from 64 → 256 (still thread-local scores).
-pub const max_attention_kv: usize = 256;
+/// Thread-local softmax fast path for kv_len ≤ 256; device scores above that.
+/// Stage M0 raised cap to 2048 for Qwen-scale context.
+pub const max_attention_kv: usize = 2048;
+pub const max_attention_kv_threadlocal: usize = 256;
 
 const AttentionParams = extern struct {
     n_q: u32,
@@ -495,18 +504,36 @@ pub fn attention(
         .kv_stride = @intCast(kv_stride),
         .head_dim = @intCast(d),
     };
-    try launchBufs(
-        gpu,
-        "attention_f32",
-        @intCast(q_len),
-        @intCast(n_q),
-        1,
-        1,
-        1,
-        1,
-        &.{ qb, kb, vb, ob },
-        std.mem.asBytes(&params),
-    );
+    if (kv_len <= max_attention_kv_threadlocal) {
+        try launchBufs(
+            gpu,
+            "attention_f32",
+            @intCast(q_len),
+            @intCast(n_q),
+            1,
+            1,
+            1,
+            1,
+            &.{ qb, kb, vb, ob },
+            std.mem.asBytes(&params),
+        );
+    } else {
+        const score_elems = n_q * q_len * kv_len;
+        var sb = try gpu.allocShared(score_elems * @sizeOf(f32));
+        defer sb.deinit();
+        try launchBufs(
+            gpu,
+            "attention_f32_buf",
+            @intCast(q_len),
+            @intCast(n_q),
+            1,
+            1,
+            1,
+            1,
+            &.{ qb, kb, vb, ob, sb },
+            std.mem.asBytes(&params),
+        );
+    }
     try download(ob, out);
 }
 
@@ -524,6 +551,12 @@ pub fn encodeRmsNorm(gpu: *Gpu, dst: Buffer, x: Buffer, weight: Buffer, rows: u3
     const params = RmsNormParams{ .rows = rows, .cols = cols, .eps = eps };
     const tg = gpu.threadgroup1d();
     try launchBufs(gpu, "rmsnorm_f32", tg, rows, 1, tg, 1, 1, &.{ x, weight, dst }, std.mem.asBytes(&params));
+}
+
+pub fn encodeRmsNormBf16(gpu: *Gpu, dst: Buffer, x: Buffer, weight_bf16: Buffer, rows: u32, cols: u32, eps: f32) Error!void {
+    const params = RmsNormParams{ .rows = rows, .cols = cols, .eps = eps };
+    const tg = gpu.threadgroup1d();
+    try launchBufs(gpu, "rmsnorm_bf16_f32", tg, rows, 1, tg, 1, 1, &.{ x, weight_bf16, dst }, std.mem.asBytes(&params));
 }
 
 /// sum_out = x + residual; norm_out = rmsnorm(sum_out, w).
@@ -550,6 +583,33 @@ pub fn encodeAddRmsNorm(
         1,
         1,
         &.{ x, residual, weight, sum_out, norm_out },
+        std.mem.asBytes(&params),
+    );
+}
+
+pub fn encodeAddRmsNormBf16(
+    gpu: *Gpu,
+    sum_out: Buffer,
+    norm_out: Buffer,
+    x: Buffer,
+    residual: Buffer,
+    weight_bf16: Buffer,
+    rows: u32,
+    cols: u32,
+    eps: f32,
+) Error!void {
+    const params = RmsNormParams{ .rows = rows, .cols = cols, .eps = eps };
+    const tg = gpu.threadgroup1d();
+    try launchBufs(
+        gpu,
+        "add_rmsnorm_bf16_f32",
+        tg,
+        rows,
+        1,
+        tg,
+        1,
+        1,
+        &.{ x, residual, weight_bf16, sum_out, norm_out },
         std.mem.asBytes(&params),
     );
 }
@@ -581,10 +641,33 @@ pub fn encodeMatmulQ8(
     try launchBufs(gpu, "matmul_q8_f32", n, m, 1, tg, tg, 1, &.{ w_q, scale, b, c_buf }, std.mem.asBytes(&params));
 }
 
+/// Stage M5: C[m,n] = A[m,k] @ dequant(W_q[n,k])^T (per-row scale on output dim).
+pub fn encodeMatmulAq8(
+    gpu: *Gpu,
+    c_buf: Buffer,
+    a: Buffer,
+    w_q: Buffer,
+    scale: Buffer,
+    m: u32,
+    n: u32,
+    k: u32,
+) Error!void {
+    const params = MatmulParams{ .m = m, .n = n, .k = k };
+    const tg: u32 = 16;
+    try launchBufs(gpu, "matmul_aq8_f32", n, m, 1, tg, tg, 1, &.{ a, w_q, scale, c_buf }, std.mem.asBytes(&params));
+}
+
 pub fn encodeMatmulNaive(gpu: *Gpu, c_buf: Buffer, a: Buffer, b: Buffer, m: u32, n: u32, k: u32) Error!void {
     const params = MatmulParams{ .m = m, .n = n, .k = k };
     const tg: u32 = 16;
     try launchBufs(gpu, "matmul_f32", n, m, 1, tg, tg, 1, &.{ a, b, c_buf }, std.mem.asBytes(&params));
+}
+
+/// Stage M4: f32 activations × bf16 resident weights → f32 output.
+pub fn encodeMatmulNaiveBf16(gpu: *Gpu, c_buf: Buffer, a: Buffer, b_bf16: Buffer, m: u32, n: u32, k: u32) Error!void {
+    const params = MatmulParams{ .m = m, .n = n, .k = k };
+    const tg: u32 = 16;
+    try launchBufs(gpu, "matmul_bf16_f32", n, m, 1, tg, tg, 1, &.{ a, b_bf16, c_buf }, std.mem.asBytes(&params));
 }
 
 pub fn encodeRope(gpu: *Gpu, x: Buffer, tokens: u32, n_heads: u32, head_dim: u32, pos0: u32, theta: f32) Error!void {
@@ -612,6 +695,7 @@ pub fn encodeAttention(
     kv_len: u32,
     kv_stride: u32,
     head_dim: u32,
+    scores_scratch: ?Buffer,
 ) Error!void {
     if (kv_len > max_attention_kv) return error.Unsupported;
     const params = AttentionParams{
@@ -622,7 +706,32 @@ pub fn encodeAttention(
         .kv_stride = kv_stride,
         .head_dim = head_dim,
     };
-    try launchBufs(gpu, "attention_f32", q_len, n_q, 1, 1, 1, 1, &.{ q, k, v, out }, std.mem.asBytes(&params));
+    if (kv_len <= max_attention_kv_threadlocal) {
+        try launchBufs(gpu, "attention_f32", q_len, n_q, 1, 1, 1, 1, &.{ q, k, v, out }, std.mem.asBytes(&params));
+        return;
+    }
+    // Device score buffer required for long KV (and mandatory inside a batch).
+    if (scores_scratch) |sb| {
+        try launchBufs(gpu, "attention_f32_buf", q_len, n_q, 1, 1, 1, 1, &.{ q, k, v, out, sb }, std.mem.asBytes(&params));
+        return;
+    }
+    if (gpu.batch_active) return error.Unsupported;
+    const score_elems = @as(usize, n_q) * @as(usize, q_len) * @as(usize, kv_len);
+    var sb = try gpu.allocShared(score_elems * @sizeOf(f32));
+    defer sb.deinit();
+    try launchBufs(gpu, "attention_f32_buf", q_len, n_q, 1, 1, 1, 1, &.{ q, k, v, out, sb }, std.mem.asBytes(&params));
+}
+
+pub fn encodeMatvec(gpu: *Gpu, y: Buffer, a: Buffer, x: Buffer, m: u32, k: u32) Error!void {
+    const params = MatmulParams{ .m = m, .n = 1, .k = k };
+    const tg = gpu.threadgroup1d();
+    try launchBufs(gpu, "matvec_f32", m, 1, 1, tg, 1, 1, &.{ a, x, y }, std.mem.asBytes(&params));
+}
+
+pub fn encodeMatvecBf16(gpu: *Gpu, y: Buffer, a_bf16: Buffer, x: Buffer, m: u32, k: u32) Error!void {
+    const params = MatmulParams{ .m = m, .n = 1, .k = k };
+    const tg = gpu.threadgroup1d();
+    try launchBufs(gpu, "matvec_bf16_f32", m, 1, 1, tg, 1, 1, &.{ a_bf16, x, y }, std.mem.asBytes(&params));
 }
 
 const PermuteParams = extern struct {
@@ -675,6 +784,68 @@ pub fn encodeKvAppend(
     const n = n_kv * t * head_dim;
     const tg = gpu.threadgroup1d();
     try launchBufs(gpu, "kv_append_f32", n, 1, 1, tg, 1, 1, &.{ k_new, v_new, k_cache, v_cache }, std.mem.asBytes(&params));
+}
+
+pub fn encodeKvAppendBf16(
+    gpu: *Gpu,
+    k_new: Buffer,
+    v_new: Buffer,
+    k_cache: Buffer,
+    v_cache: Buffer,
+    n_kv: u32,
+    t: u32,
+    head_dim: u32,
+    max_seq: u32,
+    used: u32,
+) Error!void {
+    const params = KvAppendParams{
+        .n_kv = n_kv,
+        .t = t,
+        .head_dim = head_dim,
+        .max_seq = max_seq,
+        .used = used,
+    };
+    const n = n_kv * t * head_dim;
+    const tg = gpu.threadgroup1d();
+    try launchBufs(gpu, "kv_append_bf16", n, 1, 1, tg, 1, 1, &.{ k_new, v_new, k_cache, v_cache }, std.mem.asBytes(&params));
+}
+
+pub fn encodeAttentionBf16Kv(
+    gpu: *Gpu,
+    out: Buffer,
+    q: Buffer,
+    k: Buffer,
+    v: Buffer,
+    n_q: u32,
+    n_kv: u32,
+    q_len: u32,
+    kv_len: u32,
+    kv_stride: u32,
+    head_dim: u32,
+    scores_scratch: ?Buffer,
+) Error!void {
+    if (kv_len > max_attention_kv) return error.Unsupported;
+    const params = AttentionParams{
+        .n_q = n_q,
+        .n_kv = n_kv,
+        .q_len = q_len,
+        .kv_len = kv_len,
+        .kv_stride = kv_stride,
+        .head_dim = head_dim,
+    };
+    if (kv_len <= max_attention_kv_threadlocal) {
+        try launchBufs(gpu, "attention_f32_bf16_kv", q_len, n_q, 1, 1, 1, 1, &.{ q, k, v, out }, std.mem.asBytes(&params));
+        return;
+    }
+    if (scores_scratch) |sb| {
+        try launchBufs(gpu, "attention_f32_bf16_kv_buf", q_len, n_q, 1, 1, 1, 1, &.{ q, k, v, out, sb }, std.mem.asBytes(&params));
+        return;
+    }
+    if (gpu.batch_active) return error.Unsupported;
+    const score_elems = @as(usize, n_q) * @as(usize, q_len) * @as(usize, kv_len);
+    var sb = try gpu.allocShared(score_elems * @sizeOf(f32));
+    defer sb.deinit();
+    try launchBufs(gpu, "attention_f32_bf16_kv_buf", q_len, n_q, 1, 1, 1, 1, &.{ q, k, v, out, sb }, std.mem.asBytes(&params));
 }
 
 pub fn swigluResidual(
@@ -1007,40 +1178,168 @@ test "forced Apple selection fails on a non-Apple build" {
     try std.testing.expectError(error.AppleUnavailable, Gpu.init());
 }
 
-/// Stage 8: fp16 Metal kernels are not retained. Callers must keep f32 or fail loudly.
+/// Stage M4: half-weight GEMM (bf16 storage on Apple; f32 activations + accumulators).
 pub fn matmulF16(gpu: *Gpu, c_out: Tensor, a: Tensor, b: Tensor) Error!void {
-    _ = gpu;
-    _ = c_out;
-    _ = a;
-    _ = b;
-    return error.Unsupported;
+    const m: u32 = @intCast(a.shape[0]);
+    const k: u32 = @intCast(a.shape[1]);
+    const n: u32 = @intCast(b.shape[1]);
+    var ab = try upload(gpu, a);
+    defer ab.deinit();
+    var bb = try uploadBf16FromF32(gpu, b);
+    defer bb.deinit();
+    var cb = try gpu.allocShared(c_out.data.len);
+    defer cb.deinit();
+    const params = MatmulParams{ .m = m, .n = n, .k = k };
+    const tg: u32 = 16;
+    try launchBufs(gpu, "matmul_bf16_f32", n, m, 1, tg, tg, 1, &.{ ab, bb, cb }, std.mem.asBytes(&params));
+    try download(cb, c_out);
 }
 
 pub fn matvecF16(gpu: *Gpu, y: Tensor, a: Tensor, x: Tensor) Error!void {
-    _ = gpu;
-    _ = y;
-    _ = a;
-    _ = x;
-    return error.Unsupported;
+    const m: u32 = @intCast(a.shape[0]);
+    const k: u32 = @intCast(a.shape[1]);
+    var ab = try uploadBf16FromF32(gpu, a);
+    defer ab.deinit();
+    var xb = try upload(gpu, x);
+    defer xb.deinit();
+    var yb = try gpu.allocShared(y.data.len);
+    defer yb.deinit();
+    const params = MatmulParams{ .m = m, .n = 1, .k = k };
+    const tg = gpu.threadgroup1d();
+    try launchBufs(gpu, "matvec_bf16_f32", m, 1, 1, tg, 1, 1, &.{ ab, xb, yb }, std.mem.asBytes(&params));
+    try download(yb, y);
 }
 
-test "fp16 Metal matmul/matvec are Unsupported" {
+const StreamTriadParams = extern struct {
+    scalar: f32,
+    n: u32,
+};
+
+/// Measure sustainable unified-memory bandwidth via Metal STREAM triad.
+/// Returns bytes moved (3 × n × 4 × iters) and wall ns for the timed iters (after warmup).
+pub fn measureSustainableBandwidth(
+    gpu: *Gpu,
+    io: std.Io,
+    elems: u32,
+    warmup: u32,
+    iters: u32,
+) Error!@import("../../model/decode_profile.zig").Bandwidth {
+    const decode_profile = @import("../../model/decode_profile.zig");
+    if (!have_apple) return error.AppleUnavailable;
+    if (elems == 0 or iters == 0) return error.Invalid;
+    const bytes = @as(usize, elems) * @sizeOf(f32);
+    var a = try gpu.allocShared(bytes);
+    defer a.deinit();
+    var b = try gpu.allocShared(bytes);
+    defer b.deinit();
+    var cbuf = try gpu.allocShared(bytes);
+    defer cbuf.deinit();
+    @memset(a.bytes, 1);
+    @memset(b.bytes, 2);
+    @memset(cbuf.bytes, 0);
+    const params = StreamTriadParams{ .scalar = 1.5, .n = elems };
+    const tg = gpu.threadgroup1d();
+    var w: u32 = 0;
+    while (w < warmup) : (w += 1) {
+        try launchBufs(gpu, "stream_triad_f32", elems, 1, 1, tg, 1, 1, &.{ a, b, cbuf }, std.mem.asBytes(&params));
+    }
+    const t0 = std.Io.Clock.awake.now(io);
+    var i: u32 = 0;
+    while (i < iters) : (i += 1) {
+        try launchBufs(gpu, "stream_triad_f32", elems, 1, 1, tg, 1, 1, &.{ a, b, cbuf }, std.mem.asBytes(&params));
+    }
+    const t1 = std.Io.Clock.awake.now(io);
+    const elapsed: u64 = @intCast(@max(@as(i96, 0), t1.nanoseconds - t0.nanoseconds));
+    const bytes_moved = @as(u64, elems) * 3 * @sizeOf(f32) * iters;
+    return decode_profile.Bandwidth{ .bytes_moved = bytes_moved, .elapsed_ns = elapsed };
+}
+
+/// Mean wall ns for one tiny encode+wait (add_f32), after warmup.
+pub fn measureEmptyLaunchNs(gpu: *Gpu, io: std.Io, warmup: u32, iters: u32) Error!u64 {
+    if (!have_apple) return error.AppleUnavailable;
+    if (iters == 0) return error.Invalid;
+    const n: u32 = 64;
+    var a = try gpu.allocShared(n * 4);
+    defer a.deinit();
+    var b = try gpu.allocShared(n * 4);
+    defer b.deinit();
+    var cbuf = try gpu.allocShared(n * 4);
+    defer cbuf.deinit();
+    @memset(a.bytes, 0);
+    @memset(b.bytes, 0);
+    var w: u32 = 0;
+    while (w < warmup) : (w += 1) {
+        try launch1d(gpu, "add_f32", n, &.{ a, b, cbuf });
+    }
+    const t0 = std.Io.Clock.awake.now(io);
+    var i: u32 = 0;
+    while (i < iters) : (i += 1) {
+        try launch1d(gpu, "add_f32", n, &.{ a, b, cbuf });
+    }
+    const t1 = std.Io.Clock.awake.now(io);
+    const elapsed: u64 = @intCast(@max(@as(i96, 0), t1.nanoseconds - t0.nanoseconds));
+    return elapsed / iters;
+}
+
+test "fp16 Metal matmul/matvec match CPU f32 oracle" {
     if (gpu_mod.skipAppleGpuTests()) return error.SkipZigTest;
     var gpu = try Gpu.init();
     defer gpu.deinit();
     const gpa = std.testing.allocator;
-    var a = try Tensor.alloc(gpa, .f32, &.{ 2, 2 });
+    var a = try Tensor.alloc(gpa, .f32, &.{ 4, 3 });
     defer a.deinit();
-    var b = try Tensor.alloc(gpa, .f32, &.{ 2, 2 });
+    var b = try Tensor.alloc(gpa, .f32, &.{ 3, 5 });
     defer b.deinit();
-    var c = try Tensor.alloc(gpa, .f32, &.{ 2, 2 });
-    defer c.deinit();
-    try std.testing.expectError(error.Unsupported, matmulF16(&gpu, c, a, b));
-    var x = try Tensor.alloc(gpa, .f32, &.{2});
+    var c_cpu = try Tensor.alloc(gpa, .f32, &.{ 4, 5 });
+    defer c_cpu.deinit();
+    var c_gpu = try Tensor.alloc(gpa, .f32, &.{ 4, 5 });
+    defer c_gpu.deinit();
+    try fillIota(a);
+    try fillIota(b);
+    try cpu.matmul(c_cpu, a, b);
+    try matmulF16(&gpu, c_gpu, a, b);
+    try compare.expectClose(try c_cpu.f32s(), try c_gpu.f32s(), 5e-3, 5e-3);
+
+    var w = try Tensor.alloc(gpa, .f32, &.{ 5, 3 });
+    defer w.deinit();
+    var x = try Tensor.alloc(gpa, .f32, &.{3});
     defer x.deinit();
-    var y = try Tensor.alloc(gpa, .f32, &.{2});
-    defer y.deinit();
-    try std.testing.expectError(error.Unsupported, matvecF16(&gpu, y, a, x));
+    var y_cpu = try Tensor.alloc(gpa, .f32, &.{5});
+    defer y_cpu.deinit();
+    var y_gpu = try Tensor.alloc(gpa, .f32, &.{5});
+    defer y_gpu.deinit();
+    try fillIota(w);
+    try fillIota(x);
+    try cpu.matvec(y_cpu, w, x);
+    try matvecF16(&gpu, y_gpu, w, x);
+    try compare.expectClose(try y_cpu.f32s(), try y_gpu.f32s(), 5e-3, 5e-3);
+}
+
+test "bf16 Metal matmul matches CPU at Qwen-ish shape" {
+    if (gpu_mod.skipAppleGpuTests()) return error.SkipZigTest;
+    var gpu = try Gpu.init();
+    defer gpu.deinit();
+    const gpa = std.testing.allocator;
+    var a = try Tensor.alloc(gpa, .f32, &.{ 8, 16 });
+    defer a.deinit();
+    var b = try Tensor.alloc(gpa, .f32, &.{ 16, 32 });
+    defer b.deinit();
+    var c_cpu = try Tensor.alloc(gpa, .f32, &.{ 8, 32 });
+    defer c_cpu.deinit();
+    var c_gpu = try Tensor.alloc(gpa, .f32, &.{ 8, 32 });
+    defer c_gpu.deinit();
+    try fillIota(a);
+    try fillIota(b);
+    try cpu.matmul(c_cpu, a, b);
+    var ab = try upload(&gpu, a);
+    defer ab.deinit();
+    var bb = try uploadBf16FromF32(&gpu, b);
+    defer bb.deinit();
+    var cb = try gpu.allocShared(c_gpu.data.len);
+    defer cb.deinit();
+    try encodeMatmulNaiveBf16(&gpu, cb, ab, bb, 8, 32, 16);
+    try download(cb, c_gpu);
+    try compare.expectClose(try c_cpu.f32s(), try c_gpu.f32s(), 5e-3, 5e-3);
 }
 
 test "Metal attention matches CPU at kv_len 96 (Stage 8 raised cap)" {

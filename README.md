@@ -18,19 +18,22 @@ The project is also educational. Every major subsystem is developed in stages, b
 
 ## Status
 
-**v0.1.0 — Apple Metal tiny-block backend (Stages 0–8).**
-**Stage 10 — `.zynfer` artifact inspect/load is done** (see `docs/stages/10-checkpoint-artifact.md`).
-**Stage 11 — Qwen forward + golden logits is done (CPU)** — full 28-layer
-prefill, last-token logits vs PyTorch golden on local weights; mini fixture in
-CI. Workflow: [`docs/stages/11-qwen-forward.md`](docs/stages/11-qwen-forward.md),
-fixtures: [`tools/fixtures/README.md`](tools/fixtures/README.md).
-**Stage 12 — tokenizer + sampling is done (CPU)** — `zynfer run --prompt`
-with Qwen2 BPE, greedy/temp/top-k/top-p, TTFT metrics.
-See [`docs/stages/12-tokenizer-sampling.md`](docs/stages/12-tokenizer-sampling.md).
-**Stage 13 — KV cache is done (CPU)** — cached vs uncached generate, parity,
-`kv-bench`, memory formula.
-See [`docs/stages/13-kv-cache.md`](docs/stages/13-kv-cache.md).
-**Stage 14+ — prefill/decode metrics depth / AMD / serving remain.**
+**v0.3.0 — Apple-complete (Phase M / Backend 1).** Registered quantized
+Qwen3-4B on Metal int8 (`ZYNFER_QWEN_METAL=int8`); Core ML/ANE rejected at
+Qwen scale (M7). See [`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md),
+[`docs/stages/M8-apple-capstone.md`](docs/stages/M8-apple-capstone.md),
+[`docs/roadmap.md`](docs/roadmap.md).
+
+**v0.1.0 — Apple Metal tiny-block backend (Stages 0–8)** remains the
+foundation release ([`docs/releases/v0.1.0.md`](docs/releases/v0.1.0.md)).
+Stages **10–13** (artifact, Qwen CPU forward, tokenizer/sampling, KV cache)
+are done.
+
+**Phase M (M0–M8) — done (Apple-complete).** Metal Qwen schedule (batched,
+bf16, int8), static decode plan, ANE reject, 4B capstone ledger. Post-M8
+polish: artifact i8→Metal without host f32 twins; bf16 KV on the int8 path.
+**Next:** Phase S (serving) when ready; Phase R (AMD `gfx1201`) when hardware
+lands.
 
 The Zig repository, HIP device enumeration (when ROCm is present),
 environment report, CPU f32 reference ops, Metal kernels, a tiny
@@ -1090,8 +1093,10 @@ zig build block-bench      # tiny-block prefill/decode (path labels in JSON)
 # Stage 7 force paths (must exit 2):
 #   ZYNFER_FORCE_SME=1 zig build run -- stage7
 #   ZYNFER_FORCE_COREML=1 zig build run -- caps
-# Stage 8 optional Instruments labels (prefill/decode/weights_upload + encode/batch):
+# Stage 8 / M2 optional Instruments labels (prefill/decode/weights_upload +
+# encode/batch + qwen.* families):
 #   ZYNFER_SIGNPOSTS=1 zig build run -- block-bench -- --backend apple
+#   ZYNFER_SIGNPOSTS=1 ./zig-out/bin/zynfer qwen-profile --mini
 zig build bench            # time HIP property queries
 zig build integration      # CLI contracts against the installed binary
 zig build docs             # Zig autodoc → zig-out/docs/api
@@ -1104,15 +1109,38 @@ CI workflows (format, tests, coverage, benches, docs) are described in
 `--backend cpu|apple|amd-hip` or `ZYNFER_BACKEND` forces a backend.
 Unknown names exit 2.
 
-The eventual inference CLI is expected to resemble:
+### Apple capstone (Qwen3-4B int8) — try it
+
+After Phase M / Stage M8 setup (`python3 tools/setup_qwen.py --model 4b --quantize --skip-golden`):
 
 ```bash
-zynfer run models/qwen3-0.6b.zynfer \
-  --prompt "Explain why the sky is blue." \
-  --max-new 128
+zig build -Dhip=off
+ZYNFER_QWEN_METAL=int8 ./zig-out/bin/zynfer chat models/qwen3-4b-int8.zynfer \
+  "give me a haiku on snow"
 ```
 
-That interface is not implemented yet.
+Example output (dev laptop, warm process):
+
+```text
+White silence falls,
+crystal whispers on the ground—
+winter's breath is still.
+
+---
+prompt_tokens=19 generated_tokens=20 kv_cache=on backend=apple
+kv_bytes_used=11206656 kv_bytes_cap=24477696
+prefill_ms=1087.809 prefill_tok_s=17.466 ttft_ms=1088.216 decode_tok_s=3.858 decode_ms_per_tok=259.230
+itl_ms p50=261.528 p95=269.741 p99=269.954 (n=19)
+```
+
+Ledger and “why slower than Ollama”: [`bench/results/apple-capstone-dev-laptop.md`](bench/results/apple-capstone-dev-laptop.md).
+Stage doc: [`docs/stages/M8-apple-capstone.md`](docs/stages/M8-apple-capstone.md).
+
+Smaller model (0.6B) after `./zig-out/bin/zynfer setup`:
+
+```bash
+./zig-out/bin/zynfer chat models/qwen3-0.6b.zynfer "Explain why the sky is blue." --max-tokens 64
+```
 
 ---
 
@@ -1203,9 +1231,9 @@ GPU            Radeon AI PRO R9700 / Apple M-series
 Architecture   RDNA 4 / Apple GPU family 7+
 LLVM target    gfx1201 (AMD)
 GPU runtime    ROCm/HIP (AMD) and Metal (Apple)
-Bootstrap LLM  Qwen3-0.6B (not loaded yet)
-Execution      Single GPU
-Status         CPU oracle + Metal baseline ops; no token generation
+Bootstrap LLM  Qwen3-0.6B / Qwen3-4B (registered; int8 preferred)
+Execution      Single GPU (batching → Phase S)
+Status         Apple-complete (Phase M); Phase R waits for hardware
 ```
 
 ---

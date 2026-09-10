@@ -259,6 +259,30 @@ kernel void matvec_q8_f32(
     y[gid] = acc * scale[gid];
 }
 
+// Stage M5: C[m,n] = A[m,k] @ dequant(W_q[n,k])^T
+// W_q is row-major [out,in] = [n,k] with per-row (per-output) scale[n].
+// Matches Qwen schedule right-multiply after packRowQ8 on HF [out,in].
+kernel void matmul_aq8_f32(
+    device const float *a [[buffer(0)]],
+    device const char *wq [[buffer(1)]],
+    device const float *scale [[buffer(2)]],
+    device float *c [[buffer(3)]],
+    constant MatmulParams &p [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint row = gid.y;
+    uint col = gid.x;
+    if (row >= p.m || col >= p.n) {
+        return;
+    }
+    device const char *wrow = wq + col * p.k;
+    float acc = 0.0f;
+    for (uint t = 0; t < p.k; t++) {
+        acc += a[row * p.k + t] * float(wrow[t]);
+    }
+    c[row * p.n + col] = acc * scale[col];
+}
+
 struct MatmulQ8Params {
     uint m;
     uint n;
@@ -460,7 +484,8 @@ struct AttentionParams {
 };
 
 // One thread per (q_token, q_head). Scores live in thread-local memory.
-// kv_len is capped at 256 (Stage 8); Zig returns Unsupported above that.
+// kv_len is capped at max_attention_kv (Stage M0); Zig returns Unsupported above that.
+// For kv_len <= 256, scores live in thread-local memory (fast path).
 kernel void attention_f32(
     device const float *q [[buffer(0)]],
     device const float *k [[buffer(1)]],
@@ -513,6 +538,71 @@ kernel void attention_f32(
     }
     for (uint tk = 0; tk < p.kv_len; tk++) {
         float w = scores[tk] * inv;
+        if (w == 0.0f) {
+            continue;
+        }
+        device const float *vrow = v + (kv_h * p.kv_stride + tk) * d;
+        for (uint i = 0; i < d; i++) {
+            orow[i] += w * vrow[i];
+        }
+    }
+}
+
+// Long-context path: scores in device memory (Stage M0). Layout per (q_head, q_token):
+// scores[(h * q_len + tq) * kv_len + tk]
+kernel void attention_f32_buf(
+    device const float *q [[buffer(0)]],
+    device const float *k [[buffer(1)]],
+    device const float *v [[buffer(2)]],
+    device float *out [[buffer(3)]],
+    device float *scores [[buffer(4)]],
+    constant AttentionParams &p [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint tq = gid.x;
+    uint h = gid.y;
+    if (tq >= p.q_len || h >= p.n_q) {
+        return;
+    }
+    uint group = p.n_q / p.n_kv;
+    uint kv_h = h / group;
+    uint d = p.head_dim;
+    float scale = rsqrt(float(d));
+    device float *row_scores = scores + (h * p.q_len + tq) * p.kv_len;
+
+    device const float *qrow = q + (h * p.q_len + tq) * d;
+    float max_s = -INFINITY;
+    for (uint tk = 0; tk < p.kv_len; tk++) {
+        bool causal_ok = (p.kv_len - p.q_len + tq) >= tk;
+        if (!causal_ok) {
+            row_scores[tk] = -INFINITY;
+            continue;
+        }
+        device const float *krow = k + (kv_h * p.kv_stride + tk) * d;
+        float dot = 0.0f;
+        for (uint i = 0; i < d; i++) {
+            dot += qrow[i] * krow[i];
+        }
+        row_scores[tk] = dot * scale;
+        max_s = max(max_s, row_scores[tk]);
+    }
+
+    float sum = 0.0f;
+    for (uint tk = 0; tk < p.kv_len; tk++) {
+        if (isinf(row_scores[tk])) {
+            row_scores[tk] = 0.0f;
+        } else {
+            row_scores[tk] = exp(row_scores[tk] - max_s);
+            sum += row_scores[tk];
+        }
+    }
+    float inv = (sum == 0.0f) ? 0.0f : 1.0f / sum;
+    device float *orow = out + (h * p.q_len + tq) * d;
+    for (uint i = 0; i < d; i++) {
+        orow[i] = 0.0f;
+    }
+    for (uint tk = 0; tk < p.kv_len; tk++) {
+        float w = row_scores[tk] * inv;
         if (w == 0.0f) {
             continue;
         }
@@ -602,4 +692,328 @@ kernel void kv_append_f32(
     uint dst = ((h * p.max_seq) + (p.used + i_t)) * d + i;
     k_cache[dst] = k_new[src];
     v_cache[dst] = v_new[src];
+}
+
+// STREAM triad: c[i] = a[i] + scalar * b[i]. Bytes moved ≈ 3 * n * 4.
+struct StreamTriadParams {
+    float scalar;
+    uint n;
+};
+
+kernel void stream_triad_f32(
+    device const float *a [[buffer(0)]],
+    device const float *b [[buffer(1)]],
+    device float *c [[buffer(2)]],
+    constant StreamTriadParams &p [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid < p.n) {
+        c[gid] = a[gid] + p.scalar * b[gid];
+    }
+}
+
+// Stage M4 — bf16 weights / KV with f32 activations and accumulators.
+// Qwen checkpoints are BF16; halving weight+KV bytes is the primary bandwidth win.
+
+kernel void matmul_bf16_f32(
+    device const float *a [[buffer(0)]],
+    device const bfloat *b [[buffer(1)]],
+    device float *c [[buffer(2)]],
+    constant MatmulParams &p [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint row = gid.y;
+    uint col = gid.x;
+    if (row >= p.m || col >= p.n) {
+        return;
+    }
+    float acc = 0.0f;
+    for (uint t = 0; t < p.k; t++) {
+        acc += a[row * p.k + t] * float(b[t * p.n + col]);
+    }
+    c[row * p.n + col] = acc;
+}
+
+kernel void matvec_bf16_f32(
+    device const bfloat *a [[buffer(0)]],
+    device const float *x [[buffer(1)]],
+    device float *y [[buffer(2)]],
+    constant MatmulParams &p [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= p.m) {
+        return;
+    }
+    float acc = 0.0f;
+    for (uint t = 0; t < p.k; t++) {
+        acc += float(a[gid * p.k + t]) * x[t];
+    }
+    y[gid] = acc;
+}
+
+kernel void rmsnorm_bf16_f32(
+    device const float *x [[buffer(0)]],
+    device const bfloat *w [[buffer(1)]],
+    device float *y [[buffer(2)]],
+    constant RmsNormParams &p [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint2 lid2 [[thread_position_in_threadgroup]],
+    uint2 tgs2 [[threads_per_threadgroup]])
+{
+    uint row = gid.y;
+    uint lid = lid2.x;
+    uint tgs = tgs2.x;
+    if (row >= p.rows) {
+        return;
+    }
+    threadgroup float scratch[256];
+    device const float *row_x = x + row * p.cols;
+    device float *row_y = y + row * p.cols;
+
+    float acc = 0.0f;
+    for (uint i = lid; i < p.cols; i += tgs) {
+        float v = row_x[i];
+        acc += v * v;
+    }
+    scratch[lid] = acc;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = tgs / 2; stride > 0; stride >>= 1) {
+        if (lid < stride) {
+            scratch[lid] += scratch[lid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float inv = rsqrt(scratch[0] / float(p.cols) + p.eps);
+    for (uint i = lid; i < p.cols; i += tgs) {
+        row_y[i] = float(w[i]) * row_x[i] * inv;
+    }
+}
+
+kernel void add_rmsnorm_bf16_f32(
+    device const float *x [[buffer(0)]],
+    device const float *residual [[buffer(1)]],
+    device const bfloat *w [[buffer(2)]],
+    device float *sum_out [[buffer(3)]],
+    device float *norm_out [[buffer(4)]],
+    constant RmsNormParams &p [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint2 lid2 [[thread_position_in_threadgroup]],
+    uint2 tgs2 [[threads_per_threadgroup]])
+{
+    uint row = gid.y;
+    uint lid = lid2.x;
+    uint tgs = tgs2.x;
+    if (row >= p.rows) {
+        return;
+    }
+    threadgroup float scratch[256];
+    device const float *row_x = x + row * p.cols;
+    device const float *row_r = residual + row * p.cols;
+    device float *row_sum = sum_out + row * p.cols;
+    device float *row_norm = norm_out + row * p.cols;
+
+    float acc = 0.0f;
+    for (uint i = lid; i < p.cols; i += tgs) {
+        float v = row_x[i] + row_r[i];
+        row_sum[i] = v;
+        acc += v * v;
+    }
+    scratch[lid] = acc;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = tgs / 2; stride > 0; stride >>= 1) {
+        if (lid < stride) {
+            scratch[lid] += scratch[lid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float inv = rsqrt(scratch[0] / float(p.cols) + p.eps);
+    for (uint i = lid; i < p.cols; i += tgs) {
+        row_norm[i] = float(w[i]) * row_sum[i] * inv;
+    }
+}
+
+kernel void kv_append_bf16(
+    device const float *k_new [[buffer(0)]],
+    device const float *v_new [[buffer(1)]],
+    device bfloat *k_cache [[buffer(2)]],
+    device bfloat *v_cache [[buffer(3)]],
+    constant KvAppendParams &p [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint n = p.n_kv * p.t * p.head_dim;
+    if (gid >= n) {
+        return;
+    }
+    uint d = p.head_dim;
+    uint elem = gid;
+    uint h = elem / (p.t * d);
+    uint rem = elem % (p.t * d);
+    uint i_t = rem / d;
+    uint i = rem % d;
+    uint src = ((h * p.t) + i_t) * d + i;
+    uint dst = ((h * p.max_seq) + (p.used + i_t)) * d + i;
+    k_cache[dst] = bfloat(k_new[src]);
+    v_cache[dst] = bfloat(v_new[src]);
+}
+
+kernel void attention_f32_bf16_kv(
+    device const float *q [[buffer(0)]],
+    device const bfloat *k [[buffer(1)]],
+    device const bfloat *v [[buffer(2)]],
+    device float *out [[buffer(3)]],
+    constant AttentionParams &p [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint tq = gid.x;
+    uint h = gid.y;
+    if (tq >= p.q_len || h >= p.n_q) {
+        return;
+    }
+    uint group = p.n_q / p.n_kv;
+    uint kv_h = h / group;
+    uint d = p.head_dim;
+    float scale = rsqrt(float(d));
+    thread float scores[256];
+
+    device const float *qrow = q + (h * p.q_len + tq) * d;
+    float max_s = -INFINITY;
+    for (uint tk = 0; tk < p.kv_len; tk++) {
+        bool causal_ok = (p.kv_len - p.q_len + tq) >= tk;
+        if (!causal_ok) {
+            scores[tk] = -INFINITY;
+            continue;
+        }
+        device const bfloat *krow = k + (kv_h * p.kv_stride + tk) * d;
+        float dot = 0.0f;
+        for (uint i = 0; i < d; i++) {
+            dot += qrow[i] * float(krow[i]);
+        }
+        scores[tk] = dot * scale;
+        max_s = max(max_s, scores[tk]);
+    }
+
+    float sum = 0.0f;
+    for (uint tk = 0; tk < p.kv_len; tk++) {
+        if (isinf(scores[tk])) {
+            scores[tk] = 0.0f;
+        } else {
+            scores[tk] = exp(scores[tk] - max_s);
+            sum += scores[tk];
+        }
+    }
+    float inv = (sum == 0.0f) ? 0.0f : 1.0f / sum;
+    device float *orow = out + (h * p.q_len + tq) * d;
+    for (uint i = 0; i < d; i++) {
+        orow[i] = 0.0f;
+    }
+    for (uint tk = 0; tk < p.kv_len; tk++) {
+        float w = scores[tk] * inv;
+        if (w == 0.0f) {
+            continue;
+        }
+        device const bfloat *vrow = v + (kv_h * p.kv_stride + tk) * d;
+        for (uint i = 0; i < d; i++) {
+            orow[i] += w * float(vrow[i]);
+        }
+    }
+}
+
+kernel void attention_f32_bf16_kv_buf(
+    device const float *q [[buffer(0)]],
+    device const bfloat *k [[buffer(1)]],
+    device const bfloat *v [[buffer(2)]],
+    device float *out [[buffer(3)]],
+    device float *scores [[buffer(4)]],
+    constant AttentionParams &p [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint tq = gid.x;
+    uint h = gid.y;
+    if (tq >= p.q_len || h >= p.n_q) {
+        return;
+    }
+    uint group = p.n_q / p.n_kv;
+    uint kv_h = h / group;
+    uint d = p.head_dim;
+    float scale = rsqrt(float(d));
+    device float *row_scores = scores + (h * p.q_len + tq) * p.kv_len;
+
+    device const float *qrow = q + (h * p.q_len + tq) * d;
+    float max_s = -INFINITY;
+    for (uint tk = 0; tk < p.kv_len; tk++) {
+        bool causal_ok = (p.kv_len - p.q_len + tq) >= tk;
+        if (!causal_ok) {
+            row_scores[tk] = -INFINITY;
+            continue;
+        }
+        device const bfloat *krow = k + (kv_h * p.kv_stride + tk) * d;
+        float dot = 0.0f;
+        for (uint i = 0; i < d; i++) {
+            dot += qrow[i] * float(krow[i]);
+        }
+        row_scores[tk] = dot * scale;
+        max_s = max(max_s, row_scores[tk]);
+    }
+
+    float sum = 0.0f;
+    for (uint tk = 0; tk < p.kv_len; tk++) {
+        if (isinf(row_scores[tk])) {
+            row_scores[tk] = 0.0f;
+        } else {
+            row_scores[tk] = exp(row_scores[tk] - max_s);
+            sum += row_scores[tk];
+        }
+    }
+    float inv = (sum == 0.0f) ? 0.0f : 1.0f / sum;
+    device float *orow = out + (h * p.q_len + tq) * d;
+    for (uint i = 0; i < d; i++) {
+        orow[i] = 0.0f;
+    }
+    for (uint tk = 0; tk < p.kv_len; tk++) {
+        float w = row_scores[tk] * inv;
+        if (w == 0.0f) {
+            continue;
+        }
+        device const bfloat *vrow = v + (kv_h * p.kv_stride + tk) * d;
+        for (uint i = 0; i < d; i++) {
+            orow[i] += w * float(vrow[i]);
+        }
+    }
+}
+
+// fp16 weight path (Stage M4 API): same numerics pattern as bf16, `half` storage.
+kernel void matmul_f16_f32(
+    device const float *a [[buffer(0)]],
+    device const half *b [[buffer(1)]],
+    device float *c [[buffer(2)]],
+    constant MatmulParams &p [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint row = gid.y;
+    uint col = gid.x;
+    if (row >= p.m || col >= p.n) {
+        return;
+    }
+    float acc = 0.0f;
+    for (uint t = 0; t < p.k; t++) {
+        acc += a[row * p.k + t] * float(b[t * p.n + col]);
+    }
+    c[row * p.n + col] = acc;
+}
+
+kernel void matvec_f16_f32(
+    device const half *a [[buffer(0)]],
+    device const float *x [[buffer(1)]],
+    device float *y [[buffer(2)]],
+    constant MatmulParams &p [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= p.m) {
+        return;
+    }
+    float acc = 0.0f;
+    for (uint t = 0; t < p.k; t++) {
+        acc += float(a[gid * p.k + t]) * x[t];
+    }
+    y[gid] = acc;
 }

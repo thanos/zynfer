@@ -41,8 +41,9 @@ max_position/bos/eos, `rope_theta`, `rms_norm_eps`, `tie_word_embeddings`.
 ### TensorEntry
 
 NUL-padded `name[64]`, optional numeric `tensor_id`, `dtype` (`0=f32`,
-`1=f16`, `2=bf16`), `rank`, `shape[8]`, `offset` (relative to payload),
-`nbytes`.
+`1=f16`, `2=bf16`, `3=i8`), `rank`, `shape[8]`, `offset` (relative to payload),
+`nbytes`. Stage M5 int8 projections use dtype `3` with a sibling
+`{name}.qscale` f32 vector (`tools/checkpoint/quantize_zynfer_int8.py`).
 
 ## Commands
 
@@ -74,7 +75,9 @@ zig build -Dhip=off
 
 `--weights` may be a file, a directory (shards / `model.safetensors.index.json`),
 or multiple shard paths. The converter copies raw Safetensors bytes
-(including BF16) without NumPy.
+(including BF16 and F16) without NumPy and reports a dtype summary on
+stderr. Stage M4’s Metal half path can upload those half payloads to the
+GPU without re-promoting through host f32.
 
 ### Tensor ids
 

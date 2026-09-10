@@ -44,8 +44,15 @@ jobs:
         run: zig build test -Dhip=off
 
   integration:
-    name: Integration tests
-    runs-on: ubuntu-latest
+    name: Integration tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Ubuntu: CPU CLI contracts + Core ML "unsupported" skip path.
+        # macOS: Apple-linked binary + real `coreml-smoke` toy load/predict.
+        # Pin macos-14 if you need a fixed image; macos-latest tracks GH current.
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
@@ -55,3 +62,5 @@ jobs:
         run: zig build integration -Dhip=off
       - name: Shell env diagnostic
         run: ./scripts/check-env.sh
+        # check-env is Linux/ROCm oriented; keep best-effort on macOS.
+        continue-on-error: ${{ startsWith(matrix.os, 'macos') }}

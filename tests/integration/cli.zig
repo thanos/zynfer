@@ -98,12 +98,53 @@ test "stage7 prints retain/reject ledger" {
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "SME") != null);
 }
 
+test "stageM7 prints Qwen-scale ANE reject ledger" {
+    var out = try run(&.{"stageM7"});
+    defer out.deinit(std.testing.allocator);
+    try expectExited(out, 0);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "Stage M7") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "REJECT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "MLState") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "apple-ane-qwen-dev-laptop") != null);
+}
+
+test "coreml-smoke loads toy mlpackage" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+
+    var out = try run(&.{ "coreml-smoke", "tools/fixtures/coreml_toy.mlpackage" });
+    defer out.deinit(std.testing.allocator);
+    try expectExited(out, 0);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "predict_ok") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "does NOT verify ANE") != null);
+}
+
+test "coreml-smoke reports unsupported off macOS" {
+    if (@import("builtin").os.tag == .macos) return error.SkipZigTest;
+
+    var out = try run(&.{ "coreml-smoke", "tools/fixtures/coreml_toy.mlpackage" });
+    defer out.deinit(std.testing.allocator);
+    try expectExited(out, 0);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "unsupported") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "does NOT verify ANE") != null);
+}
+
+test "stageM8 prints Apple-complete capstone ledger" {
+    var out = try run(&.{"stageM8"});
+    defer out.deinit(std.testing.allocator);
+    try expectExited(out, 0);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "Stage M8") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "Apple-complete") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "qwen3-4b") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "apple-capstone-dev-laptop") != null);
+}
+
 test "stage8 prints hardening ledger" {
     var out = try run(&.{"stage8"});
     defer out.deinit(std.testing.allocator);
     try expectExited(out, 0);
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "Stage 8") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "256") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "attention kv_len cap") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "2048") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "REJECT") != null);
 }
 

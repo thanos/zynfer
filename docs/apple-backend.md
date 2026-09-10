@@ -16,9 +16,9 @@ Metal bridge. It is not the AMD production target.
   fused `add_rmsnorm_f32`, persistent int8 weights (`Q8DeviceWeights`).
   A/B with `ZYNFER_APPLE_BLOCK=baseline` (per-op waits).
 - Stage 7: SME/SME2 **hardware probe** + Core ML **framework probe**;
-  both inference paths **rejected** (see `zynfer stage7` /
-  `bench/results/apple-stage7-dev-laptop.md`). Accelerate retained;
-  do not claim AMX.
+  SME inference **rejected**. Core ML question **closed at Qwen scale in
+  M7** (`zynfer stageM7` / `coreml-smoke` / `bench/results/apple-ane-qwen-dev-laptop.md`).
+  Accelerate retained; do not claim AMX.
 - Stage 8: attention `kv_len` ≤ **256**, opt-in signposts
   (`ZYNFER_SIGNPOSTS=1`: prefill/decode/weights_upload + encode/batch),
   `peak_rss_bytes` in block-bench + benchmark matrix, dual-`Gpu`
@@ -87,24 +87,27 @@ ZYNFER_APPLE_BLOCK=baseline ./zig-out/bin/zynfer block-bench --backend apple
 1. Open **Instruments** → **Metal System Trace** (or **Game Performance**
    with Metal).
 2. Choose the `zynfer` process (or launch from Instruments).
-3. Record one `block-bench` run (~seconds). Stop.
+3. Record one `block-bench` or `qwen-profile --mini` run (~seconds). Stop.
 4. In the timeline, select GPU / command-buffer lanes. Expect:
-   - **Stage 6:** one command buffer per forward, many short dispatches,
-     then a **single** `waitUntilCompleted`;
-   - **baseline:** a gap after every dispatch in
-     `zynfer_mtl_encode_and_wait`.
+   - **Stage 6 (tiny-block):** one command buffer per forward, many short
+     dispatches, then a **single** `waitUntilCompleted`;
+   - **M0 Qwen baseline:** a gap after every dispatch in
+     `zynfer_mtl_encode_and_wait` (~17 waits/layer).
 5. With `ZYNFER_SIGNPOSTS=1`, os_signpost intervals also label
-   `prefill` / `decode` / `weights_upload` and the encode/batch waits
-   under subsystem `com.zynfer.metal` / category `stage8`.
+   `prefill` / `decode` / `weights_upload`, encode/batch waits, and
+   Stage M2 Qwen families (`qwen.rmsnorm`, `qwen.qkv`, `qwen.mlp`, …)
+   under subsystem `com.zynfer.metal`.
 
 | Signal | Meaning |
 | --- | --- |
 | One wait gap per forward (Stage 6) | CB batching working |
-| Serial gaps between every kernel (baseline) | Per-op `waitUntilCompleted` |
+| Serial gaps between every kernel (M0 Qwen / baseline) | Per-op `waitUntilCompleted` |
 | Short GPU kernels vs long wall time (baseline) | Launch/sync bound |
 | Nested `prefill`/`decode` around batch wait | Session-level signposts |
+| `qwen.*` family intervals (`qwen-profile`) | Stage M2 one-token breakdown |
 
 Measured A/B: `bench/results/apple-stage6-dev-laptop.md` (~8× decode).
+One-token profile: `bench/results/stageM2-dev-laptop.md`.
 
 ### Case study (baseline, not an optimization)
 
@@ -271,10 +274,10 @@ Stage 6 A/B: `bench/results/apple-stage6-dev-laptop.md`.
 | Metal `simdgroup_matrix` matmul | Apple7+; auto when M·N·K≥64³; `_x4` force-only (slower at 256³) |
 | Metal int8 GEMV/GEMM (`matvec_q8_f32` / `matmul_q8_f32`) | explicit API; fair (prepacked) benches; not auto over f32 |
 | Metal fused / batched tiny-block | Stage 6 one CB/wait + resident KV; ~8× vs per-op baseline |
-| Metal attention long context | Stage 8: `kv_len` ≤ 256 |
+| Metal attention long context | Stage M0: `kv_len` ≤ **2048** (256 thread-local fast path) |
 | SME / SME2 | hardware probed (`FEAT_SME`); kernels **rejected** (Stage 7) |
-| Core ML / ANE | framework probed; inference path **rejected** (no verified subgraph) |
-| fp16 / bf16 Metal | **rejected** Stage 8 (`Unsupported`); kernels remain f32 |
+| Core ML / ANE | framework + MLState probed; inference **REJECT** (M7 final) |
+| fp16 / bf16 Metal | **retained (M4)** — bf16 weights+KV; f32 activations; opt-in `ZYNFER_QWEN_METAL=bf16` |
 | HIP transformer ops | not implemented (probe only) |
 
 `zig build run -- caps` and `zynfer stage7` print the Stage 7 ledger.
@@ -301,7 +304,7 @@ Apple Stage 7/8 or curriculum Stages 10–12 / 16 land.
 | Item | Notes |
 | --- | --- |
 | **SME / SME2** | **done (rejected)** — `cpu.sme` detects FEAT_SME/SME2; kernels not retained (`bench/results/apple-stage7-dev-laptop.md`) |
-| **Core ML / ANE** | **done (rejected)** — framework probe only; no verified ANE subgraph |
+| **Core ML / ANE** | **done (REJECT final @ M7)** — framework + MLState probe; no verified ANE subgraph |
 
 ### Closed — Apple Stage 8
 
@@ -309,27 +312,41 @@ Apple Stage 7/8 or curriculum Stages 10–12 / 16 land.
 | --- | --- |
 | **Fused vs `baseline` numerical A/B test** | **done** — Stage 6 |
 | **Attention `kv_len` cap** | **done** — raised to **256**; tested at 96 |
-| **Signposts** | **done** — `ZYNFER_SIGNPOSTS=1` (`prefill`/`decode`/`weights_upload` + encode/batch) |
+| **Signposts** | **done** — `ZYNFER_SIGNPOSTS=1` (`prefill`/`decode`/`weights_upload` + encode/batch + M2 `qwen.*` families) |
 | **Peak RSS** | **done** — `peak_rss_bytes` in block-bench JSON; Peak memory in `docs/benchmarks.md` |
 | **Stress / cancel paths** | **done** — repeated Session + batch abort + dual-`Gpu` concurrency |
-| **fp16 / bf16 Metal** | **rejected** — `Unsupported` stubs |
+| **fp16 / bf16 Metal** | **retained (M4)** — see `docs/stages/M4-half-precision-metal.md` |
 | **Reusable execution encoding** (ICB) | **rejected** — see stage8 results |
 | **Further MSL fusions** | **rejected** for tiny-block; → Stage 16 |
-| **Int8 weights in tiny-block Session** | **rejected** for now; ops path keeps `Q8DeviceWeights` |
+| **Int8 weights in tiny-block Session** | **rejected** for tiny-block; **retained at Qwen scale (M5)** |
 | **Benchmark matrix TTFT/tok/s fill-in** | After Stages 10–12 produce tokens |
 | **Energy/token** | N/A — not measured |
 
 Stage 8 ledger: `bench/results/apple-stage8-dev-laptop.md`.
 
-### Still open — curriculum (not Apple-6)
+### Phase M — curriculum (closed)
 
 | Item | Lands in |
 | --- | --- |
-| **Qwen loader / artifact** | **done (Stage 10)** — `.zynfer` v1; full weights via optional Python converter |
-| **Full Qwen forward + golden logits** | Stage 11 — [`docs/stages/11-qwen-forward.md`](stages/11-qwen-forward.md) |
-| **Tokenizer / sampling** (real TTFT) | Stage 12 |
-| **HF download in CI** | Never — local `hf download` + converter only |
-| **Qwen-scale / HIP fusion ledger** | Stage 16 |
+| **Metal Qwen forward + generate** | **M0 done** — [`docs/stages/M0-metal-qwen-forward.md`](stages/M0-metal-qwen-forward.md) |
+| **Prefill/decode split on Qwen** | **M1 done** — [`docs/stages/M1-prefill-vs-decode-qwen.md`](stages/M1-prefill-vs-decode-qwen.md) |
+| **Profile one token + roofline** | **M2 done** (`qwen-profile`) |
+| **Qwen-scale batched schedule / fusion** | **M3 done** (`qwen_schedule`) |
+| **fp16 Metal path + native half artifact upload** | **M4 done** (`ZYNFER_QWEN_METAL=bf16`) |
+| **int8 session weights** | **M5 done** (`ZYNFER_QWEN_METAL=int8`); post-M8: artifact i8→Metal, bf16 KV |
+| **static decode / ANE** | M6 **done** / M7 **done (REJECT)** — tutorial 21 |
+| **Qwen3-4B Apple capstone** | M8 **done (Apple-complete)** — [`docs/stages/M8-apple-capstone.md`](stages/M8-apple-capstone.md) |
+
+**Next:** Phase S (serving) or Phase R (AMD when hardware). See [`docs/roadmap.md`](roadmap.md).
+
+### Previously mapped (done)
+
+| Item | Lands in |
+| --- | --- |
+| **Qwen loader / artifact** | **done (Stage 10)** |
+| **Full Qwen forward + golden logits** | **done (Stage 11)** |
+| **Tokenizer / sampling** | **done (Stage 12)** |
+| **KV cache** | **done (Stage 13)** |
 
 Stage 5 matrix paths: `bench/results/apple-stage5-dev-laptop.md`.
 
@@ -341,7 +358,7 @@ Historical wait-bound writeup (pre-Stage 6):
 ### Still true
 
 - Tiny block is a synthetic residual stream, not Qwen3-0.6B.
-- Metal attention hard-caps `kv_len` at **256**; fixture `max_seq` is 32.
+- Metal attention hard-caps `kv_len` at **2048** (256 thread-local fast path); Qwen M0.
 - Energy/token is not claimed; `peak_rss_bytes` is reported when available.
 - Stage 6 Metal is still slower than scalar CPU on this tiny shape.
 

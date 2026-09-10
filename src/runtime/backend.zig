@@ -80,7 +80,7 @@ pub const Capabilities = struct {
     bf16: bool = false,
     simdgroup_matrix: bool = false,
     accelerate: bool = false,
-    /// Retained Core ML/ANE inference path (Stage 7: always false until measured).
+    /// Retained Core ML/ANE inference path (Stage M7: always false — final REJECT).
     core_ml: bool = false,
     /// Retained SME kernel path (Stage 7: always false until measured).
     sme: bool = false,
@@ -151,7 +151,7 @@ pub fn cpuCapabilities() Capabilities {
         caps.addDisabled("AMX is not a public contract; attribute CPU matrix wins to Accelerate APIs only");
     }
     caps.addDisabled(sme_p.detail);
-    caps.addDisabled("Core ML/ANE inference path disabled (Stage 7: no measured subgraph)");
+    caps.addDisabled("Core ML/ANE inference path disabled (Stage M7: Qwen-scale REJECT)");
     return caps;
 }
 

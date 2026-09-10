@@ -125,6 +125,104 @@ pub fn build(b: *std.Build) void {
     const stage13_step = b.step("stage13", "KV cache Stage 13 ledger");
     stage13_step.dependOn(&stage13_cmd.step);
 
+    const stageM0_cmd = b.addRunArtifact(exe);
+    stageM0_cmd.step.dependOn(b.getInstallStep());
+    stageM0_cmd.addArg("stageM0");
+    stageM0_cmd.expectStdOutMatch("Stage M0");
+    stageM0_cmd.expectExitCode(0);
+    const stageM0_step = b.step("stageM0", "Metal Qwen forward Stage M0 ledger");
+    stageM0_step.dependOn(&stageM0_cmd.step);
+
+    const stageM1_cmd = b.addRunArtifact(exe);
+    stageM1_cmd.step.dependOn(b.getInstallStep());
+    stageM1_cmd.addArg("stageM1");
+    stageM1_cmd.expectStdOutMatch("Stage M1");
+    stageM1_cmd.expectExitCode(0);
+    const stageM1_step = b.step("stageM1", "Prefill/decode split Stage M1 ledger");
+    stageM1_step.dependOn(&stageM1_cmd.step);
+
+    const stageM2_cmd = b.addRunArtifact(exe);
+    stageM2_cmd.step.dependOn(b.getInstallStep());
+    stageM2_cmd.addArg("stageM2");
+    stageM2_cmd.expectStdOutMatch("Stage M2");
+    stageM2_cmd.expectExitCode(0);
+    const stageM2_step = b.step("stageM2", "Profile one decode token Stage M2 ledger");
+    stageM2_step.dependOn(&stageM2_cmd.step);
+
+    const stageM3_cmd = b.addRunArtifact(exe);
+    stageM3_cmd.step.dependOn(b.getInstallStep());
+    stageM3_cmd.addArg("stageM3");
+    stageM3_cmd.expectStdOutMatch("Stage M3");
+    stageM3_cmd.expectExitCode(0);
+    const stageM3_step = b.step("stageM3", "Qwen schedule/fusion Stage M3 ledger");
+    stageM3_step.dependOn(&stageM3_cmd.step);
+
+    const stageM4_cmd = b.addRunArtifact(exe);
+    stageM4_cmd.step.dependOn(b.getInstallStep());
+    stageM4_cmd.addArg("stageM4");
+    stageM4_cmd.expectStdOutMatch("Stage M4");
+    stageM4_cmd.expectExitCode(0);
+    const stageM4_step = b.step("stageM4", "bf16/fp16 Metal Stage M4 ledger");
+    stageM4_step.dependOn(&stageM4_cmd.step);
+
+    const stageM5_cmd = b.addRunArtifact(exe);
+    stageM5_cmd.step.dependOn(b.getInstallStep());
+    stageM5_cmd.addArg("stageM5");
+    stageM5_cmd.expectStdOutMatch("Stage M5");
+    stageM5_cmd.expectExitCode(0);
+    const stageM5_step = b.step("stageM5", "int8 quantization Stage M5 ledger");
+    stageM5_step.dependOn(&stageM5_cmd.step);
+
+    const stageM6_cmd = b.addRunArtifact(exe);
+    stageM6_cmd.step.dependOn(b.getInstallStep());
+    stageM6_cmd.addArg("stageM6");
+    stageM6_cmd.expectStdOutMatch("Stage M6");
+    stageM6_cmd.expectExitCode(0);
+    const stageM6_step = b.step("stageM6", "static decode plan Stage M6 ledger");
+    stageM6_step.dependOn(&stageM6_cmd.step);
+
+    const stageM7_cmd = b.addRunArtifact(exe);
+    stageM7_cmd.step.dependOn(b.getInstallStep());
+    stageM7_cmd.addArg("stageM7");
+    stageM7_cmd.expectStdOutMatch("Stage M7");
+    stageM7_cmd.expectStdOutMatch("REJECT");
+    stageM7_cmd.expectExitCode(0);
+    const stageM7_step = b.step("stageM7", "ANE/Core ML Qwen-scale Stage M7 ledger");
+    stageM7_step.dependOn(&stageM7_cmd.step);
+
+    const stageM8_cmd = b.addRunArtifact(exe);
+    stageM8_cmd.step.dependOn(b.getInstallStep());
+    stageM8_cmd.addArg("stageM8");
+    stageM8_cmd.expectStdOutMatch("Stage M8");
+    stageM8_cmd.expectStdOutMatch("Apple-complete");
+    stageM8_cmd.expectStdOutMatch("qwen3-4b");
+    stageM8_cmd.expectExitCode(0);
+    const stageM8_step = b.step("stageM8", "Apple capstone Qwen3-4B Stage M8 ledger");
+    stageM8_step.dependOn(&stageM8_cmd.step);
+
+    const qwen_bench_cmd = b.addRunArtifact(exe);
+    qwen_bench_cmd.step.dependOn(b.getInstallStep());
+    qwen_bench_cmd.addArg("qwen-bench");
+    qwen_bench_cmd.addArg("--mini");
+    qwen_bench_cmd.addArg("--max-tokens");
+    qwen_bench_cmd.addArg("4");
+    qwen_bench_cmd.expectStdOutMatch("prefill vs decode");
+    qwen_bench_cmd.expectStdOutMatch("json");
+    qwen_bench_cmd.expectExitCode(0);
+    const qwen_bench_step = b.step("qwen-bench", "Qwen prefill/decode split (Stage M1)");
+    qwen_bench_step.dependOn(&qwen_bench_cmd.step);
+
+    const qwen_profile_cmd = b.addRunArtifact(exe);
+    qwen_profile_cmd.step.dependOn(b.getInstallStep());
+    qwen_profile_cmd.addArg("qwen-profile");
+    qwen_profile_cmd.addArg("--mini");
+    qwen_profile_cmd.expectStdOutMatch("one decode token");
+    qwen_profile_cmd.expectStdOutMatch("top3");
+    qwen_profile_cmd.expectStdOutMatch("json");
+    qwen_profile_cmd.expectExitCode(0);
+    const qwen_profile_step = b.step("qwen-profile", "Qwen one-token profile (Stage M2)");
+    qwen_profile_step.dependOn(&qwen_profile_cmd.step);
+
     const kv_bench_cmd = b.addRunArtifact(exe);
     kv_bench_cmd.step.dependOn(b.getInstallStep());
     kv_bench_cmd.addArg("kv-bench");
@@ -321,6 +419,105 @@ pub fn build(b: *std.Build) void {
     stage13_ok.expectStdOutMatch("Stage 13");
     stage13_ok.expectExitCode(0);
     integration_step.dependOn(&stage13_ok.step);
+
+    const stageM0_ok = b.addRunArtifact(exe);
+    stageM0_ok.addArg("stageM0");
+    stageM0_ok.expectStdOutMatch("Stage M0");
+    stageM0_ok.expectExitCode(0);
+    integration_step.dependOn(&stageM0_ok.step);
+
+    const stageM1_ok = b.addRunArtifact(exe);
+    stageM1_ok.addArg("stageM1");
+    stageM1_ok.expectStdOutMatch("Stage M1");
+    stageM1_ok.expectExitCode(0);
+    integration_step.dependOn(&stageM1_ok.step);
+
+    const stageM2_ok = b.addRunArtifact(exe);
+    stageM2_ok.addArg("stageM2");
+    stageM2_ok.expectStdOutMatch("Stage M2");
+    stageM2_ok.expectExitCode(0);
+    integration_step.dependOn(&stageM2_ok.step);
+
+    const stageM3_ok = b.addRunArtifact(exe);
+    stageM3_ok.addArg("stageM3");
+    stageM3_ok.expectStdOutMatch("Stage M3");
+    stageM3_ok.expectExitCode(0);
+    integration_step.dependOn(&stageM3_ok.step);
+
+    const stageM4_ok = b.addRunArtifact(exe);
+    stageM4_ok.addArg("stageM4");
+    stageM4_ok.expectStdOutMatch("Stage M4");
+    stageM4_ok.expectExitCode(0);
+    integration_step.dependOn(&stageM4_ok.step);
+
+    const stageM5_ok = b.addRunArtifact(exe);
+    stageM5_ok.addArg("stageM5");
+    stageM5_ok.expectStdOutMatch("Stage M5");
+    stageM5_ok.expectExitCode(0);
+    integration_step.dependOn(&stageM5_ok.step);
+
+    const stageM6_ok = b.addRunArtifact(exe);
+    stageM6_ok.addArg("stageM6");
+    stageM6_ok.expectStdOutMatch("Stage M6");
+    stageM6_ok.expectExitCode(0);
+    integration_step.dependOn(&stageM6_ok.step);
+
+    const stageM7_ok = b.addRunArtifact(exe);
+    stageM7_ok.addArg("stageM7");
+    stageM7_ok.expectStdOutMatch("Stage M7");
+    stageM7_ok.expectStdOutMatch("REJECT");
+    stageM7_ok.expectExitCode(0);
+    integration_step.dependOn(&stageM7_ok.step);
+
+    const stageM8_ok = b.addRunArtifact(exe);
+    stageM8_ok.addArg("stageM8");
+    stageM8_ok.expectStdOutMatch("Stage M8");
+    stageM8_ok.expectStdOutMatch("qwen3-4b");
+    stageM8_ok.expectExitCode(0);
+    integration_step.dependOn(&stageM8_ok.step);
+
+    const coreml_smoke_ok = b.addRunArtifact(exe);
+    coreml_smoke_ok.addArg("coreml-smoke");
+    coreml_smoke_ok.addArg("tools/fixtures/coreml_toy.mlpackage");
+    if (have_apple) {
+        // Real Core ML load/predict only on macOS.
+        coreml_smoke_ok.expectStdOutMatch("predict_ok");
+        coreml_smoke_ok.expectStdOutMatch("does NOT verify ANE");
+        coreml_smoke_ok.expectExitCode(0);
+    } else {
+        // Linux CI: command must report unsupported and exit 0 (not fail the suite).
+        coreml_smoke_ok.expectStdOutMatch("unsupported");
+        coreml_smoke_ok.expectStdOutMatch("does NOT verify ANE");
+        coreml_smoke_ok.expectExitCode(0);
+    }
+    integration_step.dependOn(&coreml_smoke_ok.step);
+
+    const mem_report_ok = b.addRunArtifact(exe);
+    mem_report_ok.addArg("mem-report");
+    mem_report_ok.addArg("--mini");
+    mem_report_ok.expectStdOutMatch("mem-report");
+    mem_report_ok.expectStdOutMatch("json");
+    mem_report_ok.expectExitCode(0);
+    integration_step.dependOn(&mem_report_ok.step);
+
+    const qwen_bench_ok = b.addRunArtifact(exe);
+    qwen_bench_ok.addArg("qwen-bench");
+    qwen_bench_ok.addArg("--mini");
+    qwen_bench_ok.addArg("--max-tokens");
+    qwen_bench_ok.addArg("4");
+    qwen_bench_ok.expectStdOutMatch("prefill vs decode");
+    qwen_bench_ok.expectStdOutMatch("json");
+    qwen_bench_ok.expectExitCode(0);
+    integration_step.dependOn(&qwen_bench_ok.step);
+
+    const qwen_profile_ok = b.addRunArtifact(exe);
+    qwen_profile_ok.addArg("qwen-profile");
+    qwen_profile_ok.addArg("--mini");
+    qwen_profile_ok.expectStdOutMatch("one decode token");
+    qwen_profile_ok.expectStdOutMatch("top3");
+    qwen_profile_ok.expectStdOutMatch("json");
+    qwen_profile_ok.expectExitCode(0);
+    integration_step.dependOn(&qwen_profile_ok.step);
 
     const kv_bench_ok = b.addRunArtifact(exe);
     kv_bench_ok.addArg("kv-bench");

@@ -58,12 +58,30 @@ def pad_name(name: str) -> bytes:
     return raw + b"\x00" * (64 - len(raw))
 
 
-def write_meta(cfg: dict) -> bytes:
-    model_id = b"qwen3-0.6b" + b"\x00" * (64 - len(b"qwen3-0.6b"))
+def infer_model_id(cfg: dict) -> str:
+    """Map HF dims to a registered zynfer model id (Stage M8)."""
+    h = int(cfg["hidden_size"])
+    layers = int(cfg["num_hidden_layers"])
+    heads = int(cfg["num_attention_heads"])
+    if h == 1024 and layers == 28 and heads == 16:
+        return "qwen3-0.6b"
+    if h == 2560 and layers == 36 and heads == 32:
+        return "qwen3-4b"
+    raise SystemExit(
+        f"unknown Qwen3 dims (hidden={h}, layers={layers}, heads={heads}); "
+        f"pass --model-id explicitly or extend the registry"
+    )
+
+
+def write_meta(cfg: dict, model_id: str) -> bytes:
+    mid = model_id.encode("utf-8")
+    if not mid or len(mid) >= 64:
+        raise ValueError(f"bad model_id: {model_id!r}")
+    model_id_bytes = mid + b"\x00" * (64 - len(mid))
     tie = 1 if cfg.get("tie_word_embeddings", True) else 0
     return struct.pack(
         "<64s10I2fB3x",
-        model_id,
+        model_id_bytes,
         int(cfg["vocab_size"]),
         int(cfg["hidden_size"]),
         int(cfg["intermediate_size"]),
@@ -235,6 +253,15 @@ def build_artifact(meta: bytes, tensors: list[tuple[str, int, list[int], bytes]]
     return bytes(body)
 
 
+def dtype_summary(tensors: list[tuple[str, int, list[int], bytes]]) -> str:
+    counts: dict[int, int] = {}
+    for _name, tag, _shape, _raw in tensors:
+        counts[tag] = counts.get(tag, 0) + 1
+    labels = {0: "f32", 1: "f16", 2: "bf16"}
+    parts = [f"{labels.get(k, k)}={v}" for k, v in sorted(counts.items())]
+    return ", ".join(parts)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", type=Path, required=True, help="HF config.json")
@@ -246,16 +273,23 @@ def main() -> None:
         help="model.safetensors file(s) and/or a checkpoint directory (shards + optional index.json)",
     )
     ap.add_argument("--out", type=Path, required=True, help="output .zynfer path")
+    ap.add_argument(
+        "--model-id",
+        type=str,
+        default=None,
+        help="registered id (qwen3-0.6b | qwen3-4b); default: infer from config dims",
+    )
     args = ap.parse_args()
 
     cfg = json.loads(args.config.read_text())
-    meta = write_meta(cfg)
+    model_id = args.model_id or infer_model_id(cfg)
+    meta = write_meta(cfg, model_id)
     tensors = load_safetensors(args.weights)
     blob = build_artifact(meta, tensors)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_bytes(blob)
     print(
-        f"wrote {args.out} ({len(blob)} bytes, {len(tensors)} tensors, ids 1..{len(tensors)})",
+        f"wrote {args.out} ({len(blob)} bytes, model_id={model_id}, {len(tensors)} tensors, ids 1..{len(tensors)}, dtypes: {dtype_summary(tensors)})",
         file=sys.stderr,
     )
 

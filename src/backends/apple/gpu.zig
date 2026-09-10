@@ -143,6 +143,10 @@ pub const Gpu = struct {
     batch_active: bool = false,
     /// Dispatches encoded in the current (or last completed) batch.
     last_batch_encodes: u32 = 0,
+    /// Cumulative kernel encodes since last `resetLaunchCounters` (batch or wait path).
+    total_encodes: u64 = 0,
+    /// Cumulative GPU waits since last reset (`encode_and_wait` or `batchCommit`).
+    total_waits: u64 = 0,
 
     pub fn init() Error!Gpu {
         if (!have_apple) return error.AppleUnavailable;
@@ -210,27 +214,31 @@ pub const Gpu = struct {
             .arch = .{ .apple_m = self.features },
             .unified_memory = self.features.unified_memory,
             .fp32 = true,
-            .fp16 = false,
-            .bf16 = false,
+            .fp16 = true,
+            .bf16 = true,
             .simdgroup_matrix = self.features.simdgroup_matrix_available,
             .accelerate = self.features.accelerate_available,
             .core_ml = cm_p.path_retained,
             .sme = sme_p.path_retained,
         };
-        caps.addDisabled("fp16/bf16 Metal kernels not implemented");
         caps.addDisabled(sme_p.detail);
         caps.addDisabled(cm_p.detail);
-        caps.addDisabled("Core ML/ANE inference path not retained (Stage 7: no measured end-to-end subgraph)");
+        caps.addDisabled("Core ML/ANE inference path not retained (Stage M7: Qwen-scale REJECT)");
         caps.addDisabled("AMX is not a public contract; CPU matrix wins attribute to Accelerate only");
         caps.addDisabled("No tokenizer/sampling; Stage 10 loads .zynfer metadata/tensors only");
         caps.addDisabled("Full Qwen forward is Stage 11; TTFT/tok/s need Stage 12");
-        caps.addDisabled("Metal attention_f32 caps kv_len at 256 (thread-local scores); larger returns Unsupported");
+        caps.addDisabled("Metal attention_f32 caps kv_len at 2048 (256 thread-local fast path); larger returns Unsupported");
         caps.addDisabled("Per-op apple.ops path still waits each kernel; Stage 6 batch+resident KV is the tiny-block schedule");
         caps.addDisabled("Each Gpu is single-owner; concurrent sessions need one Gpu (and buffers) per thread");
         if (!self.features.simdgroup_matrix_available) {
             caps.addDisabled("simdgroup_matrix hardware not available; matmul uses naive f32 only");
         }
         return caps;
+    }
+
+    pub fn resetLaunchCounters(self: *Gpu) void {
+        self.total_encodes = 0;
+        self.total_waits = 0;
     }
 
     /// Open a multi-dispatch command buffer. `launch`/`launchOpts` encode onto it
@@ -256,6 +264,7 @@ pub const Gpu = struct {
             self.captureError();
             return statusToError(st);
         }
+        self.total_waits += 1;
     }
 
     pub fn batchAbort(self: *Gpu) void {
@@ -357,7 +366,12 @@ pub const Gpu = struct {
             if (self.batch_active) self.batchAbort();
             return statusToError(st);
         }
-        if (self.batch_active) self.last_batch_encodes += 1;
+        self.total_encodes += 1;
+        if (self.batch_active) {
+            self.last_batch_encodes += 1;
+        } else {
+            self.total_waits += 1;
+        }
     }
 
     pub fn threadgroup1d(self: *const Gpu) u32 {

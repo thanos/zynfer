@@ -76,17 +76,20 @@ python3 tools/checkpoint/safetensors_to_zynfer.py \
   --out models/qwen3-0.6b.zynfer
 ```
 
+Qwen weights are **BF16**. The converter copies raw Safetensors bytes (no
+NumPy / `ml_dtypes`) and prints a dtype summary, e.g.
+`dtypes: bf16=311`. Stage M4 Metal half path uploads those bytes to the
+GPU without an f32 promote on the weight upload (CPU oracle still loads
+f32 for differential tests).
+
 Successful stderr looks like:
 
 ```text
 loading 1 safetensors file(s)
-wrote models/qwen3-0.6b.zynfer (… bytes, 311 tensors, ids 1..311)
+wrote models/qwen3-0.6b.zynfer (… bytes, 311 tensors, ids 1..311, dtypes: bf16=311)
 ```
 
 Tensor **ids are 1..N in sorted name order** (stable for `Artifact.findById`).
-
-Qwen weights are **BF16**. The converter copies raw Safetensors bytes (no
-NumPy / `ml_dtypes`).
 
 ### 3. Validate with Zig
 
@@ -96,6 +99,22 @@ zig build -Dhip=off
 ```
 
 Expect `storage: mmap` on macOS/Linux, `model_id: qwen3-0.6b`, `dtype=bf16`.
+
+### 4. Optional: pack int8 projections (Stage M5)
+
+Requires NumPy (`pip install numpy`).
+
+```bash
+python3 tools/checkpoint/quantize_zynfer_int8.py \
+  --in models/qwen3-0.6b.zynfer \
+  --out models/qwen3-0.6b-int8.zynfer
+```
+
+Writes dtype=`i8` (tag 3) for linear projections plus `{name}.qscale` f32
+rows. Aborts if CPU dequant max abs error exceeds `--max-err` (default 0.05).
+Smoke on qwen3-0.6b: worst abs err ≈ 4.9e-3 (well under budget).
+The Metal hot path currently packs at `MetalStack.init` from the f32/bf16
+artifact when `ZYNFER_QWEN_METAL=int8`.
 
 ## Troubleshooting
 
