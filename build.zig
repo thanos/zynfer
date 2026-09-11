@@ -271,6 +271,25 @@ pub fn build(b: *std.Build) void {
     const spec_bench_step = b.step("spec-bench", "n-gram speculative vs baseline A/B (Stage S3)");
     spec_bench_step.dependOn(&spec_bench_cmd.step);
 
+    const stageS4_cmd = b.addRunArtifact(exe);
+    stageS4_cmd.step.dependOn(b.getInstallStep());
+    stageS4_cmd.addArg("stageS4");
+    stageS4_cmd.expectStdOutMatch("Stage S4");
+    stageS4_cmd.expectExitCode(0);
+    const stageS4_step = b.step("stageS4", "HTTP server Stage S4 ledger");
+    stageS4_step.dependOn(&stageS4_cmd.step);
+
+    const serve_smoke_cmd = b.addRunArtifact(exe);
+    serve_smoke_cmd.step.dependOn(b.getInstallStep());
+    serve_smoke_cmd.addArg("serve");
+    serve_smoke_cmd.addArg("--mini");
+    serve_smoke_cmd.addArg("--smoke");
+    serve_smoke_cmd.expectStdOutMatch("smoke: PASS");
+    serve_smoke_cmd.expectStdOutMatch("json");
+    serve_smoke_cmd.expectExitCode(0);
+    const serve_smoke_step = b.step("serve-smoke", "HTTP server smoke (Stage S4)");
+    serve_smoke_step.dependOn(&serve_smoke_cmd.step);
+
     const qwen_bench_cmd = b.addRunArtifact(exe);
     qwen_bench_cmd.step.dependOn(b.getInstallStep());
     qwen_bench_cmd.addArg("qwen-bench");
@@ -602,6 +621,21 @@ pub fn build(b: *std.Build) void {
     spec_bench_ok.expectStdOutMatch("json");
     spec_bench_ok.expectExitCode(0);
     integration_step.dependOn(&spec_bench_ok.step);
+
+    const stageS4_ok = b.addRunArtifact(exe);
+    stageS4_ok.addArg("stageS4");
+    stageS4_ok.expectStdOutMatch("Stage S4");
+    stageS4_ok.expectExitCode(0);
+    integration_step.dependOn(&stageS4_ok.step);
+
+    const serve_smoke_ok = b.addRunArtifact(exe);
+    serve_smoke_ok.addArg("serve");
+    serve_smoke_ok.addArg("--mini");
+    serve_smoke_ok.addArg("--smoke");
+    serve_smoke_ok.expectStdOutMatch("smoke: PASS");
+    serve_smoke_ok.expectStdOutMatch("json");
+    serve_smoke_ok.expectExitCode(0);
+    integration_step.dependOn(&serve_smoke_ok.step);
 
     const coreml_smoke_ok = b.addRunArtifact(exe);
     coreml_smoke_ok.addArg("coreml-smoke");

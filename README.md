@@ -32,7 +32,7 @@ are done.
 **Phase M (M0–M8) — done (Apple-complete).** Metal Qwen schedule (batched,
 bf16, int8), static decode plan, ANE reject, 4B capstone ledger. Post-M8
 polish: artifact i8→Metal without host f32 twins; bf16 KV on the int8 path.
-**Next:** Phase S in progress (S1–S3 done; S4 HTTP next); Phase R (AMD `gfx1201`) when hardware
+**Next:** Phase S complete (S1–S4 HTTP); optional S3b draft follow-ons; Phase R (AMD `gfx1201`) when hardware
 lands.
 
 The Zig repository, HIP device enumeration (when ROCm is present),

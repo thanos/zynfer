@@ -20,7 +20,7 @@ Phase S — Serving & scale, backend-neutral        (next; overlaps R)
 | --- | --- | --- |
 | **M** | Maximally fast Apple M-series Qwen inference (Metal primary) | **done** (M8) |
 | **R** | Maximally fast RDNA 4 HIP inference | Physical `gfx1201` hardware |
-| **S** | Batching, prefix cache, speculative, HTTP server | M8 Apple-complete (**met**) |
+| S | Batching, prefix cache, speculative, HTTP server | M8 Apple-complete (**met**); **S1–S4 done** |
 
 ## Milestones
 
@@ -123,7 +123,7 @@ fabricated AMD numbers**.
 | S1 | Batching and scheduling | 21 | **done** (request-level FIFO+RR) |
 | S2 | Prefix reuse / cache management | 22 | **done** (dense truncate+continue) |
 | S3 | Speculative / MTP | 23 | **done** (n-gram draft + verify) |
-| S4 | HTTP server | 24 | next |
+| S4 | HTTP server | 24 | **done** (SSE + /v1/completions) |
 
 **S1 gate (closed):** `src/runtime/scheduler.zig` FIFO admit +
 `max_inflight` + round-robin decode over independent Sessions; greedy
@@ -143,11 +143,19 @@ tokens/round / **committed** tok/s; tutorial 25. MTP heads absent on
 registered Qwen3 CausalLM artifacts. Explicitly **not** a separate draft
 model, tree verify, or HTTP (S4) **in this stage**.
 
+**S4 gate (closed):** `src/runtime/http_server.zig` — `GET /health`,
+`GET /metrics`, `POST /v1/completions`, `POST /v1/chat/completions`;
+SSE streaming via `on_token`; `zynfer serve --smoke` + tutorial 26.
+Protocol separate from engine. Explicitly **not** TLS/auth, OpenAI
+parity, or S1 scheduler over HTTP.
+
 **Future (proposed, not scheduled):** stronger drafts — separate draft LM,
 MTP checkpoint, Medusa, EAGLE, layer-skip, tree verify — as optional
 **S3b** after S4. See
 [`docs/proposals/speculative-draft-followons.md`](proposals/speculative-draft-followons.md).
 
+**Phase S complete** at S4 for the curriculum server surface. Stage 25
+(“serious model”) remains opt-in beyond Apple-complete M8.
 ---
 
 ## Legacy stage index (traceability)

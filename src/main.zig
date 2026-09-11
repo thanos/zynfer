@@ -27,6 +27,7 @@ const usage =
     \\  zynfer stageS1      Batching / scheduling Stage S1 ledger
     \\  zynfer stageS2      Prefix reuse / cache Stage S2 ledger
     \\  zynfer stageS3      Speculative decoding Stage S3 ledger
+    \\  zynfer stageS4      HTTP server Stage S4 ledger
     \\  zynfer coreml-smoke [PATH]  Load toy Core ML .mlpackage + one predict (M7 polish)
     \\  zynfer mem-report   weights / KV / scratch / peak RSS (Stage M6)
     \\  zynfer inspect PATH Validate and print a .zynfer artifact
@@ -40,6 +41,7 @@ const usage =
     \\  zynfer batch-bench [ARTIFACT] [--mini] [--batch-size N] [--max-inflight N] [--max-tokens N]
     \\  zynfer prefix-bench [ARTIFACT] [--mini] [--prefix-len N] [--suffix-len N] [--trials N]
     \\  zynfer spec-bench [ARTIFACT] [--mini] [--proposal-depth K] [--ngram-order N] [--max-tokens N]
+    \\  zynfer serve [ARTIFACT] [--mini] [--host ADDR] [--port N] [--smoke] [--tokenizer DIR]
     \\  zynfer setup [--model 0.6b|4b] [--quantize] [--skip-golden] [--skip-pip]
     \\  zynfer backends     List selectable backends
     \\  zynfer ops-bench    CPU vs Apple op microbenchmarks
@@ -86,6 +88,9 @@ pub fn main(init: std.process.Init) !void {
     var trials: u32 = 4;
     var proposal_depth: u32 = 4;
     var ngram_order: u32 = 2;
+    var serve_host: []const u8 = "127.0.0.1";
+    var serve_port: u16 = 8080;
+    var serve_smoke = false;
     var temperature: f32 = 0;
     var top_k: u32 = 0;
     var top_p: f32 = 1.0;
@@ -268,6 +273,29 @@ pub fn main(init: std.process.Init) !void {
                 std.debug.print("invalid --ngram-order\n", .{});
                 std.process.exit(2);
             };
+        } else if (std.mem.eql(u8, arg, "--host")) {
+            serve_host = args_it.next() orelse {
+                std.debug.print("missing value for --host\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.startsWith(u8, arg, "--host=")) {
+            serve_host = arg["--host=".len..];
+        } else if (std.mem.eql(u8, arg, "--port")) {
+            const v = args_it.next() orelse {
+                std.debug.print("missing value for --port\n", .{});
+                std.process.exit(2);
+            };
+            serve_port = std.fmt.parseInt(u16, v, 10) catch {
+                std.debug.print("invalid --port\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.startsWith(u8, arg, "--port=")) {
+            serve_port = std.fmt.parseInt(u16, arg["--port=".len..], 10) catch {
+                std.debug.print("invalid --port\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.eql(u8, arg, "--smoke")) {
+            serve_smoke = true;
         } else if (std.mem.eql(u8, arg, "--temperature") or std.mem.eql(u8, arg, "--temp")) {
             const v = args_it.next() orelse {
                 std.debug.print("missing value for --temperature\n", .{});
@@ -426,6 +454,8 @@ pub fn main(init: std.process.Init) !void {
         try printStageS2(writer);
     } else if (std.mem.eql(u8, command, "stageS3") or std.mem.eql(u8, command, "stages3")) {
         try printStageS3(writer);
+    } else if (std.mem.eql(u8, command, "stageS4") or std.mem.eql(u8, command, "stages4")) {
+        try printStageS4(writer);
     } else if (std.mem.eql(u8, command, "coreml-smoke") or std.mem.eql(u8, command, "coremlsmoke")) {
         const path = if (n_pos >= 1) positionals[0] else "tools/fixtures/coreml_toy.mlpackage";
         try cmdCoreMlSmoke(writer, path);
@@ -550,6 +580,20 @@ pub fn main(init: std.process.Init) !void {
             artifact_mini,
             proposal_depth,
             ngram_order,
+            max_tokens,
+            try resolveKind(forced_backend),
+        );
+    } else if (std.mem.eql(u8, command, "serve")) {
+        try runServe(
+            allocator,
+            io,
+            writer,
+            if (n_pos >= 1) positionals[0] else null,
+            artifact_mini,
+            serve_host,
+            serve_port,
+            serve_smoke,
+            tokenizer_dir,
             max_tokens,
             try resolveKind(forced_backend),
         );
@@ -1156,6 +1200,30 @@ fn printStageS3(writer: *std.Io.Writer) !void {
     try writer.print("See docs/tutorials/25-speculative-decoding.md\n", .{});
     try writer.print("See docs/proposals/speculative-draft-followons.md\n", .{});
     try writer.print("See bench/results/stageS3-dev-laptop.md\n", .{});
+}
+
+fn printStageS4(writer: *std.Io.Writer) !void {
+    try writer.print("zynfer Stage S4 — HTTP server\n", .{});
+    try writer.print("=============================\n\n", .{});
+    try writer.print("Done (protocol layer)\n", .{});
+    try writer.print("  listen:           std.Io.net + std.http.Server (one request/connection)\n", .{});
+    try writer.print("  endpoints:        GET /health, GET /metrics\n", .{});
+    try writer.print("                    POST /v1/completions, POST /v1/chat/completions\n", .{});
+    try writer.print("  streaming:        SSE text/event-stream via Session.generate on_token\n", .{});
+    try writer.print("  separation:       http_server.zig translates HTTP ↔ generate only\n", .{});
+    try writer.print("  CLI:              serve [--mini] [--host] [--port] [--smoke]\n\n", .{});
+    try writer.print("Not Stage S4 (explicit non-goals)\n", .{});
+    try writer.print("  TLS / auth / multi-model routing\n", .{});
+    try writer.print("  full OpenAI API parity\n", .{});
+    try writer.print("  S1 scheduler over HTTP / concurrent Metal requests\n", .{});
+    try writer.print("  S3b draft-model speculation\n\n", .{});
+    try writer.print("Gate\n", .{});
+    try writer.print("  local client streams tokens over HTTP (serve --smoke / unit)\n", .{});
+    try writer.print("  /health + /metrics + streamed /v1/completions\n", .{});
+    try writer.print("  tutorial teaches protocol vs engine boundary\n\n", .{});
+    try writer.print("See docs/stages/S4-http-server.md\n", .{});
+    try writer.print("See docs/tutorials/26-http-server.md\n", .{});
+    try writer.print("See bench/results/stageS4-dev-laptop.md\n", .{});
 }
 
 fn cmdCoreMlSmoke(writer: *std.Io.Writer, path: []const u8) !void {
@@ -2633,6 +2701,97 @@ fn runSpecBench(
         try writer.flush();
         std.process.exit(1);
     }
+}
+
+fn runServe(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    writer: *std.Io.Writer,
+    artifact_path_opt: ?[]const u8,
+    force_mini: bool,
+    host: []const u8,
+    port: u16,
+    smoke: bool,
+    tokenizer_dir_opt: ?[]const u8,
+    default_max_tokens: u32,
+    kind: zynfer.BackendKind,
+) !void {
+    const use_mini = force_mini or (artifact_path_opt == null and smoke);
+
+    try writer.print("zynfer serve — HTTP server (Stage S4)\n", .{});
+    try writer.print("=====================================\n\n", .{});
+
+    var engine: zynfer.http_server.Engine = undefined;
+    var owned_tok_dir: ?[]const u8 = null;
+    defer if (owned_tok_dir) |d| allocator.free(d);
+
+    if (use_mini) {
+        try writer.print("fixture: stage11-mini (in-memory)\n", .{});
+        engine = try zynfer.http_server.Engine.initMini(allocator, io, kind, default_max_tokens);
+    } else {
+        const path = artifact_path_opt orelse defaultRegisteredArtifact(io);
+        if (!zynfer.util.fileExists(io, path)) {
+            std.debug.print(
+                "serve: artifact not found ({s})\n  run: ./zig-out/bin/zynfer setup\n  or:  --mini\n",
+                .{path},
+            );
+            std.process.exit(2);
+        }
+        owned_tok_dir = try resolveTokenizerDir(allocator, io, path, tokenizer_dir_opt);
+        try writer.print("artifact: {s}\n", .{path});
+        try writer.print("tokenizer: {s}\n", .{owned_tok_dir.?});
+        engine = try zynfer.http_server.Engine.initFile(
+            allocator,
+            io,
+            kind,
+            path,
+            owned_tok_dir,
+            default_max_tokens,
+        );
+    }
+    defer engine.deinit();
+
+    try writer.print("backend={s} default_max_tokens={d}\n", .{ kind.name(), default_max_tokens });
+    try writer.flush();
+
+    if (smoke) {
+        try writer.print("mode: smoke (health + streamed completions)\n", .{});
+        try writer.flush();
+        zynfer.http_server.runSmoke(&engine) catch |err| {
+            std.debug.print("serve --smoke failed: {s}\n", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        try writer.print("smoke: PASS\n", .{});
+        try writer.print("metrics: requests={d} completions={d} tokens={d} streams={d}\n", .{
+            engine.metrics.requests_total,
+            engine.metrics.completions_total,
+            engine.metrics.tokens_generated_total,
+            engine.metrics.stream_responses_total,
+        });
+        try writer.print("json\n", .{});
+        try writer.print("{{\"cmd\":\"serve-smoke\",\"backend\":\"{s}\",\"mini\":{},\"ok\":true,\"requests\":{d},\"completions\":{d},\"tokens\":{d},\"streams\":{d}}}\n", .{
+            kind.name(),
+            use_mini,
+            engine.metrics.requests_total,
+            engine.metrics.completions_total,
+            engine.metrics.tokens_generated_total,
+            engine.metrics.stream_responses_total,
+        });
+        return;
+    }
+
+    try writer.print("listening http://{s}:{d}/  (Ctrl-C to stop)\n", .{ host, port });
+    try writer.print("  GET  /health\n", .{});
+    try writer.print("  GET  /metrics\n", .{});
+    try writer.print("  POST /v1/completions\n", .{});
+    try writer.print("  POST /v1/chat/completions\n", .{});
+    try writer.flush();
+
+    try zynfer.http_server.serveLoop(&engine, .{
+        .host = host,
+        .port = port,
+        .default_max_tokens = default_max_tokens,
+    });
 }
 
 /// Stage M2: per-family wall profile for one Metal (or CPU) decode token + roofline.

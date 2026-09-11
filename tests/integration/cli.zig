@@ -189,6 +189,23 @@ test "spec-bench mini greedy token parity" {
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "\"cmd\":\"spec-bench\"") != null);
 }
 
+test "stageS4 prints HTTP server ledger" {
+    var out = try run(&.{"stageS4"});
+    defer out.deinit(std.testing.allocator);
+    try expectExited(out, 0);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "Stage S4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "/v1/completions") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "serve") != null);
+}
+
+test "serve --mini --smoke streams over HTTP" {
+    var out = try run(&.{ "serve", "--mini", "--smoke" });
+    defer out.deinit(std.testing.allocator);
+    try expectExited(out, 0);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "smoke: PASS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "\"cmd\":\"serve-smoke\"") != null);
+}
+
 test "stage8 prints hardening ledger" {
     var out = try run(&.{"stage8"});
     defer out.deinit(std.testing.allocator);
