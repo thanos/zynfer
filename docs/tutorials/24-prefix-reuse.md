@@ -65,7 +65,7 @@ Expect `logits_match: PASS` and `savings_ratio > 0`.
 ## What is not here
 
 - Paged / block KV — later when contiguous reuse is boring
-- Speculative decoding — Stage S3
+- Speculative decoding — Stage S3 (tutorial 25)
 - HTTP — Stage S4
 - Sharing one Metal weight residency across S1 scheduler slots — orthogonal
 

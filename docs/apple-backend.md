@@ -337,7 +337,7 @@ Stage 8 ledger: `bench/results/apple-stage8-dev-laptop.md`.
 | **static decode / ANE** | M6 **done** / M7 **done (REJECT)** — tutorial 21 |
 | **Qwen3-4B Apple capstone** | M8 **done (Apple-complete)** — [`docs/stages/M8-apple-capstone.md`](stages/M8-apple-capstone.md) |
 
-**Next:** Phase S (S1–S2 done — scheduling + prefix reuse; S3 speculative next) or Phase R (AMD when hardware). See [`docs/roadmap.md`](roadmap.md).
+**Next:** Phase S (S1–S3 done — scheduling, prefix reuse, speculative; S4 HTTP next) or Phase R (AMD when hardware). See [`docs/roadmap.md`](roadmap.md).
 
 ### Previously mapped (done)
 

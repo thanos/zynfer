@@ -62,7 +62,7 @@ concurrency metrics.
 ## What is not here
 
 - Prefix reuse / paged KV — Stage S2 (tutorial 24; dense path done; paged deferred)
-- Speculative decoding — Stage S3
+- Speculative decoding — Stage S3 (tutorial 25; n-gram draft done; MTP deferred)
 - HTTP — Stage S4
 - Metal CB fusion — Stage M3 (already done)
 

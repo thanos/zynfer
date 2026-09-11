@@ -26,6 +26,7 @@ const usage =
     \\  zynfer stageM8      Apple capstone: Qwen3-4B + benchmark matrix
     \\  zynfer stageS1      Batching / scheduling Stage S1 ledger
     \\  zynfer stageS2      Prefix reuse / cache Stage S2 ledger
+    \\  zynfer stageS3      Speculative decoding Stage S3 ledger
     \\  zynfer coreml-smoke [PATH]  Load toy Core ML .mlpackage + one predict (M7 polish)
     \\  zynfer mem-report   weights / KV / scratch / peak RSS (Stage M6)
     \\  zynfer inspect PATH Validate and print a .zynfer artifact
@@ -38,6 +39,7 @@ const usage =
     \\  zynfer qwen-profile [ARTIFACT] [--mini] [--prompt TEXT] [--backend apple|cpu]
     \\  zynfer batch-bench [ARTIFACT] [--mini] [--batch-size N] [--max-inflight N] [--max-tokens N]
     \\  zynfer prefix-bench [ARTIFACT] [--mini] [--prefix-len N] [--suffix-len N] [--trials N]
+    \\  zynfer spec-bench [ARTIFACT] [--mini] [--proposal-depth K] [--ngram-order N] [--max-tokens N]
     \\  zynfer setup [--model 0.6b|4b] [--quantize] [--skip-golden] [--skip-pip]
     \\  zynfer backends     List selectable backends
     \\  zynfer ops-bench    CPU vs Apple op microbenchmarks
@@ -82,6 +84,8 @@ pub fn main(init: std.process.Init) !void {
     var prefix_len: u32 = 0;
     var suffix_len: u32 = 0;
     var trials: u32 = 4;
+    var proposal_depth: u32 = 4;
+    var ngram_order: u32 = 2;
     var temperature: f32 = 0;
     var top_k: u32 = 0;
     var top_p: f32 = 1.0;
@@ -234,6 +238,34 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.startsWith(u8, arg, "--trials=")) {
             trials = std.fmt.parseInt(u32, arg["--trials=".len..], 10) catch {
                 std.debug.print("invalid --trials\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.eql(u8, arg, "--proposal-depth")) {
+            const v = args_it.next() orelse {
+                std.debug.print("missing value for --proposal-depth\n", .{});
+                std.process.exit(2);
+            };
+            proposal_depth = std.fmt.parseInt(u32, v, 10) catch {
+                std.debug.print("invalid --proposal-depth\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.startsWith(u8, arg, "--proposal-depth=")) {
+            proposal_depth = std.fmt.parseInt(u32, arg["--proposal-depth=".len..], 10) catch {
+                std.debug.print("invalid --proposal-depth\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.eql(u8, arg, "--ngram-order")) {
+            const v = args_it.next() orelse {
+                std.debug.print("missing value for --ngram-order\n", .{});
+                std.process.exit(2);
+            };
+            ngram_order = std.fmt.parseInt(u32, v, 10) catch {
+                std.debug.print("invalid --ngram-order\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.startsWith(u8, arg, "--ngram-order=")) {
+            ngram_order = std.fmt.parseInt(u32, arg["--ngram-order=".len..], 10) catch {
+                std.debug.print("invalid --ngram-order\n", .{});
                 std.process.exit(2);
             };
         } else if (std.mem.eql(u8, arg, "--temperature") or std.mem.eql(u8, arg, "--temp")) {
@@ -392,6 +424,8 @@ pub fn main(init: std.process.Init) !void {
         try printStageS1(writer);
     } else if (std.mem.eql(u8, command, "stageS2") or std.mem.eql(u8, command, "stages2")) {
         try printStageS2(writer);
+    } else if (std.mem.eql(u8, command, "stageS3") or std.mem.eql(u8, command, "stages3")) {
+        try printStageS3(writer);
     } else if (std.mem.eql(u8, command, "coreml-smoke") or std.mem.eql(u8, command, "coremlsmoke")) {
         const path = if (n_pos >= 1) positionals[0] else "tools/fixtures/coreml_toy.mlpackage";
         try cmdCoreMlSmoke(writer, path);
@@ -505,6 +539,18 @@ pub fn main(init: std.process.Init) !void {
             prefix_len,
             suffix_len,
             trials,
+            try resolveKind(forced_backend),
+        );
+    } else if (std.mem.eql(u8, command, "spec-bench")) {
+        try runSpecBench(
+            allocator,
+            io,
+            writer,
+            if (n_pos >= 1) positionals[0] else null,
+            artifact_mini,
+            proposal_depth,
+            ngram_order,
+            max_tokens,
             try resolveKind(forced_backend),
         );
     } else if (std.mem.eql(u8, command, "chat")) {
@@ -1083,6 +1129,33 @@ fn printStageS2(writer: *std.Io.Writer) !void {
     try writer.print("See docs/stages/S2-prefix-reuse.md\n", .{});
     try writer.print("See docs/tutorials/24-prefix-reuse.md\n", .{});
     try writer.print("See bench/results/stageS2-dev-laptop.md\n", .{});
+}
+
+fn printStageS3(writer: *std.Io.Writer) !void {
+    try writer.print("zynfer Stage S3 — speculative decoding\n", .{});
+    try writer.print("======================================\n\n", .{});
+    try writer.print("Done (n-gram draft + target verify)\n", .{});
+    try writer.print("  draft:            history n-gram proposal (no second model / no MTP heads)\n", .{});
+    try writer.print("  verify:           greedy argmax vs draft before each decodeToken\n", .{});
+    try writer.print("  reject:           commit target truth; end round (verify precedes decode)\n", .{});
+    try writer.print("  metrics:          proposal depth, acceptance rate, tokens/round, committed tok/s\n", .{});
+    try writer.print("  CLI:              spec-bench [--mini] [--proposal-depth K] [--ngram-order N]\n\n", .{});
+    try writer.print("MTP note\n", .{});
+    try writer.print("  Registered Qwen3-0.6B/4B are CausalLM only — no MTP tensors in artifacts.\n", .{});
+    try writer.print("  MTP / Medusa / EAGLE / draft-LM / layer-skip → future proposal (not S3).\n\n", .{});
+    try writer.print("Not Stage S3 (explicit non-goals)\n", .{});
+    try writer.print("  separate draft model / EAGLE / Medusa / layer-skip (proposed S3b)\n", .{});
+    try writer.print("  tree attention / multi-position parallel verify\n", .{});
+    try writer.print("  HTTP server (S4)\n", .{});
+    try writer.print("  reporting proposed-token throughput as useful tok/s\n\n", .{});
+    try writer.print("Gate\n", .{});
+    try writer.print("  greedy token parity vs non-speculative baseline (mini)\n", .{});
+    try writer.print("  spec-bench JSON: depth, acceptance, tokens/round, committed tok/s\n", .{});
+    try writer.print("  tutorial teaches draft/verify/accept and when speculation loses\n\n", .{});
+    try writer.print("See docs/stages/S3-speculative-decoding.md\n", .{});
+    try writer.print("See docs/tutorials/25-speculative-decoding.md\n", .{});
+    try writer.print("See docs/proposals/speculative-draft-followons.md\n", .{});
+    try writer.print("See bench/results/stageS3-dev-laptop.md\n", .{});
 }
 
 fn cmdCoreMlSmoke(writer: *std.Io.Writer, path: []const u8) !void {
@@ -2416,6 +2489,147 @@ fn runPrefixBench(
     });
 
     if (!report.all_logits_match or report.savings_ratio <= 0) {
+        try writer.flush();
+        std.process.exit(1);
+    }
+}
+
+/// Stage S3: n-gram speculative vs greedy baseline A/B.
+fn runSpecBench(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    writer: *std.Io.Writer,
+    artifact_path_opt: ?[]const u8,
+    force_mini: bool,
+    proposal_depth_in: u32,
+    ngram_order_in: u32,
+    max_new_tokens_in: u32,
+    kind: zynfer.BackendKind,
+) !void {
+    const default_path = "models/qwen3-0.6b.zynfer";
+    const use_mini = force_mini or (artifact_path_opt == null and !zynfer.util.fileExists(io, default_path));
+    const depth: u32 = if (proposal_depth_in == 0) 4 else proposal_depth_in;
+    const order: u32 = if (ngram_order_in < 2) 2 else ngram_order_in;
+    const max_new: u32 = if (max_new_tokens_in == 64 and use_mini) 8 else if (max_new_tokens_in == 64) 16 else max_new_tokens_in;
+
+    try writer.print("zynfer spec-bench — speculative decoding (Stage S3)\n", .{});
+    try writer.print("==================================================\n\n", .{});
+    try writer.print("note: n-gram draft + greedy verify; committed tok/s only (not proposed).\n", .{});
+    try writer.print("      Qwen3-0.6B/4B artifacts have no MTP heads.\n\n", .{});
+
+    var art: zynfer.artifact.Artifact = undefined;
+    var arch: zynfer.qwen3.Arch = undefined;
+    var prompt_ids: []u32 = undefined;
+    var free_prompt = false;
+    defer if (free_prompt) allocator.free(prompt_ids);
+
+    if (use_mini) {
+        try writer.print("fixture: stage11-mini (in-memory)\n", .{});
+        const bytes = try zynfer.qwen_forward.buildMiniArtifact(allocator);
+        art = try zynfer.artifact.Artifact.loadOwned(allocator, bytes);
+        arch = zynfer.qwen3.stage11_mini;
+        // Repeated bigrams so n-gram draft has something to propose.
+        prompt_ids = try allocator.dupe(u32, &.{ 2, 3, 2, 3, 4, 2, 3 });
+        free_prompt = true;
+    } else {
+        const path = artifact_path_opt orelse default_path;
+        try writer.print("artifact: {s}\n", .{path});
+        art = zynfer.artifact.Artifact.loadFile(allocator, io, path) catch |err| {
+            std.debug.print("spec-bench: load failed ({s}): {s}\n", .{ path, @errorName(err) });
+            std.process.exit(2);
+        };
+        arch = try art.meta.toArch();
+        prompt_ids = try allocator.dupe(u32, &.{ 151643, 8948, 151643, 8948, 872, 151643, 8948 });
+        free_prompt = true;
+    }
+    defer art.deinit();
+
+    const max_seq = prompt_ids.len + max_new;
+    if (max_seq == 0 or max_seq > arch.max_position_embeddings) {
+        std.debug.print("spec-bench: sequence too long\n", .{});
+        std.process.exit(2);
+    }
+
+    try writer.print("backend={s} proposal_depth={d} ngram_order={d} max_new={d} prompt_tokens={d}\n\n", .{
+        kind.name(),
+        depth,
+        order,
+        max_new,
+        prompt_ids.len,
+    });
+
+    var report = zynfer.speculative.runSpecBench(
+        allocator,
+        io,
+        &art,
+        arch,
+        kind,
+        max_seq,
+        prompt_ids,
+        max_new,
+        depth,
+        order,
+    ) catch |err| {
+        std.debug.print("spec-bench: failed: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    defer report.deinit();
+
+    const s = report.speculative;
+    try writer.print("{s:<12} {s:>12} {s:>12} {s:>14} {s:>10}\n", .{
+        "mode",
+        "wall_ms",
+        "gen_tok",
+        "committed_t/s",
+        "rounds",
+    });
+    try writer.print("{s:-<12} {s:->12} {s:->12} {s:->14} {s:->10}\n", .{ "", "", "", "", "" });
+    try writer.print("{s:<12} {d:>12.3} {d:>12} {d:>14.3} {s:>10}\n", .{
+        "baseline",
+        @as(f64, @floatFromInt(report.baseline_wall_ns)) / 1e6,
+        report.baseline_generated,
+        report.baseline_tok_s,
+        "—",
+    });
+    try writer.print("{s:<12} {d:>12.3} {d:>12} {d:>14.3} {d:>10}\n", .{
+        "speculative",
+        @as(f64, @floatFromInt(s.wall_ns)) / 1e6,
+        s.generated_tokens,
+        s.committed_tok_s,
+        s.rounds,
+    });
+
+    try writer.print("\nproposal_depth={d} proposed={d} accepted_draft={d} acceptance_rate={d:.3} tokens/round={d:.3}\n", .{
+        s.proposal_depth,
+        s.proposed_tokens,
+        s.accepted_draft_tokens,
+        s.acceptance_rate,
+        s.tokens_per_round,
+    });
+    try writer.print("token_parity: {s}\n\n", .{if (report.token_parity) "PASS" else "FAIL"});
+
+    try writer.print("json\n", .{});
+    try writer.print("{{\"cmd\":\"spec-bench\",\"backend\":\"{s}\",\"mini\":{},\"proposal_depth\":{d},\"ngram_order\":{d},\"max_new\":{d},\"token_parity\":{},\"baseline\":{{\"wall_ns\":{d},\"generated\":{d},\"tok_s\":{d:.6}}},\"speculative\":{{\"wall_ns\":{d},\"generated\":{d},\"committed_tok_s\":{d:.6},\"proposed\":{d},\"accepted_draft\":{d},\"acceptance_rate\":{d:.6},\"tokens_per_round\":{d:.6},\"rounds\":{d}}}}}\n", .{
+        kind.name(),
+        use_mini,
+        depth,
+        order,
+        max_new,
+        report.token_parity,
+        report.baseline_wall_ns,
+        report.baseline_generated,
+        report.baseline_tok_s,
+        s.wall_ns,
+        s.generated_tokens,
+        s.committed_tok_s,
+        s.proposed_tokens,
+        s.accepted_draft_tokens,
+        s.acceptance_rate,
+        s.tokens_per_round,
+        s.rounds,
+    });
+
+    if (!report.token_parity) {
         try writer.flush();
         std.process.exit(1);
     }

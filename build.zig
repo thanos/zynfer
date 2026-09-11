@@ -248,6 +248,29 @@ pub fn build(b: *std.Build) void {
     const prefix_bench_step = b.step("prefix-bench", "cold vs warm prefix prefill A/B (Stage S2)");
     prefix_bench_step.dependOn(&prefix_bench_cmd.step);
 
+    const stageS3_cmd = b.addRunArtifact(exe);
+    stageS3_cmd.step.dependOn(b.getInstallStep());
+    stageS3_cmd.addArg("stageS3");
+    stageS3_cmd.expectStdOutMatch("Stage S3");
+    stageS3_cmd.expectExitCode(0);
+    const stageS3_step = b.step("stageS3", "speculative decoding Stage S3 ledger");
+    stageS3_step.dependOn(&stageS3_cmd.step);
+
+    const spec_bench_cmd = b.addRunArtifact(exe);
+    spec_bench_cmd.step.dependOn(b.getInstallStep());
+    spec_bench_cmd.addArg("spec-bench");
+    spec_bench_cmd.addArg("--mini");
+    spec_bench_cmd.addArg("--proposal-depth");
+    spec_bench_cmd.addArg("4");
+    spec_bench_cmd.addArg("--max-tokens");
+    spec_bench_cmd.addArg("8");
+    spec_bench_cmd.expectStdOutMatch("speculative decoding");
+    spec_bench_cmd.expectStdOutMatch("token_parity: PASS");
+    spec_bench_cmd.expectStdOutMatch("json");
+    spec_bench_cmd.expectExitCode(0);
+    const spec_bench_step = b.step("spec-bench", "n-gram speculative vs baseline A/B (Stage S3)");
+    spec_bench_step.dependOn(&spec_bench_cmd.step);
+
     const qwen_bench_cmd = b.addRunArtifact(exe);
     qwen_bench_cmd.step.dependOn(b.getInstallStep());
     qwen_bench_cmd.addArg("qwen-bench");
@@ -561,6 +584,24 @@ pub fn build(b: *std.Build) void {
     prefix_bench_ok.expectStdOutMatch("json");
     prefix_bench_ok.expectExitCode(0);
     integration_step.dependOn(&prefix_bench_ok.step);
+
+    const stageS3_ok = b.addRunArtifact(exe);
+    stageS3_ok.addArg("stageS3");
+    stageS3_ok.expectStdOutMatch("Stage S3");
+    stageS3_ok.expectExitCode(0);
+    integration_step.dependOn(&stageS3_ok.step);
+
+    const spec_bench_ok = b.addRunArtifact(exe);
+    spec_bench_ok.addArg("spec-bench");
+    spec_bench_ok.addArg("--mini");
+    spec_bench_ok.addArg("--proposal-depth");
+    spec_bench_ok.addArg("4");
+    spec_bench_ok.addArg("--max-tokens");
+    spec_bench_ok.addArg("8");
+    spec_bench_ok.expectStdOutMatch("token_parity: PASS");
+    spec_bench_ok.expectStdOutMatch("json");
+    spec_bench_ok.expectExitCode(0);
+    integration_step.dependOn(&spec_bench_ok.step);
 
     const coreml_smoke_ok = b.addRunArtifact(exe);
     coreml_smoke_ok.addArg("coreml-smoke");

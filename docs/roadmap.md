@@ -122,8 +122,8 @@ fabricated AMD numbers**.
 | --- | --- | --- | --- |
 | S1 | Batching and scheduling | 21 | **done** (request-level FIFO+RR) |
 | S2 | Prefix reuse / cache management | 22 | **done** (dense truncate+continue) |
-| S3 | Speculative / MTP | 23 | next |
-| S4 | HTTP server | 24 | pending |
+| S3 | Speculative / MTP | 23 | **done** (n-gram draft + verify) |
+| S4 | HTTP server | 24 | next |
 
 **S1 gate (closed):** `src/runtime/scheduler.zig` FIFO admit +
 `max_inflight` + round-robin decode over independent Sessions; greedy
@@ -136,6 +136,17 @@ Metal CB packing remains Stage M3.
 `prefill_ns` with logits match + `savings_ratio > 0`; tutorial 24.
 Paged/block KV deferred. Explicitly **not** packed continuous batching,
 speculative (S3), or HTTP (S4).
+
+**S3 gate (closed):** n-gram draft + greedy target verify; greedy token
+parity vs baseline; `spec-bench` reports proposal depth / acceptance /
+tokens/round / **committed** tok/s; tutorial 25. MTP heads absent on
+registered Qwen3 CausalLM artifacts. Explicitly **not** a separate draft
+model, tree verify, or HTTP (S4) **in this stage**.
+
+**Future (proposed, not scheduled):** stronger drafts — separate draft LM,
+MTP checkpoint, Medusa, EAGLE, layer-skip, tree verify — as optional
+**S3b** after S4. See
+[`docs/proposals/speculative-draft-followons.md`](proposals/speculative-draft-followons.md).
 
 ---
 

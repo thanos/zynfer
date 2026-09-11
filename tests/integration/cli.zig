@@ -172,6 +172,23 @@ test "prefix-bench mini cold vs warm savings" {
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "\"cmd\":\"prefix-bench\"") != null);
 }
 
+test "stageS3 prints speculative ledger" {
+    var out = try run(&.{"stageS3"});
+    defer out.deinit(std.testing.allocator);
+    try expectExited(out, 0);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "Stage S3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "n-gram") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "spec-bench") != null);
+}
+
+test "spec-bench mini greedy token parity" {
+    var out = try run(&.{ "spec-bench", "--mini", "--proposal-depth", "4", "--max-tokens", "8" });
+    defer out.deinit(std.testing.allocator);
+    try expectExited(out, 0);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "token_parity: PASS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "\"cmd\":\"spec-bench\"") != null);
+}
+
 test "stage8 prints hardening ledger" {
     var out = try run(&.{"stage8"});
     defer out.deinit(std.testing.allocator);
