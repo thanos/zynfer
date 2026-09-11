@@ -27,6 +27,7 @@ pub const sample = @import("runtime/sample.zig");
 pub const scheduler = @import("runtime/scheduler.zig");
 pub const prefix_cache = @import("runtime/prefix_cache.zig");
 pub const speculative = @import("runtime/speculative.zig");
+pub const http_server = @import("runtime/http_server.zig");
 
 pub const cpu = struct {
     pub const ops = @import("backends/cpu/ops.zig");
@@ -72,6 +73,7 @@ test {
     _ = scheduler;
     _ = prefix_cache;
     _ = speculative;
+    _ = http_server;
     _ = cpu.ops;
     _ = cpu.accelerate;
     _ = cpu.sme;

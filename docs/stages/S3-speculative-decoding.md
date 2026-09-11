@@ -34,7 +34,7 @@ ZYNFER_QWEN_METAL=int8 ./zig-out/bin/zynfer spec-bench \
 - Separate draft model / EAGLE / Medusa / layer-skip — **future proposal**, not S3
 - MTP heads (absent from registered CausalLM artifacts) — same proposal
 - Tree attention / multi-position parallel verify — same proposal
-- HTTP (S4)
+- HTTP (S4) — **done**; see `docs/stages/S4-http-server.md`
 - Reporting proposed-token throughput as useful tok/s
 
 ## Future goals (proposed)
