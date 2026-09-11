@@ -168,6 +168,19 @@ pub const Session = struct {
         if (self.metal_stack) |ms| ms.reset();
     }
 
+    /// Live KV length (tokens) after prefill/decode.
+    pub fn kvLen(self: *const Session) usize {
+        return self.blocks[0].cache.used;
+    }
+
+    /// Truncate KV to the first `n` tokens (`n <= kvLen()`). Dense policy:
+    /// capacity beyond `n` stays allocated and is ignored (Stage S2).
+    pub fn truncateTo(self: *Session, n: usize) Error!void {
+        if (n > self.kvLen()) return error.InvalidShape;
+        for (self.blocks) |*b| try b.cache.truncateTo(n);
+        if (self.metal_stack) |ms| try ms.truncateTo(n);
+    }
+
     fn syncHostKvUsed(self: *Session) void {
         if (self.metal_stack) |ms| {
             const used = ms.layers_kv[0].used;
@@ -240,8 +253,15 @@ pub const Session = struct {
     }
 
     /// Prefill `token_ids` and write logits for the **last** token into `logits_out`.
+    /// Always resets KV first (cold prefill).
     pub fn prefillLastLogits(self: *Session, token_ids: []const u32, logits_out: []f32) Error!void {
         try self.prefillLastLogitsDump(token_ids, logits_out, null, null);
+    }
+
+    /// Append-prefill without resetting KV. Requires `kvLen() + token_ids.len ≤ max_seq`.
+    /// Used for Stage S2 suffix continuation after `truncateTo(prefix_len)`.
+    pub fn prefillContinue(self: *Session, token_ids: []const u32, logits_out: []f32) Error!void {
+        try self.prefillLastLogitsInner(token_ids, logits_out, null, null, false);
     }
 
     /// Same as `prefillLastLogits`, optionally invoking `hook(ctx, name, data)` for debug dumps.
@@ -252,8 +272,26 @@ pub const Session = struct {
         hook: ?DumpHook,
         hook_ctx: ?*anyopaque,
     ) Error!void {
-        if (token_ids.len == 0 or token_ids.len > self.max_seq) return error.InvalidShape;
+        try self.prefillLastLogitsInner(token_ids, logits_out, hook, hook_ctx, true);
+    }
+
+    fn prefillLastLogitsInner(
+        self: *Session,
+        token_ids: []const u32,
+        logits_out: []f32,
+        hook: ?DumpHook,
+        hook_ctx: ?*anyopaque,
+        reset_first: bool,
+    ) Error!void {
+        if (token_ids.len == 0) return error.InvalidShape;
         if (logits_out.len != self.arch.vocab_size) return error.ShapeMismatch;
+
+        if (reset_first) {
+            if (token_ids.len > self.max_seq) return error.InvalidShape;
+            self.reset();
+        } else {
+            if (self.kvLen() + token_ids.len > self.max_seq) return error.InvalidShape;
+        }
 
         const dump = struct {
             fn call(h: ?DumpHook, ctx: ?*anyopaque, name: []const u8, data: []const f32) void {
@@ -261,7 +299,6 @@ pub const Session = struct {
             }
         }.call;
 
-        self.reset();
         const t = token_ids.len;
         const hidden: usize = @intCast(self.arch.hidden_size);
 

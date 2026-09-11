@@ -17,7 +17,7 @@ fn zynferBin() ![]const u8 {
 
 fn run(args: []const []const u8) !zynfer.util.CommandOutput {
     const bin = try zynferBin();
-    var argv_buf: [10][]const u8 = undefined;
+    var argv_buf: [12][]const u8 = undefined;
     if (args.len + 1 > argv_buf.len) return error.SkipZigTest;
     argv_buf[0] = bin;
     for (args, 0..) |arg, i| argv_buf[i + 1] = arg;
@@ -153,6 +153,23 @@ test "batch-bench mini serial vs scheduled token parity" {
     try expectExited(out, 0);
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "token_parity: PASS") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "\"cmd\":\"batch-bench\"") != null);
+}
+
+test "stageS2 prints prefix reuse ledger" {
+    var out = try run(&.{"stageS2"});
+    defer out.deinit(std.testing.allocator);
+    try expectExited(out, 0);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "Stage S2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "truncateTo") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "prefix-bench") != null);
+}
+
+test "prefix-bench mini cold vs warm savings" {
+    var out = try run(&.{ "prefix-bench", "--mini", "--prefix-len", "8", "--suffix-len", "2", "--trials", "4" });
+    defer out.deinit(std.testing.allocator);
+    try expectExited(out, 0);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "logits_match: PASS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "\"cmd\":\"prefix-bench\"") != null);
 }
 
 test "stage8 prints hardening ledger" {

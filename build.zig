@@ -223,6 +223,31 @@ pub fn build(b: *std.Build) void {
     const batch_bench_step = b.step("batch-bench", "multi-request scheduling A/B (Stage S1)");
     batch_bench_step.dependOn(&batch_bench_cmd.step);
 
+    const stageS2_cmd = b.addRunArtifact(exe);
+    stageS2_cmd.step.dependOn(b.getInstallStep());
+    stageS2_cmd.addArg("stageS2");
+    stageS2_cmd.expectStdOutMatch("Stage S2");
+    stageS2_cmd.expectExitCode(0);
+    const stageS2_step = b.step("stageS2", "prefix reuse Stage S2 ledger");
+    stageS2_step.dependOn(&stageS2_cmd.step);
+
+    const prefix_bench_cmd = b.addRunArtifact(exe);
+    prefix_bench_cmd.step.dependOn(b.getInstallStep());
+    prefix_bench_cmd.addArg("prefix-bench");
+    prefix_bench_cmd.addArg("--mini");
+    prefix_bench_cmd.addArg("--prefix-len");
+    prefix_bench_cmd.addArg("8");
+    prefix_bench_cmd.addArg("--suffix-len");
+    prefix_bench_cmd.addArg("2");
+    prefix_bench_cmd.addArg("--trials");
+    prefix_bench_cmd.addArg("4");
+    prefix_bench_cmd.expectStdOutMatch("prefix reuse");
+    prefix_bench_cmd.expectStdOutMatch("logits_match: PASS");
+    prefix_bench_cmd.expectStdOutMatch("json");
+    prefix_bench_cmd.expectExitCode(0);
+    const prefix_bench_step = b.step("prefix-bench", "cold vs warm prefix prefill A/B (Stage S2)");
+    prefix_bench_step.dependOn(&prefix_bench_cmd.step);
+
     const qwen_bench_cmd = b.addRunArtifact(exe);
     qwen_bench_cmd.step.dependOn(b.getInstallStep());
     qwen_bench_cmd.addArg("qwen-bench");
@@ -516,6 +541,26 @@ pub fn build(b: *std.Build) void {
     batch_bench_ok.expectStdOutMatch("json");
     batch_bench_ok.expectExitCode(0);
     integration_step.dependOn(&batch_bench_ok.step);
+
+    const stageS2_ok = b.addRunArtifact(exe);
+    stageS2_ok.addArg("stageS2");
+    stageS2_ok.expectStdOutMatch("Stage S2");
+    stageS2_ok.expectExitCode(0);
+    integration_step.dependOn(&stageS2_ok.step);
+
+    const prefix_bench_ok = b.addRunArtifact(exe);
+    prefix_bench_ok.addArg("prefix-bench");
+    prefix_bench_ok.addArg("--mini");
+    prefix_bench_ok.addArg("--prefix-len");
+    prefix_bench_ok.addArg("8");
+    prefix_bench_ok.addArg("--suffix-len");
+    prefix_bench_ok.addArg("2");
+    prefix_bench_ok.addArg("--trials");
+    prefix_bench_ok.addArg("4");
+    prefix_bench_ok.expectStdOutMatch("logits_match: PASS");
+    prefix_bench_ok.expectStdOutMatch("json");
+    prefix_bench_ok.expectExitCode(0);
+    integration_step.dependOn(&prefix_bench_ok.step);
 
     const coreml_smoke_ok = b.addRunArtifact(exe);
     coreml_smoke_ok.addArg("coreml-smoke");

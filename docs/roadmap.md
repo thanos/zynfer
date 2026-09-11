@@ -121,8 +121,8 @@ fabricated AMD numbers**.
 | Stage | Title | Old # | Status |
 | --- | --- | --- | --- |
 | S1 | Batching and scheduling | 21 | **done** (request-level FIFO+RR) |
-| S2 | Prefix reuse / cache management | 22 | next |
-| S3 | Speculative / MTP | 23 | pending |
+| S2 | Prefix reuse / cache management | 22 | **done** (dense truncate+continue) |
+| S3 | Speculative / MTP | 23 | next |
 | S4 | HTTP server | 24 | pending |
 
 **S1 gate (closed):** `src/runtime/scheduler.zig` FIFO admit +
@@ -130,6 +130,12 @@ fabricated AMD numbers**.
 token parity vs serial; `zynfer batch-bench` + tutorial 23. Explicitly
 **not** packed `n_seq` Metal forward, prefix KV (S2), or HTTP (S4).
 Metal CB packing remains Stage M3.
+
+**S2 gate (closed):** `truncateTo` + `prefillContinue` on dense KV;
+`PrefixCache` exact identity / LRU; `prefix-bench` cold vs warm
+`prefill_ns` with logits match + `savings_ratio > 0`; tutorial 24.
+Paged/block KV deferred. Explicitly **not** packed continuous batching,
+speculative (S3), or HTTP (S4).
 
 ---
 

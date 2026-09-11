@@ -419,6 +419,11 @@ const LayerKv = struct {
     fn reset(self: *LayerKv) void {
         self.used = 0;
     }
+
+    fn truncateTo(self: *LayerKv, n: usize) !void {
+        if (n > self.used) return error.InvalidShape;
+        self.used = n;
+    }
 };
 
 const Scratch = struct {
@@ -695,6 +700,11 @@ pub const MetalStack = struct {
 
     pub fn reset(self: *MetalStack) void {
         for (self.layers_kv) |*kv| kv.reset();
+    }
+
+    /// Shrink live KV length to `n` on every layer (`n <= used`).
+    pub fn truncateTo(self: *MetalStack, n: usize) !void {
+        for (self.layers_kv) |*kv| try kv.truncateTo(n);
     }
 
     pub fn kvBytesCapacity(self: *const MetalStack) u64 {

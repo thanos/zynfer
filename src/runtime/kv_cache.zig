@@ -74,6 +74,13 @@ pub const KvCache = struct {
         self.used = 0;
     }
 
+    /// Shrink the live prefix to `n` tokens (`n <= used`). Storage beyond `n` is
+    /// left in place and ignored — dense contiguous policy (Stage S2).
+    pub fn truncateTo(self: *KvCache, n: usize) TensorError!void {
+        if (n > self.used) return error.InvalidShape;
+        self.used = n;
+    }
+
     pub fn remaining(self: KvCache) usize {
         return self.max_seq - self.used;
     }

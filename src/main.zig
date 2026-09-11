@@ -25,6 +25,7 @@ const usage =
     \\  zynfer stageM7      ANE / Core ML Qwen-scale Stage M7 ledger
     \\  zynfer stageM8      Apple capstone: Qwen3-4B + benchmark matrix
     \\  zynfer stageS1      Batching / scheduling Stage S1 ledger
+    \\  zynfer stageS2      Prefix reuse / cache Stage S2 ledger
     \\  zynfer coreml-smoke [PATH]  Load toy Core ML .mlpackage + one predict (M7 polish)
     \\  zynfer mem-report   weights / KV / scratch / peak RSS (Stage M6)
     \\  zynfer inspect PATH Validate and print a .zynfer artifact
@@ -36,6 +37,7 @@ const usage =
     \\  zynfer qwen-bench [ARTIFACT] [--mini] [--prompt TEXT] [--max-tokens N]
     \\  zynfer qwen-profile [ARTIFACT] [--mini] [--prompt TEXT] [--backend apple|cpu]
     \\  zynfer batch-bench [ARTIFACT] [--mini] [--batch-size N] [--max-inflight N] [--max-tokens N]
+    \\  zynfer prefix-bench [ARTIFACT] [--mini] [--prefix-len N] [--suffix-len N] [--trials N]
     \\  zynfer setup [--model 0.6b|4b] [--quantize] [--skip-golden] [--skip-pip]
     \\  zynfer backends     List selectable backends
     \\  zynfer ops-bench    CPU vs Apple op microbenchmarks
@@ -77,6 +79,9 @@ pub fn main(init: std.process.Init) !void {
     var max_tokens: u32 = 64;
     var batch_size: u32 = 2;
     var max_inflight: u32 = 2;
+    var prefix_len: u32 = 0;
+    var suffix_len: u32 = 0;
+    var trials: u32 = 4;
     var temperature: f32 = 0;
     var top_k: u32 = 0;
     var top_p: f32 = 1.0;
@@ -187,6 +192,48 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.startsWith(u8, arg, "--max-inflight=")) {
             max_inflight = std.fmt.parseInt(u32, arg["--max-inflight=".len..], 10) catch {
                 std.debug.print("invalid --max-inflight\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.eql(u8, arg, "--prefix-len")) {
+            const v = args_it.next() orelse {
+                std.debug.print("missing value for --prefix-len\n", .{});
+                std.process.exit(2);
+            };
+            prefix_len = std.fmt.parseInt(u32, v, 10) catch {
+                std.debug.print("invalid --prefix-len\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.startsWith(u8, arg, "--prefix-len=")) {
+            prefix_len = std.fmt.parseInt(u32, arg["--prefix-len=".len..], 10) catch {
+                std.debug.print("invalid --prefix-len\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.eql(u8, arg, "--suffix-len")) {
+            const v = args_it.next() orelse {
+                std.debug.print("missing value for --suffix-len\n", .{});
+                std.process.exit(2);
+            };
+            suffix_len = std.fmt.parseInt(u32, v, 10) catch {
+                std.debug.print("invalid --suffix-len\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.startsWith(u8, arg, "--suffix-len=")) {
+            suffix_len = std.fmt.parseInt(u32, arg["--suffix-len=".len..], 10) catch {
+                std.debug.print("invalid --suffix-len\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.eql(u8, arg, "--trials")) {
+            const v = args_it.next() orelse {
+                std.debug.print("missing value for --trials\n", .{});
+                std.process.exit(2);
+            };
+            trials = std.fmt.parseInt(u32, v, 10) catch {
+                std.debug.print("invalid --trials\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.startsWith(u8, arg, "--trials=")) {
+            trials = std.fmt.parseInt(u32, arg["--trials=".len..], 10) catch {
+                std.debug.print("invalid --trials\n", .{});
                 std.process.exit(2);
             };
         } else if (std.mem.eql(u8, arg, "--temperature") or std.mem.eql(u8, arg, "--temp")) {
@@ -343,6 +390,8 @@ pub fn main(init: std.process.Init) !void {
         try printStageM8(writer);
     } else if (std.mem.eql(u8, command, "stageS1") or std.mem.eql(u8, command, "stages1")) {
         try printStageS1(writer);
+    } else if (std.mem.eql(u8, command, "stageS2") or std.mem.eql(u8, command, "stages2")) {
+        try printStageS2(writer);
     } else if (std.mem.eql(u8, command, "coreml-smoke") or std.mem.eql(u8, command, "coremlsmoke")) {
         const path = if (n_pos >= 1) positionals[0] else "tools/fixtures/coreml_toy.mlpackage";
         try cmdCoreMlSmoke(writer, path);
@@ -444,6 +493,18 @@ pub fn main(init: std.process.Init) !void {
             max_inflight,
             max_tokens,
             seed,
+            try resolveKind(forced_backend),
+        );
+    } else if (std.mem.eql(u8, command, "prefix-bench")) {
+        try runPrefixBench(
+            allocator,
+            io,
+            writer,
+            if (n_pos >= 1) positionals[0] else null,
+            artifact_mini,
+            prefix_len,
+            suffix_len,
+            trials,
             try resolveKind(forced_backend),
         );
     } else if (std.mem.eql(u8, command, "chat")) {
@@ -998,6 +1059,30 @@ fn printStageS1(writer: *std.Io.Writer) !void {
     try writer.print("See docs/stages/S1-batching-and-scheduling.md\n", .{});
     try writer.print("See docs/tutorials/23-batching-and-scheduling.md\n", .{});
     try writer.print("See bench/results/stageS1-dev-laptop.md\n", .{});
+}
+
+fn printStageS2(writer: *std.Io.Writer) !void {
+    try writer.print("zynfer Stage S2 — prefix reuse / cache management\n", .{});
+    try writer.print("================================================\n\n", .{});
+    try writer.print("Done (dense contiguous)\n", .{});
+    try writer.print("  identity:         exact token-id prefix registry (PrefixCache)\n", .{});
+    try writer.print("  lookup:           longest registered exact prefix of a prompt\n", .{});
+    try writer.print("  eviction:         LRU when max_entries exceeded\n", .{});
+    try writer.print("  KV policy:        truncateTo(n) + prefillContinue(suffix)\n", .{});
+    try writer.print("  ownership:        same Session retains dense KV; no paged blocks yet\n", .{});
+    try writer.print("  CLI:              prefix-bench [--mini] [--prefix-len N] [--suffix-len N]\n\n", .{});
+    try writer.print("Not Stage S2 (explicit non-goals)\n", .{});
+    try writer.print("  paged / block-allocator KV (teach contiguous first)\n", .{});
+    try writer.print("  packed n_seq Metal continuous batching\n", .{});
+    try writer.print("  speculative / MTP (S3)\n", .{});
+    try writer.print("  HTTP server (S4)\n\n", .{});
+    try writer.print("Gate\n", .{});
+    try writer.print("  warm suffix prefill logits match cold full prefill (mini)\n", .{});
+    try writer.print("  prefix-bench: warm prefill_ns << cold; savings_ratio > 0 + JSON\n", .{});
+    try writer.print("  tutorial covers identity / truncate / fragmentation vs paged\n\n", .{});
+    try writer.print("See docs/stages/S2-prefix-reuse.md\n", .{});
+    try writer.print("See docs/tutorials/24-prefix-reuse.md\n", .{});
+    try writer.print("See bench/results/stageS2-dev-laptop.md\n", .{});
 }
 
 fn cmdCoreMlSmoke(writer: *std.Io.Writer, path: []const u8) !void {
@@ -2187,6 +2272,150 @@ fn runBatchBench(
     try writer.print("]}}\n", .{});
 
     if (!parity_ok) {
+        try writer.flush();
+        std.process.exit(1);
+    }
+}
+
+/// Stage S2: cold full prefill vs warm truncate+continue on a shared prefix.
+fn runPrefixBench(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    writer: *std.Io.Writer,
+    artifact_path_opt: ?[]const u8,
+    force_mini: bool,
+    prefix_len_in: u32,
+    suffix_len_in: u32,
+    trials_in: u32,
+    kind: zynfer.BackendKind,
+) !void {
+    const default_path = "models/qwen3-0.6b.zynfer";
+    const use_mini = force_mini or (artifact_path_opt == null and !zynfer.util.fileExists(io, default_path));
+    const n_trials: usize = if (trials_in == 0) 4 else trials_in;
+    const pref_len: usize = if (prefix_len_in != 0) prefix_len_in else if (use_mini) 8 else 64;
+    const suf_len: usize = if (suffix_len_in != 0) suffix_len_in else if (use_mini) 2 else 8;
+
+    try writer.print("zynfer prefix-bench — prefix reuse (Stage S2)\n", .{});
+    try writer.print("=============================================\n\n", .{});
+    try writer.print("note: dense truncateTo + prefillContinue; not paged KV / packed n_seq.\n\n", .{});
+
+    var art: zynfer.artifact.Artifact = undefined;
+    var arch: zynfer.qwen3.Arch = undefined;
+    if (use_mini) {
+        try writer.print("fixture: stage11-mini (in-memory)\n", .{});
+        const bytes = try zynfer.qwen_forward.buildMiniArtifact(allocator);
+        art = try zynfer.artifact.Artifact.loadOwned(allocator, bytes);
+        arch = zynfer.qwen3.stage11_mini;
+    } else {
+        const path = artifact_path_opt orelse default_path;
+        try writer.print("artifact: {s}\n", .{path});
+        art = zynfer.artifact.Artifact.loadFile(allocator, io, path) catch |err| {
+            std.debug.print("prefix-bench: load failed ({s}): {s}\n", .{ path, @errorName(err) });
+            std.process.exit(2);
+        };
+        arch = try art.meta.toArch();
+    }
+    defer art.deinit();
+
+    if (pref_len == 0 or suf_len == 0 or n_trials == 0) {
+        std.debug.print("prefix-bench: --prefix-len/--suffix-len/--trials must be >= 1\n", .{});
+        std.process.exit(2);
+    }
+
+    const max_seq = pref_len + suf_len;
+    if (max_seq > arch.max_position_embeddings) {
+        std.debug.print("prefix-bench: sequence too long for arch\n", .{});
+        std.process.exit(2);
+    }
+
+    const prefix = try allocator.alloc(u32, pref_len);
+    defer allocator.free(prefix);
+    // Stable ids in vocab range (mini vocab is tiny — stay in 2..vocab-1).
+    const vocab_u: u32 = @intCast(arch.vocab_size);
+    var pi: usize = 0;
+    while (pi < pref_len) : (pi += 1) {
+        prefix[pi] = 2 + @as(u32, @intCast(pi % @max(@as(usize, 1), @as(usize, vocab_u) -| 3)));
+    }
+
+    var suffix_store = try allocator.alloc(u32, n_trials * suf_len);
+    defer allocator.free(suffix_store);
+    const suffixes = try allocator.alloc([]const u32, n_trials);
+    defer allocator.free(suffixes);
+    var ti: usize = 0;
+    while (ti < n_trials) : (ti += 1) {
+        const slice = suffix_store[ti * suf_len ..][0..suf_len];
+        var si: usize = 0;
+        while (si < suf_len) : (si += 1) {
+            slice[si] = 2 + @as(u32, @intCast((ti * 3 + si + 1) % @max(@as(usize, 1), @as(usize, vocab_u) -| 3)));
+        }
+        suffixes[ti] = slice;
+    }
+
+    // Register identity in PrefixCache (lookup smoke for the ledger narrative).
+    var cache = zynfer.prefix_cache.PrefixCache.init(allocator, 4);
+    defer cache.deinit();
+    try cache.insert(prefix);
+    const looked = cache.lookupLongest(prefix) orelse {
+        std.debug.print("prefix-bench: PrefixCache lookup failed\n", .{});
+        std.process.exit(1);
+    };
+
+    const atol: f32 = if (use_mini) 1e-4 else 3e-3;
+    var report = zynfer.prefix_cache.runColdWarmPrefill(
+        allocator,
+        io,
+        &art,
+        arch,
+        kind,
+        max_seq,
+        prefix,
+        suffixes,
+        atol,
+    ) catch |err| {
+        std.debug.print("prefix-bench: failed: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    defer report.deinit();
+
+    try writer.print("backend={s} prefix_len={d} suffix_len={d} trials={d} cache_hit_len={d}\n\n", .{
+        kind.name(),
+        pref_len,
+        suf_len,
+        n_trials,
+        looked.prefix_len,
+    });
+
+    try writer.print("{s:<8} {s:>14} {s:>14} {s:>12}\n", .{ "mode", "prefill_ms", "tokens", "ms/tok" });
+    try writer.print("{s:-<8} {s:->14} {s:->14} {s:->12}\n", .{ "", "", "", "" });
+
+    const cold_tok = pref_len + suf_len;
+    const cold_ms = @as(f64, @floatFromInt(report.cold_prefill_ns)) / 1e6;
+    const warm_ms = @as(f64, @floatFromInt(report.warm_prefill_ns)) / 1e6;
+    const prefix_ms = @as(f64, @floatFromInt(report.warm_prefix_ns)) / 1e6;
+    const cold_ms_tok = cold_ms / @as(f64, @floatFromInt(cold_tok * n_trials));
+    const warm_ms_tok = warm_ms / @as(f64, @floatFromInt(suf_len * n_trials));
+
+    try writer.print("{s:<8} {d:>14.3} {d:>14} {d:>12.4}\n", .{ "cold", cold_ms, cold_tok * n_trials, cold_ms_tok });
+    try writer.print("{s:<8} {d:>14.3} {d:>14} {d:>12.4}\n", .{ "warm", warm_ms, suf_len * n_trials, warm_ms_tok });
+    try writer.print("{s:<8} {d:>14.3} {d:>14} {s:>12}\n", .{ "prefix*", prefix_ms, pref_len, "(once)" });
+    try writer.print("\nsavings_ratio={d:.3}  (1 - warm/cold trial prefill; excludes one-time prefix)\n", .{report.savings_ratio});
+    try writer.print("logits_match: {s}\n\n", .{if (report.all_logits_match) "PASS" else "FAIL"});
+
+    try writer.print("json\n", .{});
+    try writer.print("{{\"cmd\":\"prefix-bench\",\"backend\":\"{s}\",\"mini\":{},\"prefix_len\":{d},\"suffix_len\":{d},\"trials\":{d},\"cold_prefill_ns\":{d},\"warm_prefill_ns\":{d},\"warm_prefix_ns\":{d},\"savings_ratio\":{d:.6},\"logits_match\":{}}}\n", .{
+        kind.name(),
+        use_mini,
+        pref_len,
+        suf_len,
+        n_trials,
+        report.cold_prefill_ns,
+        report.warm_prefill_ns,
+        report.warm_prefix_ns,
+        report.savings_ratio,
+        report.all_logits_match,
+    });
+
+    if (!report.all_logits_match or report.savings_ratio <= 0) {
         try writer.flush();
         std.process.exit(1);
     }
